@@ -662,4 +662,278 @@ $BookCopyWith<$Res> get book {
 }
 }
 
+/// @nodoc
+mixin _$BookChapter {
+
+/// 章序号（0 基）。
+ int get idx;/// 章标题。
+ String get title;/// zip 内文档路径（epub.js display 直接可用）。
+ String get href;/// 目录层级（0 顶）。
+ int get level;
+/// Create a copy of BookChapter
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$BookChapterCopyWith<BookChapter> get copyWith => _$BookChapterCopyWithImpl<BookChapter>(this as BookChapter, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is BookChapter&&(identical(other.idx, idx) || other.idx == idx)&&(identical(other.title, title) || other.title == title)&&(identical(other.href, href) || other.href == href)&&(identical(other.level, level) || other.level == level));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,idx,title,href,level);
+
+@override
+String toString() {
+  return 'BookChapter(idx: $idx, title: $title, href: $href, level: $level)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $BookChapterCopyWith<$Res>  {
+  factory $BookChapterCopyWith(BookChapter value, $Res Function(BookChapter) _then) = _$BookChapterCopyWithImpl;
+@useResult
+$Res call({
+ int idx, String title, String href, int level
+});
+
+
+
+
+}
+/// @nodoc
+class _$BookChapterCopyWithImpl<$Res>
+    implements $BookChapterCopyWith<$Res> {
+  _$BookChapterCopyWithImpl(this._self, this._then);
+
+  final BookChapter _self;
+  final $Res Function(BookChapter) _then;
+
+/// Create a copy of BookChapter
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') @override $Res call({Object? idx = null,Object? title = null,Object? href = null,Object? level = null,}) {
+  return _then(_self.copyWith(
+idx: null == idx ? _self.idx : idx // ignore: cast_nullable_to_non_nullable
+as int,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
+as String,href: null == href ? _self.href : href // ignore: cast_nullable_to_non_nullable
+as String,level: null == level ? _self.level : level // ignore: cast_nullable_to_non_nullable
+as int,
+  ));
+}
+
+}
+
+
+/// Adds pattern-matching-related methods to [BookChapter].
+extension BookChapterPatterns on BookChapter {
+/// A variant of `map` that fallback to returning `orElse`.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case _:
+///     return orElse();
+/// }
+/// ```
+
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>(TResult Function( _BookChapter value)?  $default,{required TResult orElse(),}){
+final _that = this;
+switch (_that) {
+case _BookChapter() when $default != null:
+return $default(_that);case _:
+  return orElse();
+
+}
+}
+/// A `switch`-like method, using callbacks.
+///
+/// Callbacks receives the raw object, upcasted.
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case final Subclass2 value:
+///     return ...;
+/// }
+/// ```
+
+@optionalTypeArgs TResult map<TResult extends Object?>(TResult Function( _BookChapter value)  $default,){
+final _that = this;
+switch (_that) {
+case _BookChapter():
+return $default(_that);case _:
+  throw StateError('Unexpected subclass');
+
+}
+}
+/// A variant of `map` that fallback to returning `null`.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case _:
+///     return null;
+/// }
+/// ```
+
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>(TResult? Function( _BookChapter value)?  $default,){
+final _that = this;
+switch (_that) {
+case _BookChapter() when $default != null:
+return $default(_that);case _:
+  return null;
+
+}
+}
+/// A variant of `when` that fallback to an `orElse` callback.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case _:
+///     return orElse();
+/// }
+/// ```
+
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int idx,  String title,  String href,  int level)?  $default,{required TResult orElse(),}) {final _that = this;
+switch (_that) {
+case _BookChapter() when $default != null:
+return $default(_that.idx,_that.title,_that.href,_that.level);case _:
+  return orElse();
+
+}
+}
+/// A `switch`-like method, using callbacks.
+///
+/// As opposed to `map`, this offers destructuring.
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case Subclass2(:final field2):
+///     return ...;
+/// }
+/// ```
+
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int idx,  String title,  String href,  int level)  $default,) {final _that = this;
+switch (_that) {
+case _BookChapter():
+return $default(_that.idx,_that.title,_that.href,_that.level);case _:
+  throw StateError('Unexpected subclass');
+
+}
+}
+/// A variant of `when` that fallback to returning `null`
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case _:
+///     return null;
+/// }
+/// ```
+
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int idx,  String title,  String href,  int level)?  $default,) {final _that = this;
+switch (_that) {
+case _BookChapter() when $default != null:
+return $default(_that.idx,_that.title,_that.href,_that.level);case _:
+  return null;
+
+}
+}
+
+}
+
+/// @nodoc
+
+
+class _BookChapter implements BookChapter {
+  const _BookChapter({required this.idx, required this.title, required this.href, this.level = 0});
+  
+
+/// 章序号（0 基）。
+@override final  int idx;
+/// 章标题。
+@override final  String title;
+/// zip 内文档路径（epub.js display 直接可用）。
+@override final  String href;
+/// 目录层级（0 顶）。
+@override@JsonKey() final  int level;
+
+/// Create a copy of BookChapter
+/// with the given fields replaced by the non-null parameter values.
+@override @JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+_$BookChapterCopyWith<_BookChapter> get copyWith => __$BookChapterCopyWithImpl<_BookChapter>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BookChapter&&(identical(other.idx, idx) || other.idx == idx)&&(identical(other.title, title) || other.title == title)&&(identical(other.href, href) || other.href == href)&&(identical(other.level, level) || other.level == level));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,idx,title,href,level);
+
+@override
+String toString() {
+  return 'BookChapter(idx: $idx, title: $title, href: $href, level: $level)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class _$BookChapterCopyWith<$Res> implements $BookChapterCopyWith<$Res> {
+  factory _$BookChapterCopyWith(_BookChapter value, $Res Function(_BookChapter) _then) = __$BookChapterCopyWithImpl;
+@override @useResult
+$Res call({
+ int idx, String title, String href, int level
+});
+
+
+
+
+}
+/// @nodoc
+class __$BookChapterCopyWithImpl<$Res>
+    implements _$BookChapterCopyWith<$Res> {
+  __$BookChapterCopyWithImpl(this._self, this._then);
+
+  final _BookChapter _self;
+  final $Res Function(_BookChapter) _then;
+
+/// Create a copy of BookChapter
+/// with the given fields replaced by the non-null parameter values.
+@override @pragma('vm:prefer-inline') $Res call({Object? idx = null,Object? title = null,Object? href = null,Object? level = null,}) {
+  return _then(_BookChapter(
+idx: null == idx ? _self.idx : idx // ignore: cast_nullable_to_non_nullable
+as int,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
+as String,href: null == href ? _self.href : href // ignore: cast_nullable_to_non_nullable
+as String,level: null == level ? _self.level : level // ignore: cast_nullable_to_non_nullable
+as int,
+  ));
+}
+
+
+}
+
 // dart format on

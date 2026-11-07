@@ -16,7 +16,9 @@ import 'package:uuid/uuid.dart';
 import '../core/db/app_database.dart';
 import '../core/hlc.dart';
 import '../data/repositories/book_repository_impl.dart';
+import '../data/repositories/progress_repository_impl.dart';
 import '../domain/repositories/book_repository.dart';
+import '../domain/repositories/progress_repository.dart';
 
 part 'providers.g.dart';
 
@@ -59,5 +61,15 @@ Future<BookRepository> bookRepository(Ref ref) async {
     hlcClock: await ref.watch(hlcClockProvider.future),
     deviceId: await ref.watch(deviceIdProvider.future),
     libraryDir: await ref.watch(libraryDirectoryProvider.future),
+  );
+}
+
+/// 阅读进度仓储单例。
+@Riverpod(keepAlive: true)
+Future<ProgressRepository> progressRepository(Ref ref) async {
+  return ProgressRepositoryImpl(
+    db: ref.watch(appDatabaseProvider),
+    hlcClock: await ref.watch(hlcClockProvider.future),
+    deviceId: await ref.watch(deviceIdProvider.future),
   );
 }

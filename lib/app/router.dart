@@ -16,6 +16,9 @@ const String kShelfPath = '/';
 /// 阅读器路由路径模板。
 const String kReaderPath = '/reader/:bookId';
 
+/// 深链 `reader://book/{id}` 映射的路径。
+const String kDeepLinkBookPath = '/book/:bookId';
+
 /// 生成阅读器具体路径。
 String readerPath(String bookId) => '/reader/$bookId';
 
@@ -30,6 +33,15 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: kReaderPath,
+        builder: (context, state) {
+          final bookId = state.pathParameters['bookId'] ?? '';
+          return ReaderPage(bookId: bookId);
+        },
+      ),
+      // 深链别名：reader://book/{id} 经 Android intent-filter 进入后
+      // 由 Flutter 深链机制转成 /book/{id}
+      GoRoute(
+        path: kDeepLinkBookPath,
         builder: (context, state) {
           final bookId = state.pathParameters['bookId'] ?? '';
           return ReaderPage(bookId: bookId);

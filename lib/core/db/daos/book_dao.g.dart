@@ -6,4 +6,5 @@ part of 'book_dao.dart';
 mixin _$BookDaoMixin on DatabaseAccessor<AppDatabase> {
   $BooksTable get books => attachedDatabase.books;
   $ReadingProgressTable get readingProgress => attachedDatabase.readingProgress;
+  $ChaptersTable get chapters => attachedDatabase.chapters;
 }

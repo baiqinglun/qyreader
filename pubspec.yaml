@@ -29,6 +29,7 @@ dependencies:
   xml: ^6.6.1
   intl: ^0.20.2
   shared_preferences: ^2.5.3
+  flutter_inappwebview: ^6.1.5
 
 dev_dependencies:
   flutter_test:
@@ -42,3 +43,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/reader/

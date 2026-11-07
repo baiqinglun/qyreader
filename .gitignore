@@ -49,3 +49,6 @@ app.*.map.json
 
 # APK 产物目录（每轮对话构建放入）
 /qyreader/
+
+# 本地构建工具（nuget.exe，勿入库）
+/tools/

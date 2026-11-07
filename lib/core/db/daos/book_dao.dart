@@ -24,7 +24,7 @@ class ShelfEntry {
 }
 
 /// 书籍相关查询。
-@DriftAccessor(tables: [Books, ReadingProgress])
+@DriftAccessor(tables: [Books, ReadingProgress, Chapters])
 class BookDao extends DatabaseAccessor<AppDatabase> with _$BookDaoMixin {
   /// 构造。
   BookDao(super.db);
@@ -60,6 +60,12 @@ class BookDao extends DatabaseAccessor<AppDatabase> with _$BookDaoMixin {
   /// 按 id 查书。
   Future<BookRow?> getById(String id) =>
       (select(books)..where((b) => b.id.equals(id))).getSingleOrNull();
+
+  /// 查询章节目录（idx 升序）。
+  Future<List<ChapterRow>> getChapters(String bookId) =>
+      (select(chapters)..where((c) => c.bookId.equals(bookId)))
+          .get()
+          .then((rows) => rows..sort((a, b) => a.idx - b.idx));
 
   /// 更新最近打开时间。
   Future<void> touchOpened(String id, int at) =>

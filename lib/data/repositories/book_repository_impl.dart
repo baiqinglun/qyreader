@@ -156,6 +156,25 @@ class BookRepositoryImpl implements BookRepository {
   }
 
   @override
+  Future<Book?> getById(String bookId) async {
+    final row = await _db.bookDao.getById(bookId);
+    return row == null ? null : _mapBook(row);
+  }
+
+  @override
+  Future<List<BookChapter>> getChapters(String bookId) async {
+    final rows = await _db.bookDao.getChapters(bookId);
+    return rows
+        .map((c) => BookChapter(
+              idx: c.idx,
+              title: c.title ?? '第 ${c.idx + 1} 节',
+              href: c.href,
+              level: c.level,
+            ))
+        .toList();
+  }
+
+  @override
   Future<void> touchOpened(String bookId) async {
     final row = await _db.bookDao.getById(bookId);
     if (row == null) return;

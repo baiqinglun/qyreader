@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<!--
+  QYReader 正文渲染页（自托管 epub.js）。
+
+  桥协议（JSON，经 flutter_inappwebview callHandler 'readerEvent' 上行）：
+    JS → Dart: ready / locationsReady / relocated / error / tap
+    Dart → JS（evaluateJavascript 全局函数）:
+      loadBook(base64) → initReader(styleJson, locatorJson|null)
+        → applyStyle(styleJson) / gotoLocator(locatorJson) / gotoHref(href)
+        → gotoPercent(p) / nextPage() / prevPage() / syncNext(locatorJson)
+
+  注意：
+  - 文本选择在 M2 标注功能接入前禁用（user-select none）。
+  - 翻页手势由原生接管，本页不做滑动翻页，只接受 nextPage/prevPage 指令。
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <script src="jszip.min.js"></script>
+  <script src="epub.min.js"></script>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: transparent;
+      overflow: hidden;
+      -webkit-user-select: none; user-select: none;
+    }
+    #viewer { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+<div id="viewer"></div>
+<script>
+  'use strict';
+  var book = null;
+  var rendition = null;
+  var currentStyle = null;
+  var locationsTotal = 0;
+
+  function post(msg) {
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      window.flutter_inappwebview.callHandler('readerEvent', JSON.stringify(msg));
+    }
+  }
+
+  function postError(code, message) {
+    post({ type: 'error', code: code, message: String(message) });
+  }
+
+  function decodeBase64(b64) {
+    var raw = atob(b64);
+    var arr = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr.buffer;
+  }
+
+  /// 从 relocated 事件构造 Locator JSON（CFI 主定位 + 章索引兜底 + percent 展示）。
+  function makeLocator(location) {
+    var loc = { v: 1 };
+    try {
+      loc.cfi = location.start.cfi;
+      loc.href = location.start.href;
+      var spineItem = book.spine.get(location.start.href);
+      if (spineItem) loc.chapterIndex = spineItem.index;
+      if (book.locations && locationsTotal > 0) {
+        var p = book.locations.percentageFromCfi(location.start.cfi);
+        if (p !== null && !isNaN(p)) loc.percent = p;
+      }
+    } catch (e) {
+      postError('locator.build', e);
+    }
+    return loc;
+  }
+
+  function themeCss(style) {
+    var t = style.theme;
+    return {
+      'html': { 'background': t.background },
+      'body': {
+        'background': t.background,
+        'color': t.foreground,
+        'padding': '0 ' + style.margin + 'px !important',
+        'line-height': String(style.lineHeight) + ' !important',
+        'font-size': style.fontSize + 'px !important'
+      },
+      'p': {
+        'line-height': String(style.lineHeight) + ' !important'
+      },
+      'a': { 'color': t.accent },
+      '::selection': { 'background': t.accent }
+    };
+  }
+
+  function applyStyleToRendition(style) {
+    currentStyle = style;
+    if (!rendition) return;
+    try {
+      rendition.themes.register('reader', themeCss(style));
+      rendition.themes.select('reader');
+    } catch (e) {
+      postError('style.apply', e);
+    }
+  }
+
+  /// Dart → JS：载入书籍并渲染。
+  async function loadBook(b64) {
+    try {
+      book = ePub(decodeBase64(b64));
+      rendition = book.renderTo('viewer', {
+        width: '100%',
+        height: '100%',
+        flow: 'paginated',
+        spread: 'none',
+        // FIXME: 需核对文档——minSpreadWidth 大值强制单页排版，窄屏本就单页。
+        minSpreadWidth: 100000,
+        allowScriptedContent: false
+      });
+      rendition.on('relocated', function (location) {
+        post({
+          type: 'relocated',
+          locator: makeLocator(location),
+          atStart: location.atStart === true,
+          atEnd: location.atEnd === true
+        });
+      });
+      rendition.on('displayError', function (e) {
+        postError('render.display', e);
+      });
+      // 三分点 tap 上报（原生负责翻页决策）
+      rendition.on('tap', function (e) {
+        post({ type: 'tap', x: e.clientX, y: e.clientY });
+        return false;
+      });
+      book.ready.then(function () {
+        post({ type: 'ready' });
+        // locations 用于百分比与进度条，异步生成不阻塞阅读
+        book.locations.generate(1600).then(function (n) {
+          locationsTotal = n;
+          post({ type: 'locationsReady', total: n });
+        }).catch(function (e) { postError('locations.generate', e); });
+      }).catch(function (e) { postError('book.ready', e); });
+    } catch (e) {
+      postError('book.open', e);
+    }
+  }
+
+  /// 样式注入（含初始主题色）。
+  function initReader(styleJson) {
+    applyStyleToRendition(JSON.parse(styleJson));
+  }
+
+  function applyStyle(styleJson) {
+    applyStyleToRendition(JSON.parse(styleJson));
+  }
+
+  function displayOrFallback(loc) {
+    if (loc && loc.cfi) {
+      rendition.display(loc.cfi).catch(function () {
+        if (loc.percent != null) {
+          rendition.display(loc.percent).catch(function (e2) {
+            postError('goto.fallback', e2);
+          });
+        } else if (loc.href) {
+          rendition.display(loc.href).catch(function (e3) {
+            postError('goto.fallback', e3);
+          });
+        }
+      });
+    } else if (loc && loc.percent != null) {
+      rendition.display(loc.percent);
+    } else if (loc && loc.href) {
+      rendition.display(loc.href);
+    } else {
+      rendition.display();
+    }
+  }
+
+  function gotoLocator(locatorJson) {
+    if (!rendition) return;
+    displayOrFallback(JSON.parse(locatorJson));
+  }
+
+  function gotoHref(href) {
+    if (!rendition) return;
+    rendition.display(href);
+  }
+
+  function gotoPercent(p) {
+    if (!rendition) return;
+    rendition.display(p);
+  }
+
+  function nextPage() {
+    if (!rendition) return;
+    rendition.next();
+  }
+
+  function prevPage() {
+    if (!rendition) return;
+    rendition.prev();
+  }
+
+  /// 与 current 同步后前进一页（用于 reserve 池）。
+  function syncNext(locatorJson) {
+    if (!rendition) return;
+    var loc = null;
+    try { loc = JSON.parse(locatorJson); } catch (e) { loc = null; }
+    if (loc && loc.cfi) {
+      rendition.display(loc.cfi).then(function () {
+        rendition.next();
+      }).catch(function () { rendition.display(); });
+    } else {
+      rendition.display().then(function () { rendition.next(); });
+    }
+  }
+
+  post({ type: 'bridgeReady' });
+</script>
+</body>
+</html>

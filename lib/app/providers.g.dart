@@ -101,5 +101,25 @@ final bookRepositoryProvider = FutureProvider<BookRepository>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef BookRepositoryRef = FutureProviderRef<BookRepository>;
+String _$progressRepositoryHash() =>
+    r'ac28f817d0c152103ab296a0e003212920f38099';
+
+/// 阅读进度仓储单例。
+///
+/// Copied from [progressRepository].
+@ProviderFor(progressRepository)
+final progressRepositoryProvider = FutureProvider<ProgressRepository>.internal(
+  progressRepository,
+  name: r'progressRepositoryProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$progressRepositoryHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef ProgressRepositoryRef = FutureProviderRef<ProgressRepository>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package

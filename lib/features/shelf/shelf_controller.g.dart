@@ -25,7 +25,7 @@ final shelfItemsProvider = AutoDisposeStreamProvider<List<ShelfItem>>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef ShelfItemsRef = AutoDisposeStreamProviderRef<List<ShelfItem>>;
-String _$importControllerHash() => r'c7b2d9b74a55e381b5b2f642a709ca7ac93390a6';
+String _$importControllerHash() => r'67e44f481d8c8c640279e1501a13f9e03c5b5838';
 
 /// 导入控制器。
 ///

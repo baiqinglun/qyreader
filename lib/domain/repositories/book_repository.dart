@@ -16,6 +16,12 @@ abstract interface class BookRepository {
   /// 同哈希已存在时返回 `import.duplicate` 失败，不产生第二本。
   Future<Result<Book>> importFromFile(String sourcePath);
 
+  /// 按 id 查书；不存在返回 null。
+  Future<Book?> getById(String bookId);
+
+  /// 查询书籍章节目录（按 idx 升序）。
+  Future<List<BookChapter>> getChapters(String bookId);
+
   /// 更新最近打开时间（epoch ms）。
   Future<void> touchOpened(String bookId);
 }

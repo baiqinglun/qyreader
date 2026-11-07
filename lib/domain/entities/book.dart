@@ -167,3 +167,21 @@ abstract class ShelfItem with _$ShelfItem {
     @Default(0) double percent,
   }) = _ShelfItem;
 }
+
+/// 章节目录条目（阅读器目录抽屉与定位用）。
+@freezed
+abstract class BookChapter with _$BookChapter {
+  const factory BookChapter({
+    /// 章序号（0 基）。
+    required int idx,
+
+    /// 章标题。
+    required String title,
+
+    /// zip 内文档路径（epub.js display 直接可用）。
+    required String href,
+
+    /// 目录层级（0 顶）。
+    @Default(0) int level,
+  }) = _BookChapter;
+}
