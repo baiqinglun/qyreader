@@ -193,8 +193,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         if (mounted) setState(() => _bootTimedOut = true);
       }
     });
-    // 看门狗二：桥就绪但书籍 15s 未渲染完成（如注入失败/解析失败）
-    Timer(const Duration(seconds: 15), () async {
+    // 看门狗二：桥就绪但书籍 45s 未渲染完成（大书解析在手机上可达 30s+）
+    Timer(const Duration(seconds: 45), () async {
       if (mounted && !_a.bookReady && !_b.bookReady) {
         _diagLog('watchdog: bookReady 超时');
         await _dumpPageDiag();
@@ -623,6 +623,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                             children: [
                               _viewLayer(_visible, width, settings, theme),
                               _viewLayer(_hidden, width, settings, theme),
+                              // 首次渲染完成前给出可见状态，杜绝纯白屏
+                              if (_visible.locator == null)
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: Center(
+                                      child: Text(
+                                        '正在渲染书籍…',
+                                        style: TextStyle(
+                                          color: theme.chromeForeground,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                             ],
                           )
                         : Center(
