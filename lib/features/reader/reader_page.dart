@@ -23,6 +23,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../app/theme/reading_theme.dart';
 import '../../core/locator.dart';
+import 'reader_asset_server.dart' show ReaderAssetServer;
 import 'reader_assets.dart';
 import 'reader_bridge.dart';
 import 'reader_bridge_events.dart';
@@ -76,8 +77,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   final _ViewSlot _b = _ViewSlot('B');
   bool _visibleIsA = true;
 
+  final ReaderAssetServer _assetServer = ReaderAssetServer();
   Uri? _readerUri;
-  String _bookBase64 = '';
   String? _initialLocatorJson;
   bool _booted = false;
   bool _bootTimedOut = false;
@@ -98,6 +99,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   bool _chromeVisible = true;
   bool _tocOpen = false;
+  bool _diagVisible = false;
 
   /// 启动诊断（看门狗触发时展示在兜底面板）
   final List<String> _diag = <String>[];
@@ -140,6 +142,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   void dispose() {
     _lockTimeout?.cancel();
     _settle.dispose();
+    unawaited(_assetServer.stop());
     ref.read(readerControllerProvider(widget.bookId).notifier).flushProgress();
     super.dispose();
   }
@@ -171,30 +174,31 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final book = state.book;
     if (book == null) return;
 
-    _readerUri = await ensureReaderHtmlFile();
-    _diagLog('reader html file: $_readerUri');
-    final bytes = await File(book.filePath).readAsBytes();
-    _bookBase64 = base64Encode(bytes);
+    _readerUri = await _assetServer.start(
+      html: await loadReaderHtml(),
+      bookPath: book.filePath,
+    );
+    _diagLog('local server: $_readerUri');
     final initial = state.initialLocator;
     _initialLocatorJson = initial == null ? null : locatorToJson(initial);
-    _diagLog(
-      'book loaded (${bytes.length}B), initial locator: $_initialLocatorJson',
-    );
+    _diagLog('book ${book.fileSize}B, initial locator: $_initialLocatorJson');
     if (!mounted) return;
     setState(() => _booted = true);
 
-    // 看门狗一：WebView 桥 12s 未就绪（插件缺实现/页面未加载）
-    Timer(const Duration(seconds: 12), () {
+    // 看门狗一：WebView 桥 8s 未就绪（插件缺实现/页面未加载）
+    Timer(const Duration(seconds: 8), () async {
       if (mounted && !_a.bridgeReady && !_b.bridgeReady) {
         _diagLog('watchdog: bridgeReady 超时');
-        setState(() => _bootTimedOut = true);
+        await _dumpPageDiag();
+        if (mounted) setState(() => _bootTimedOut = true);
       }
     });
-    // 看门狗二：桥就绪但书籍 25s 未渲染完成（如大文件注入失败）
-    Timer(const Duration(seconds: 25), () {
+    // 看门狗二：桥就绪但书籍 15s 未渲染完成（如注入失败/解析失败）
+    Timer(const Duration(seconds: 15), () async {
       if (mounted && !_a.bookReady && !_b.bookReady) {
-        _diagLog('watchdog: bookReady 超时（见上方桥/错误日志）');
-        setState(() => _bootTimedOut = true);
+        _diagLog('watchdog: bookReady 超时');
+        await _dumpPageDiag();
+        if (mounted) setState(() => _bootTimedOut = true);
       }
     });
 
@@ -207,6 +211,23 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         _applyStyleToAll();
       }
     });
+  }
+
+  /// 从渲染页拉取内部诊断（页面错误文本、桥/书状态）。
+  Future<void> _dumpPageDiag() async {
+    for (final slot in <_ViewSlot>[_a, _b]) {
+      final bridge = slot.bridge;
+      if (bridge == null) continue;
+      try {
+        final dump = await bridge.dumpDiag();
+        _diagLog('[${slot.id}] pageDump: $dump');
+      } catch (e) {
+        _diagLog('[${slot.id}] dumpDiag failed: $e');
+      }
+    }
+    // 通道探针：主动注入一条 QYEVT 消息，若通道可用会置位 bridgeReady
+    final probe = await _a.bridge?.probeChannel();
+    _diagLog('[A] probeChannel sent=$probe bridgeReady=${_a.bridgeReady}');
   }
 
   void _applyStyleToAll() {
@@ -236,9 +257,29 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   // ---- 桥事件 ----
 
+  final Set<int> _seenEventSeq = <int>{};
+
+  /// 三通道（console.error/console.log/callHandler）并发投递，按 __n 去重。
+  int? _eventSeq(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return (decoded['__n'] as num?)?.toInt();
+      }
+    } catch (_) {}
+    return null;
+  }
+
   void _onJsEvent(_ViewSlot slot, List<dynamic> args) {
     final raw = args.isEmpty ? null : args.first as String?;
     if (raw == null) return;
+    final seq = _eventSeq(raw);
+    if (seq != null) {
+      if (!_seenEventSeq.add(seq)) return; // 三路重复，丢弃
+      while (_seenEventSeq.length > 128) {
+        _seenEventSeq.remove(_seenEventSeq.first);
+      }
+    }
     final event = parseReaderEvent(raw);
     if (event == null) return;
 
@@ -629,6 +670,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                                 state: state,
                                 theme: theme,
                                 onBack: _onBack,
+                                onDiag: () =>
+                                    setState(() => _diagVisible = true),
                               ),
                               Align(
                                 alignment: Alignment.bottomCenter,
@@ -666,6 +709,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   /// 全屏遮罩：装载错误或 WebView 启动诊断（恒定占位，内部条件渲染）。
   Widget _buildOverlay(ReaderState state, ReadingTheme theme) {
+    if (_diagVisible) {
+      return _diagPanel(theme);
+    }
     if (_windowsBlocked) {
       return ColoredBox(
         color: theme.background,
@@ -694,37 +740,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       );
     }
     if (_bootTimedOut) {
-      return ColoredBox(
-        color: theme.background,
-        child: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            Text(
-              'WebView 未能启动（诊断信息）',
-              style: TextStyle(
-                color: theme.chromeForeground,
-                fontWeight: FontWeight.w600,
-                fontSize: 16,
-              ),
-            ),
-            const SizedBox(height: 12),
-            for (final line in _diag)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
+      return _diagPanel(theme);
+    }
+    return const SizedBox.shrink();
+  }
+
+  /// 诊断面板：全链路事件日志（看门狗触发或手动打开）。
+  Widget _diagPanel(ReadingTheme theme) {
+    return ColoredBox(
+      color: theme.background,
+      child: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          Row(
+            children: [
+              Expanded(
                 child: Text(
-                  line,
+                  '诊断信息（${_diag.length} 条）',
                   style: TextStyle(
-                    color: theme.chromeForeground.withValues(alpha: 0.8),
-                    fontSize: 12,
-                    fontFamily: 'monospace',
+                    color: theme.chromeForeground,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
                   ),
                 ),
               ),
-          ],
-        ),
-      );
-    }
-    return const SizedBox.shrink();
+              IconButton(
+                onPressed: () => setState(() => _diagVisible = false),
+                icon: Icon(Icons.close, color: theme.chromeForeground),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          for (final line in _diag)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                line,
+                style: TextStyle(
+                  color: theme.chromeForeground.withValues(alpha: 0.8),
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   /// 构造某一层。所有状态（静止/翻页中/隐藏）共享同一棵 widget 结构
@@ -800,7 +861,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                     key: _paneKeyFor(slot),
                     slot: slot,
                     htmlUri: _readerUri!,
-                    bookBase64: _bookBase64,
+                    bookUrl: _readerUri!.replace(path: '/book.epub').toString(),
                     // JS 自主首渲：可视层带初始定位，隐藏层从头显示
                     locatorJson: slot == _visible ? _initialLocatorJson : null,
                     onJsEvent: (args) => _onJsEvent(slot, args),
@@ -829,7 +890,7 @@ class _WebViewPane extends StatefulWidget {
   const _WebViewPane({
     required this.slot,
     required this.htmlUri,
-    required this.bookBase64,
+    required this.bookUrl,
     required this.locatorJson,
     required this.onJsEvent,
     required this.onDiag,
@@ -838,11 +899,11 @@ class _WebViewPane extends StatefulWidget {
 
   final _ViewSlot slot;
 
-  /// 渲染页 file:// 地址。
+  /// 渲染页地址（本地资源服务）。
   final Uri htmlUri;
 
-  /// 书籍 base64。
-  final String bookBase64;
+  /// 书籍地址（本地资源服务）。
+  final String bookUrl;
 
   /// 初始定位 JSON（可空）。
   final String? locatorJson;
@@ -878,7 +939,7 @@ class _WebViewPaneState extends State<_WebViewPane> {
       onLoadStop: (_, __) {
         widget.onDiag('[${widget.slot.id}] loadStop → loadBook');
         widget.slot.bridge?.loadBook(
-          widget.bookBase64,
+          widget.bookUrl,
           locatorJson: widget.locatorJson,
         );
       },
@@ -889,9 +950,19 @@ class _WebViewPaneState extends State<_WebViewPane> {
         '[${widget.slot.id}] receivedHttpError ${response.statusCode} url=${request.url}',
       ),
       onConsoleMessage: (_, message) {
-        widget.onDiag(
-          '[${widget.slot.id}] js(${message.messageLevel}): ${message.message}',
-        );
+        var text = message.message;
+        // WebView2 会给 console.log 的字符串实参加引号，剥掉再匹配
+        if (text.length > 1 && text.startsWith('"') && text.endsWith('"')) {
+          text = text.substring(1, text.length - 1);
+        }
+        final idx = text.indexOf('QYEVT:');
+        if (idx >= 0) {
+          widget.onJsEvent([text.substring(idx + 6)]);
+        } else if (text.startsWith('QYERR:')) {
+          widget.onDiag('[${widget.slot.id}] ${text.substring(6)}');
+        } else {
+          widget.onDiag('[${widget.slot.id}] js: $text');
+        }
       },
     );
   }
@@ -903,11 +974,13 @@ class _TopBar extends StatelessWidget {
     required this.state,
     required this.theme,
     required this.onBack,
+    required this.onDiag,
   });
 
   final ReaderState state;
   final ReadingTheme theme;
   final VoidCallback onBack;
+  final VoidCallback onDiag;
 
   @override
   Widget build(BuildContext context) {
@@ -934,7 +1007,7 @@ class _TopBar extends StatelessWidget {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(right: 16),
+                  padding: const EdgeInsets.only(right: 4),
                   child: Text(
                     percent == null
                         ? ''
@@ -945,6 +1018,15 @@ class _TopBar extends StatelessWidget {
                     ),
                   ),
                 ),
+                IconButton(
+                  tooltip: '诊断',
+                  onPressed: onDiag,
+                  icon: Icon(
+                    Icons.bug_report_outlined,
+                    color: theme.chromeForeground,
+                  ),
+                ),
+                const SizedBox(width: 8),
               ],
             ),
           ),

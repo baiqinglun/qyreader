@@ -40,51 +40,49 @@
   var currentStyle = null;
   var locationsTotal = 0;
 
-  // ---- 桥消息队列：flutter_inappwebview 注入对象可能晚于脚本求值，
-  // ---- post 失败先入队并定时重发，杜绝消息静默丢失。
-  var __queue = [];
-  var __flushTimer = null;
+  // ---- 事件通道（三路并发 + 序号去重）：
+  // ---- 实测 Windows WebView2 只送 console.error 不送 console.log；
+  // ---- Android callHandler 与 console 均可用。三路齐发，Dart 按 __n 去重。
+  var __errs = [];
+  var __seq = 0;
 
   function post(msg) {
-    var payload = JSON.stringify(msg);
-    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-      try {
-        window.flutter_inappwebview.callHandler('readerEvent', payload);
-        return;
-      } catch (e) { /* 走队列重发 */ }
-    }
-    if (__queue.length > 64) __queue.shift(); // 防爆炸，旧 relocated 可丢
-    __queue.push(payload);
-    if (!__flushTimer) __flushTimer = setInterval(flushPosts, 60);
+    msg.__n = ++__seq;
+    var j = JSON.stringify(msg);
+    try { console.error('QYEVT:' + j); } catch (e) {}
+    try { console.log('QYEVT:' + j); } catch (e) {}
+    try {
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler('readerEvent', j);
+      }
+    } catch (e) {}
   }
 
-  function flushPosts() {
-    if (!(window.flutter_inappwebview && window.flutter_inappwebview.callHandler)) return;
-    var pending = __queue;
-    __queue = [];
-    for (var i = 0; i < pending.length; i++) {
-      try {
-        window.flutter_inappwebview.callHandler('readerEvent', pending[i]);
-      } catch (e) { /* 单条失败丢弃 */ }
-    }
-    clearInterval(__flushTimer);
-    __flushTimer = null;
-  }
-
-  // 未捕获的 JS 错误上报（经队列；Dart 侧 console 捕获兜底）
+  // 未捕获 JS 错误：既上报也留存在 __errs 供 __diagDump 拉取
   window.addEventListener('error', function (e) {
-    post({ type: 'error', code: 'js.uncaught', message: e.message });
+    var text = e.message + ' @' + e.filename + ':' + e.lineno;
+    __errs.push(text);
+    console.error('QYERR:' + text);
+    post({ type: 'error', code: 'js.uncaught', message: text });
   });
+  window.addEventListener('unhandledrejection', function (e) {
+    var text = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+    __errs.push('promise: ' + text);
+    console.error('QYERR:' + text);
+  });
+
+  /// Dart 诊断拉取：返回页面内错误与桥状态（evaluateJavascript 直接取返回值）。
+  window.__diagDump = function () {
+    return JSON.stringify({
+      errs: __errs,
+      hasBridge: !!(window.flutter_inappwebview && window.flutter_inappwebview.callHandler),
+      hasBook: !!window.book,
+      hasRendition: !!window.rendition
+    });
+  };
 
   function postError(code, message) {
     post({ type: 'error', code: code, message: String(message) });
-  }
-
-  function decodeBase64(b64) {
-    var raw = atob(b64);
-    var arr = new Uint8Array(raw.length);
-    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
-    return arr.buffer;
   }
 
   /// 从 relocated 事件构造 Locator JSON（CFI 主定位 + 章索引兜底 + percent 展示）。
@@ -135,33 +133,13 @@
     }
   }
 
-  // ---- 分块书籍载入：大文件 base64 一次性经 evaluateJavascript 注入
-  // ---- 在 Android WebView 上会静默失败，改为 Dart 分块推送、JS 端拼接。
-  var __chunks = [];
-  var __bookLocator = null;
-
-  function beginBook(locatorJson) {
-    __chunks = [];
-    __bookLocator = locatorJson;
-  }
-
-  function appendBookChunk(chunk) {
-    __chunks.push(chunk);
-  }
-
-  function finishBook() {
-    var b64 = __chunks.join('');
-    __chunks = [];
-    loadBook(b64, __bookLocator);
-    __bookLocator = null;
-  }
-
   /// Dart → JS：载入书籍并渲染。
+  /// bookUrl 为本地资源服务（127.0.0.1）上的书籍地址，epub.js 同源拉取；
   /// locatorJson 可空；非空时首次 display 直接定位（JS 自主首渲，
   /// 不依赖 Dart 二次指令，规避桥时序问题）。
-  async function loadBook(b64, locatorJson) {
+  async function loadBook(bookUrl, locatorJson) {
     try {
-      book = ePub(decodeBase64(b64));
+      book = ePub(bookUrl);
       rendition = book.renderTo('viewer', {
         width: '100%',
         height: '100%',

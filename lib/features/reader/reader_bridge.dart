@@ -13,24 +13,11 @@ class ReaderBridge {
 
   final InAppWebViewController _controller;
 
-  /// 分块载入书籍（base64）并渲染；[locatorJson] 非空时首次 display 直接定位
-  /// （JS 自主首渲，规避桥时序问题）。
-  ///
-  /// Android evaluateJavascript 对超大字符串会静默失败，
-  /// 按 256KB 分块推送、JS 端拼接后再解码。
-  Future<void> loadBook(String base64, {String? locatorJson}) async {
-    const int chunkSize = 256 * 1024;
-    await _eval(
-      'beginBook(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
-    );
-    for (var i = 0; i < base64.length; i += chunkSize) {
-      final end = (i + chunkSize) < base64.length
-          ? (i + chunkSize)
-          : base64.length;
-      await _eval('appendBookChunk(${_jsStr(base64.substring(i, end))})');
-    }
-    await _eval('finishBook()');
-  }
+  /// 载入书籍并渲染：[bookUrl] 为本地资源服务地址（同源，epub.js 自行
+  /// 拉取），[locatorJson] 非空时首次 display 直接定位（JS 自主首渲）。
+  Future<void> loadBook(String bookUrl, {String? locatorJson}) => _eval(
+    'loadBook(${_jsStr(bookUrl)}, ${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+  );
 
   /// 注入排版样式（含主题色）。
   Future<void> applyStyle(String styleJson) =>
@@ -61,6 +48,30 @@ class ReaderBridge {
   /// 与目标位置对齐后前进一页（reserve 池同步用）。
   Future<void> syncNextMap(Map<String, dynamic> locator) =>
       _eval('syncNext(${_jsStr(jsonEncode(locator))})');
+
+  /// 通道探针：经 console 注入一条 bridgeReady 事件验证下行解析。
+  Future<bool> probeChannel() async {
+    try {
+      await _controller.evaluateJavascript(
+        source:
+            r"console.log('QYEVT:' + JSON.stringify({type: 'bridgeReady'})); return true;",
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 拉取页面内部诊断（__diagDump）：错误文本与桥/书状态。
+  Future<String?> dumpDiag() async {
+    try {
+      return await _controller.evaluateJavascript(
+        source: r'window.__diagDump ? window.__diagDump() : null',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// 截取当前页（后翻覆盖层用）；平台不支持时返回 null。
   Future<Uint8List?> screenshot() async {
