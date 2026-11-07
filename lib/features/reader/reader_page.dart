@@ -729,14 +729,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                           )
                         : const SizedBox.shrink(),
                   ),
-                  // [4] 目录抽屉（内部 AnimatedSwitcher 恒定）
-                  TocDrawer(
-                    open: _tocOpen,
-                    theme: theme,
-                    chapters: state.chapters,
-                    currentHref: _visible.locator?.href,
-                    onDismiss: () => setState(() => _tocOpen = false),
-                    onChapter: _onChapterTap,
+                  // [4] 目录抽屉（内部 AnimatedSwitcher 恒定）。
+                  // 必须 Positioned.fill：Stack 尺寸由非定位子节点决定，
+                  // 收起时的 SizedBox.shrink 会把整个根 Stack 塌缩成 0×0，
+                  // 连带所有 Positioned.fill 子树（含 WebView 平台视图）归零。
+                  Positioned.fill(
+                    child: TocDrawer(
+                      open: _tocOpen,
+                      theme: theme,
+                      chapters: state.chapters,
+                      currentHref: _visible.locator?.href,
+                      onDismiss: () => setState(() => _tocOpen = false),
+                      onChapter: _onChapterTap,
+                    ),
                   ),
                   // [5] 全屏遮罩：装载错误 / WebView 不可用诊断
                   Positioned.fill(child: _buildOverlay(state, theme)),
@@ -894,20 +899,25 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
             offset: Offset(dx, dy),
             child: Stack(
               children: [
-                Transform(
-                  alignment: Alignment.centerLeft,
-                  transform: Matrix4.identity()
-                    ..setEntry(3, 2, 0.002)
-                    ..rotateY(rotY),
-                  child: _WebViewPane(
-                    key: _paneKeyFor(slot),
-                    slot: slot,
-                    pageUri: _readerUri!,
-                    bookUrl: _bookUrl!,
-                    // JS 自主首渲：可视层带初始定位，隐藏层从头显示
-                    locatorJson: slot == _visible ? _initialLocatorJson : null,
-                    onJsEvent: (args) => _onJsEvent(slot, args),
-                    onDiag: _diagLog,
+                // 平台视图的渲染对象是无子节点的代理盒，松约束下会收缩为 0×0
+                //（表现为 WebView 事件全通但永远不出像素，relocated 也不触发）。
+                // 必须用 Positioned.fill 强制满尺寸紧约束。
+                Positioned.fill(
+                  child: Transform(
+                    alignment: Alignment.centerLeft,
+                    transform: Matrix4.identity()
+                      ..setEntry(3, 2, 0.002)
+                      ..rotateY(rotY),
+                    child: _WebViewPane(
+                      key: _paneKeyFor(slot),
+                      slot: slot,
+                      pageUri: _readerUri!,
+                      bookUrl: _bookUrl!,
+                      // JS 自主首渲：可视层带初始定位，隐藏层从头显示
+                      locatorJson: slot == _visible ? _initialLocatorJson : null,
+                      onJsEvent: (args) => _onJsEvent(slot, args),
+                      onDiag: _diagLog,
+                    ),
                   ),
                 ),
                 // cover 模式：可视层压暗

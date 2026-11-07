@@ -49,7 +49,10 @@
   var __seq = 0;
 
   function post(msg) {
-    // 双通道：console（QYEVT: 前缀）+ JavaScriptChannel（readerEvent.postMessage）
+    // 双通道：console（QYEVT: 前缀）+ JavaScriptChannel（readerEvent.postMessage）。
+    // Android 两路都会送达，必须带 __n 序号供 Dart 去重（缺失会导致 tap
+    // 等事件被处理两次——chrome 开关立即翻转两次、右区点击连翻两页）。
+    msg.__n = ++__seq;
     var j = JSON.stringify(msg);
     try { console.log('QYEVT:' + j); } catch (e) {}
     try {
@@ -165,9 +168,23 @@
       rendition.on('displayError', function (e) {
         postError('render.display', e);
       });
-      // 三分点 tap 上报（原生负责翻页决策）
+      // 三分点 tap 上报（原生负责翻页决策）。
+      // Android 触摸会同时触发 epub.js 的 tap 与下面兜底的 click（同一手势
+      // 双报，间隔实测 <50ms，先后顺序不保证），桌面鼠标只走 click。统一
+      // 去重：150ms 内、坐标相近（30px）的第二次上报丢弃；更快的手指连击
+      // 翻页不受影响。
+      var lastTap = { t: 0, x: 0, y: 0 };
+      function reportTap(x, y) {
+        var now = Date.now();
+        if (now - lastTap.t < 150 &&
+            Math.abs(x - lastTap.x) < 30 && Math.abs(y - lastTap.y) < 30) {
+          return;
+        }
+        lastTap = { t: now, x: x, y: y };
+        post({ type: 'tap', x: x, y: y });
+      }
       rendition.on('tap', function (e) {
-        post({ type: 'tap', x: e.clientX, y: e.clientY });
+        reportTap(e.clientX, e.clientY);
         return false;
       });
       // 桌面鼠标路径兜底：epub.js tap 依赖触摸事件，WebView2 上不触发，
@@ -177,9 +194,12 @@
         var doc = view && view.document;
         var iframe = view && view.iframe;
         if (!doc || !iframe) return;
+        // rendered 可能对同一文档多次触发（重排/重渲染），防重复挂监听
+        if (doc.__qyTapHooked) return;
+        doc.__qyTapHooked = true;
         doc.addEventListener('click', function (e) {
           var r = iframe.getBoundingClientRect();
-          post({ type: 'tap', x: e.clientX + r.left, y: e.clientY + r.top });
+          reportTap(e.clientX + r.left, e.clientY + r.top);
         });
       });
       var initial = null;
