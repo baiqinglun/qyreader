@@ -40,11 +40,41 @@
   var currentStyle = null;
   var locationsTotal = 0;
 
+  // ---- 桥消息队列：flutter_inappwebview 注入对象可能晚于脚本求值，
+  // ---- post 失败先入队并定时重发，杜绝消息静默丢失。
+  var __queue = [];
+  var __flushTimer = null;
+
   function post(msg) {
+    var payload = JSON.stringify(msg);
     if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-      window.flutter_inappwebview.callHandler('readerEvent', JSON.stringify(msg));
+      try {
+        window.flutter_inappwebview.callHandler('readerEvent', payload);
+        return;
+      } catch (e) { /* 走队列重发 */ }
     }
+    if (__queue.length > 64) __queue.shift(); // 防爆炸，旧 relocated 可丢
+    __queue.push(payload);
+    if (!__flushTimer) __flushTimer = setInterval(flushPosts, 60);
   }
+
+  function flushPosts() {
+    if (!(window.flutter_inappwebview && window.flutter_inappwebview.callHandler)) return;
+    var pending = __queue;
+    __queue = [];
+    for (var i = 0; i < pending.length; i++) {
+      try {
+        window.flutter_inappwebview.callHandler('readerEvent', pending[i]);
+      } catch (e) { /* 单条失败丢弃 */ }
+    }
+    clearInterval(__flushTimer);
+    __flushTimer = null;
+  }
+
+  // 未捕获的 JS 错误上报（经队列；Dart 侧 console 捕获兜底）
+  window.addEventListener('error', function (e) {
+    post({ type: 'error', code: 'js.uncaught', message: e.message });
+  });
 
   function postError(code, message) {
     post({ type: 'error', code: code, message: String(message) });
@@ -106,7 +136,9 @@
   }
 
   /// Dart → JS：载入书籍并渲染。
-  async function loadBook(b64) {
+  /// locatorJson 可空；非空时首次 display 直接定位（JS 自主首渲，
+  /// 不依赖 Dart 二次指令，规避桥时序问题）。
+  async function loadBook(b64, locatorJson) {
     try {
       book = ePub(decodeBase64(b64));
       rendition = book.renderTo('viewer', {
@@ -134,13 +166,19 @@
         post({ type: 'tap', x: e.clientX, y: e.clientY });
         return false;
       });
+      var initial = null;
+      try { initial = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { initial = null; }
       book.ready.then(function () {
-        post({ type: 'ready' });
         // locations 用于百分比与进度条，异步生成不阻塞阅读
         book.locations.generate(1600).then(function (n) {
           locationsTotal = n;
           post({ type: 'locationsReady', total: n });
         }).catch(function (e) { postError('locations.generate', e); });
+        return initial
+          ? rendition.display(initial.cfi || initial.href || initial.percent || undefined)
+          : rendition.display();
+      }).then(function () {
+        post({ type: 'ready' });
       }).catch(function (e) { postError('book.ready', e); });
     } catch (e) {
       postError('book.open', e);
@@ -156,31 +194,32 @@
     applyStyleToRendition(JSON.parse(styleJson));
   }
 
-  function displayOrFallback(loc) {
-    if (loc && loc.cfi) {
-      rendition.display(loc.cfi).catch(function () {
-        if (loc.percent != null) {
-          rendition.display(loc.percent).catch(function (e2) {
-            postError('goto.fallback', e2);
-          });
-        } else if (loc.href) {
-          rendition.display(loc.href).catch(function (e3) {
-            postError('goto.fallback', e3);
-          });
-        }
-      });
-    } else if (loc && loc.percent != null) {
-      rendition.display(loc.percent);
-    } else if (loc && loc.href) {
-      rendition.display(loc.href);
-    } else {
-      rendition.display();
-    }
-  }
-
   function gotoLocator(locatorJson) {
     if (!rendition) return;
-    displayOrFallback(JSON.parse(locatorJson));
+    try {
+      var loc = JSON.parse(locatorJson);
+      if (loc.cfi) {
+        rendition.display(loc.cfi).catch(function () {
+          if (loc.percent != null) {
+            rendition.display(loc.percent).catch(function (e2) {
+              postError('goto.fallback', e2);
+            });
+          } else if (loc.href) {
+            rendition.display(loc.href).catch(function (e3) {
+              postError('goto.fallback', e3);
+            });
+          }
+        });
+      } else if (loc.percent != null) {
+        rendition.display(loc.percent);
+      } else if (loc.href) {
+        rendition.display(loc.href);
+      } else {
+        rendition.display();
+      }
+    } catch (e) {
+      postError('goto.parse', e);
+    }
   }
 
   function gotoHref(href) {
@@ -203,18 +242,17 @@
     rendition.prev();
   }
 
-  /// 与 current 同步后前进一页（用于 reserve 池）。
+  /// 与目标位置对齐后前进一页（reserve 池同步用）。
   function syncNext(locatorJson) {
     if (!rendition) return;
     var loc = null;
-    try { loc = JSON.parse(locatorJson); } catch (e) { loc = null; }
-    if (loc && loc.cfi) {
-      rendition.display(loc.cfi).then(function () {
-        rendition.next();
-      }).catch(function () { rendition.display(); });
-    } else {
-      rendition.display().then(function () { rendition.next(); });
-    }
+    try { loc = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { loc = null; }
+    var aligned = (loc && (loc.cfi || loc.href || loc.percent != null))
+      ? rendition.display(loc.cfi || loc.href || loc.percent)
+      : rendition.display();
+    aligned.then(function () { rendition.next(); }).catch(function () {
+      rendition.display();
+    });
   }
 
   post({ type: 'bridgeReady' });

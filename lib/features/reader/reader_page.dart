@@ -4,6 +4,8 @@
 /// - 前翻：纯原生动画（隐藏层已预渲染下一页），提交后旧可视层 `syncNext` 补位到 N+2。
 /// - 后翻：截屏覆盖层滑动 + 两个视图同时 `prevPage()`，完成后不变式恢复。
 /// - 翻页期间不触发 JS 重排：内容先行渲染完成，动画只变换容器。
+/// - 渲染页以 file:// 加载；JS→Dart 消息带队列重发（见 reader.html）；
+///   首次渲染由 JS 自主完成（loadBook 携带初始定位），不依赖桥时序。
 library;
 
 import 'dart:async';
@@ -37,8 +39,11 @@ class _ViewSlot {
   ReaderBridge? bridge;
   bool bridgeReady = false;
   bool bookReady = false;
-  bool positioned = false;
   Locator? locator;
+
+  /// 隐藏层同步簿记：最近一次对齐的可视层位置 / 正在对齐的目标。
+  Locator? lastSyncedVisible;
+  Locator? pendingSyncVisible;
 }
 
 /// 一次翻页交互（拖拽或弹簧回弹期间）。
@@ -69,10 +74,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   final _ViewSlot _b = _ViewSlot('B');
   bool _visibleIsA = true;
 
-  String _html = '';
+  Uri? _readerUri;
   String _bookBase64 = '';
+  String? _initialLocatorJson;
   bool _booted = false;
   bool _bootTimedOut = false;
+  int _reloadEpoch = 0;
+  final Map<String, GlobalKey> _paneKeys = {};
 
   _Turn? _turn;
   late final AnimationController _settle;
@@ -111,26 +119,33 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   _ViewSlot get _visible => _visibleIsA ? _a : _b;
   _ViewSlot get _hidden => _visibleIsA ? _b : _a;
-  _ViewSlot _slot(String id) => id == 'A' ? _a : _b;
 
   ReaderController get _controller =>
       ref.read(readerControllerProvider(widget.bookId).notifier);
   ReaderState get _controllerState =>
       ref.read(readerControllerProvider(widget.bookId));
 
+  GlobalKey _paneKeyFor(_ViewSlot slot) => _paneKeys.putIfAbsent(
+        '$_reloadEpoch-${slot.id}',
+        () => GlobalKey(debugLabel: 'reader-pane-${slot.id}'),
+      );
+
   Future<void> _boot() async {
     await _controller.init();
-    final book = _controllerState.book;
+    final state = _controllerState;
+    final book = state.book;
     if (book == null) return;
 
-    _html = await loadReaderHtml();
+    _readerUri = await ensureReaderHtmlFile();
     final bytes = await File(book.filePath).readAsBytes();
     _bookBase64 = base64Encode(bytes);
+    final initial = state.initialLocator;
+    _initialLocatorJson = initial == null ? null : locatorToJson(initial);
     if (!mounted) return;
     setState(() => _booted = true);
 
     // WebView 平台不可用（无 WebView2 / 插件缺实现）的兜底提示
-    Timer(const Duration(seconds: 10), () {
+    Timer(const Duration(seconds: 12), () {
       if (mounted && !_a.bridgeReady && !_b.bridgeReady) {
         setState(() => _bootTimedOut = true);
       }
@@ -156,12 +171,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   Future<void> _reloadViews() async {
-    // flow 切换需重建 rendition：整页重载最可靠
+    // flow 切换需重建 rendition：换 GlobalKey 强制重新膨胀 WebView
     for (final v in <_ViewSlot>[_a, _b]) {
       v.bookReady = false;
-      v.positioned = false;
+      v.bridgeReady = false;
       v.locator = null;
+      v.lastSyncedVisible = null;
+      v.pendingSyncVisible = null;
     }
+    _reloadEpoch++;
     if (!mounted) return;
     setState(() => _booted = false);
     await Future<void>.delayed(Duration.zero);
@@ -170,12 +188,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   // ---- 桥事件 ----
 
-  void _onJsEvent(String viewId, List<dynamic> args) {
+  void _onJsEvent(_ViewSlot slot, List<dynamic> args) {
     final raw = args.isEmpty ? null : args.first as String?;
     if (raw == null) return;
     final event = parseReaderEvent(raw);
     if (event == null) return;
-    final slot = _slot(viewId);
 
     switch (event) {
       case ReaderBridgeReady():
@@ -198,45 +215,45 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     slot.bookReady = true;
     final settings = ref.read(readingSettingsControllerProvider);
     slot.bridge?.applyStyle(readerStylePayload(settings));
-
-    if (slot == _visible) {
-      final initial = _controllerState.initialLocator;
-      if (initial != null) {
-        slot.bridge?.gotoLocatorMap(_locatorMap(initial));
-      } else {
-        slot.bridge?.gotoStart();
-      }
-    }
     _syncHiddenIfNeeded();
   }
 
   void _onRelocated(_ViewSlot slot, Locator locator, bool atStart, bool atEnd) {
     slot.locator = locator;
-    slot.positioned = true;
 
     if (slot == _visible) {
       _controller.onRelocated(locator, atStart: atStart, atEnd: atEnd);
       _syncHiddenIfNeeded();
     } else {
+      // 隐藏层：完成一次对齐
+      if (slot.pendingSyncVisible != null) {
+        slot.lastSyncedVisible = slot.pendingSyncVisible;
+        slot.pendingSyncVisible = null;
+      }
       _hiddenResyncing = false;
       _lockTimeout?.cancel();
     }
+    // 后翻等待的两个 prev relocated：两边都到位即解锁
     if (_backInFlight && _a.locator != null && _b.locator != null) {
       _backInFlight = false;
       _lockTimeout?.cancel();
     }
   }
 
+  /// 让隐藏层对齐到可视层的下一页。
   void _syncHiddenIfNeeded() {
     final visible = _visible;
     final hidden = _hidden;
+    final target = visible.locator;
     if (!visible.bookReady ||
         !hidden.bookReady ||
-        visible.locator == null ||
-        hidden.positioned) {
+        target == null ||
+        hidden.pendingSyncVisible != null ||
+        hidden.lastSyncedVisible == target) {
       return;
     }
-    hidden.bridge?.syncNextMap(_locatorMap(visible.locator!));
+    hidden.pendingSyncVisible = target;
+    hidden.bridge?.syncNextMap(_locatorMap(target));
   }
 
   Map<String, dynamic> _locatorMap(Locator l) =>
@@ -305,13 +322,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   void _completeForwardInstant() {
     final newVisible = _hidden;
+    final oldVisible = _visible;
     _visibleIsA = !_visibleIsA;
     // 旧可视层（新隐藏层）补位到新可视层的下一页
+    oldVisible.lastSyncedVisible = null;
+    oldVisible.pendingSyncVisible = null;
     _hiddenResyncing = true;
     _armLockTimeout();
-    newVisible.positioned = false;
-    if (_visible.locator != null) {
-      newVisible.bridge?.syncNextMap(_locatorMap(_visible.locator!));
+    final target = newVisible.locator;
+    if (target != null) {
+      oldVisible.pendingSyncVisible = target;
+      oldVisible.bridge?.syncNextMap(_locatorMap(target));
     }
     setState(() {});
   }
@@ -338,7 +359,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       return;
     }
     if (committed) {
-      // 后翻提交：可视层已是 N-1；隐藏层不需要换位（两边都 prev 过，不变式保持）
+      // 后翻提交：可视层已是 N-1；隐藏层（也 prev 过）现显示 N，不变式保持
       setState(() => _backOverlay = null);
     } else {
       // 取消：内容已 prev 过，两个视图 next 恢复
@@ -429,7 +450,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   void _onSeek(double percent) {
     _visible.bridge?.gotoPercent(percent);
-    _resetHiddenAfterJump();
+    _resetHiddenSync();
   }
 
   void _onChapterTap(String href) {
@@ -438,13 +459,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       _chromeVisible = false;
     });
     _visible.bridge?.gotoHref(href);
-    _resetHiddenAfterJump();
+    _resetHiddenSync();
   }
 
-  void _resetHiddenAfterJump() {
+  void _resetHiddenSync() {
     // 跳转后隐藏层失效，待可视层 relocated 后由 _syncHiddenIfNeeded 补位
-    _hidden.positioned = false;
-    _hidden.locator = null;
+    _hidden.lastSyncedVisible = null;
+    _hidden.pendingSyncVisible = null;
   }
 
   void _onBack() {
@@ -482,7 +503,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
             final width = constraints.maxWidth;
             return Stack(
               children: [
-                if (_booted && state.book != null && !_bootTimedOut) ...[
+                if (_booted &&
+                    state.book != null &&
+                    !_bootTimedOut &&
+                    _readerUri != null) ...[
                   _viewLayer(_visible, width, settings, theme),
                   _viewLayer(_hidden, width, settings, theme),
                 ] else
@@ -560,7 +584,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                         child: Padding(
                           padding: const EdgeInsets.all(32),
                           child: Text(
-                            '当前平台暂不支持 WebView 渲染。\n请在 Android 设备上验收阅读器。',
+                            '当前平台暂不支持 WebView 渲染。\n'
+                            '请在 Android 设备上验收阅读器；Windows 需安装 WebView2 运行时。',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: theme.chromeForeground),
                           ),
@@ -588,15 +613,18 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final mode = settings.pageTurnMode;
 
     Widget layer = _WebViewPane(
+      key: _paneKeyFor(slot),
       slot: slot,
-      html: _html,
+      htmlUri: _readerUri!,
       bookBase64: _bookBase64,
-      onJsEvent: (args) => _onJsEvent(slot.id, args),
+      // JS 自主首渲：可视层带初始定位，隐藏层从头显示（随后 syncNext 对齐）
+      locatorJson: slot == _visible ? _initialLocatorJson : null,
+      onJsEvent: (args) => _onJsEvent(slot, args),
     );
 
     if (isHidden) {
       if (!forwardTurn) {
-        // 静止与后翻期间隐藏层不参与绘制（平台视图保持存活）
+        // 静止与后翻期间隐藏层不参与绘制（GlobalKey 保持平台视图存活）
         return Offstage(child: layer);
       }
       layer = _hiddenTransform(layer, turn.t, width, mode);
@@ -666,14 +694,23 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 class _WebViewPane extends StatefulWidget {
   const _WebViewPane({
     required this.slot,
-    required this.html,
+    required this.htmlUri,
     required this.bookBase64,
+    required this.locatorJson,
     required this.onJsEvent,
+    super.key,
   });
 
   final _ViewSlot slot;
-  final String html;
+
+  /// 渲染页 file:// 地址。
+  final Uri htmlUri;
+
+  /// 书籍 base64。
   final String bookBase64;
+
+  /// 初始定位 JSON（可空）。
+  final String? locatorJson;
   final void Function(List<dynamic> args) onJsEvent;
 
   @override
@@ -684,11 +721,7 @@ class _WebViewPaneState extends State<_WebViewPane> {
   @override
   Widget build(BuildContext context) {
     return InAppWebView(
-      initialData: InAppWebViewInitialData(
-        data: widget.html,
-        mimeType: 'text/html',
-        encoding: 'utf-8',
-      ),
+      initialUrlRequest: URLRequest(url: WebUri(widget.htmlUri.toString())),
       initialSettings: InAppWebViewSettings(
         transparentBackground: true,
         disableContextMenu: true,
@@ -704,8 +737,16 @@ class _WebViewPaneState extends State<_WebViewPane> {
           },
         );
       },
+      onConsoleMessage: (_, message) {
+        // JS 侧诊断信息（未捕获错误经 window.error → 桥上报，这里兜底采集）
+        debugPrint(
+          'reader[${widget.slot.id}] js(${message.messageLevel}): '
+          '${message.message}',
+        );
+      },
       onLoadStop: (_, __) {
-        widget.slot.bridge?.loadBook(widget.bookBase64);
+        widget.slot.bridge?.loadBook(widget.bookBase64,
+            locatorJson: widget.locatorJson);
       },
     );
   }

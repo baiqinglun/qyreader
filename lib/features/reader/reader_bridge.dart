@@ -13,8 +13,11 @@ class ReaderBridge {
 
   final InAppWebViewController _controller;
 
-  /// 载入书籍（base64）。大文件一次性注入，M1 接受；分块注入留待后续优化。
-  Future<void> loadBook(String base64) => _eval('loadBook(${_jsStr(base64)})');
+  /// 载入书籍（base64）并渲染；[locatorJson] 非空时首次 display 直接定位
+  /// （JS 自主首渲，规避桥时序问题）。大文件一次性注入，M1 接受。
+  Future<void> loadBook(String base64, {String? locatorJson}) => _eval(
+        'loadBook(${_jsStr(base64)}, ${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+      );
 
   /// 注入排版样式（含主题色）。
   Future<void> applyStyle(String styleJson) =>
