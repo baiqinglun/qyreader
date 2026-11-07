@@ -42,6 +42,9 @@ class ReaderBridge {
   /// 后退一页。
   Future<void> prevPage() => _eval('prevPage()');
 
+  /// 重报当前位置（locations 就绪后补 percent）。
+  Future<void> reportLocation() => _eval('reportLocation()');
+
   /// 与目标位置对齐后前进一页（reserve 池同步用）。
   Future<void> syncNextMap(Map<String, dynamic> locator) =>
       _eval('syncNext(${_jsStr(jsonEncode(locator))})');

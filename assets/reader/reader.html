@@ -166,13 +166,28 @@
         post({ type: 'tap', x: e.clientX, y: e.clientY });
         return false;
       });
+      // 桌面鼠标路径兜底：epub.js tap 依赖触摸事件，WebView2 上不触发，
+      // 直接在 iframe 文档挂 click（坐标换算到外层视口）。
+      // FIXME: 需核对文档——view.document/view.iframe 为 epub.js 内部结构。
+      rendition.on('rendered', function (section, view) {
+        var doc = view && view.document;
+        var iframe = view && view.iframe;
+        if (!doc || !iframe) return;
+        doc.addEventListener('click', function (e) {
+          var r = iframe.getBoundingClientRect();
+          post({ type: 'tap', x: e.clientX + r.left, y: e.clientY + r.top });
+        });
+      });
       var initial = null;
       try { initial = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { initial = null; }
       book.ready.then(function () {
         // locations 用于百分比与进度条，异步生成不阻塞阅读
-        book.locations.generate(1600).then(function (n) {
-          locationsTotal = n;
-          post({ type: 'locationsReady', total: n });
+        book.locations.generate(1600).then(function (locations) {
+          // generate() 返回 location CFI 数组
+          locationsTotal = locations.length;
+          post({ type: 'locationsReady', total: locations.length });
+          // percent 在首屏 relocated 时（locations 未就绪）为空，这里重报一次
+          reportLocation();
         }).catch(function (e) { postError('locations.generate', e); });
         return initial
           ? rendition.display(initial.cfi || initial.href || initial.percent || undefined)
@@ -230,6 +245,32 @@
   function gotoPercent(p) {
     if (!rendition) return;
     rendition.display(p);
+  }
+
+  /// 重报当前位置（locations 就绪后补 percent 用）。
+  /// currentLocation() 同步返回 location 对象（部分版本可能包 Promise，兼容处理）。
+  function reportLocation() {
+    if (!rendition) return;
+    var handle = function (loc) {
+      if (loc && loc.start) {
+        post({
+          type: 'relocated',
+          locator: makeLocator(loc),
+          atStart: loc.atStart === true,
+          atEnd: loc.atEnd === true
+        });
+      }
+    };
+    try {
+      var loc = rendition.currentLocation();
+      if (loc && typeof loc.then === 'function') {
+        loc.then(handle).catch(function (e) { postError('report.location', e); });
+      } else {
+        handle(loc);
+      }
+    } catch (e) {
+      postError('report.location', e);
+    }
   }
 
   function nextPage() {

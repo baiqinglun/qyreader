@@ -13,8 +13,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 import 'package:go_router/go_router.dart';
@@ -79,6 +81,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   String? _initialLocatorJson;
   bool _booted = false;
   bool _bootTimedOut = false;
+  bool _windowsBlocked = false;
   int _reloadEpoch = 0;
   final Map<String, GlobalKey> _paneKeys = {};
 
@@ -96,6 +99,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   bool _chromeVisible = true;
   bool _tocOpen = false;
 
+  /// 启动诊断（看门狗触发时展示在兜底面板）
+  final List<String> _diag = <String>[];
+  void _diagLog(String line) {
+    debugPrint('reader-diag: $line');
+    _diag.add(line);
+    if (_diag.length > 24) _diag.removeAt(0);
+    if (_bootTimedOut && mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
@@ -107,6 +119,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       if (status == AnimationStatus.completed) _finalizeTurn();
     });
     _boot();
+  }
+
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final settings = ref.read(readingSettingsControllerProvider);
+    if (settings.flow == ReadingFlow.scrolled) return KeyEventResult.ignored;
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      _goForward();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      _goBackward();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   @override
@@ -126,21 +153,33 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       ref.read(readerControllerProvider(widget.bookId));
 
   GlobalKey _paneKeyFor(_ViewSlot slot) => _paneKeys.putIfAbsent(
-        '$_reloadEpoch-${slot.id}',
-        () => GlobalKey(debugLabel: 'reader-pane-${slot.id}'),
-      );
+    '$_reloadEpoch-${slot.id}',
+    () => GlobalKey(debugLabel: 'reader-pane-${slot.id}'),
+  );
 
   Future<void> _boot() async {
+    _diagLog('boot start');
+    // flutter_inappwebview_windows 0.6.0（beta）在 Flutter 子树重排时
+    // 丢失 WebView2 合成内容（本机实测：首次渲染后任何重排即白屏）。
+    // Windows 明确禁用，待插件稳定后评估（见 M6）。
+    if (!kIsWeb && Platform.isWindows) {
+      if (mounted) setState(() => _windowsBlocked = true);
+      return;
+    }
     await _controller.init();
     final state = _controllerState;
     final book = state.book;
     if (book == null) return;
 
     _readerUri = await ensureReaderHtmlFile();
+    _diagLog('reader html file: $_readerUri');
     final bytes = await File(book.filePath).readAsBytes();
     _bookBase64 = base64Encode(bytes);
     final initial = state.initialLocator;
     _initialLocatorJson = initial == null ? null : locatorToJson(initial);
+    _diagLog(
+      'book loaded (${bytes.length}B), initial locator: $_initialLocatorJson',
+    );
     if (!mounted) return;
     setState(() => _booted = true);
 
@@ -163,8 +202,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   void _applyStyleToAll() {
-    final payload =
-        readerStylePayload(ref.read(readingSettingsControllerProvider));
+    final payload = readerStylePayload(
+      ref.read(readingSettingsControllerProvider),
+    );
     for (final v in <_ViewSlot>[_a, _b]) {
       if (v.bookReady) v.bridge?.applyStyle(payload);
     }
@@ -201,6 +241,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         _onBookReady(slot);
       case ReaderLocationsReady():
         _controller.onLocationsReady();
+        // locations 就绪后让可视层重报位置，补齐 percent（进度保存依赖它）
+        if (slot == _visible) {
+          slot.bridge?.reportLocation();
+        }
       case ReaderRelocated(:final locator, :final atStart, :final atEnd):
         _onRelocated(slot, locator, atStart, atEnd);
       case ReaderTap(:final x, :final y):
@@ -390,10 +434,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       final forward = dx < 0;
       if (forward && !_canForward) return;
       if (!forward && !_canBackward) return;
-      setState(() => _turn = _Turn(
-            isForward: forward,
-            t: ((forward ? -dx : dx) / width).clamp(0, 1),
-          ));
+      setState(
+        () => _turn = _Turn(
+          isForward: forward,
+          t: ((forward ? -dx : dx) / width).clamp(0, 1),
+        ),
+      );
       if (!forward) {
         // 后翻：先截屏再驱动两个视图 prev
         _captureAndTurnBack();
@@ -476,8 +522,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   Future<void> _showTypesetting() async {
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor:
-          ref.read(readingSettingsControllerProvider).theme.chromeSurface,
+      backgroundColor: ref
+          .read(readingSettingsControllerProvider)
+          .theme
+          .chromeSurface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -493,42 +541,58 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final settings = ref.watch(readingSettingsControllerProvider);
     final theme = settings.theme;
 
+    final contentReady = _booted &&
+        state.book != null &&
+        !_bootTimedOut &&
+        !_windowsBlocked &&
+        _readerUri != null;
+
     return Scaffold(
       backgroundColor: theme.background,
       body: SafeArea(
         top: false,
         bottom: false,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            return Stack(
-              children: [
-                if (_booted &&
-                    state.book != null &&
-                    !_bootTimedOut &&
-                    _readerUri != null) ...[
-                  _viewLayer(_visible, width, settings, theme),
-                  _viewLayer(_hidden, width, settings, theme),
-                ] else
-                  Center(
-                    child: CircularProgressIndicator(color: theme.accent),
-                  ),
-                // 后翻覆盖层：旧页截图滑出
-                if (_backOverlay != null)
+        child: Focus(
+          autofocus: true,
+          onKeyEvent: _onKeyEvent,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              // 根 Stack 的 children 恒定（数量/类型/顺序不变）：
+              // Windows 平台视图对子树重排敏感，显隐只在层内部处理。
+              return Stack(
+                children: [
+                  // [0] 内容层
                   Positioned.fill(
-                    child: RepaintBoundary(
-                      child: Transform.translate(
-                        offset: Offset(width * (_turn?.t ?? 0), 0),
-                        child: Image.memory(
-                          _backOverlay!,
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                        ),
-                      ),
-                    ),
+                    child: contentReady
+                        ? Stack(
+                            children: [
+                              _viewLayer(_visible, width, settings, theme),
+                              _viewLayer(_hidden, width, settings, theme),
+                            ],
+                          )
+                        : Center(
+                            child: CircularProgressIndicator(
+                              color: theme.accent,
+                            ),
+                          ),
                   ),
-                // 手势观察层（translucent，不消费事件；点击由 JS tap 上报）
-                if (!_bootTimedOut)
+                  // [1] 后翻覆盖层：旧页截图滑出
+                  Positioned.fill(
+                    child: _backOverlay != null
+                        ? RepaintBoundary(
+                            child: Transform.translate(
+                              offset: Offset(width * (_turn?.t ?? 0), 0),
+                              child: Image.memory(
+                                _backOverlay!,
+                                fit: BoxFit.cover,
+                                gaplessPlayback: true,
+                              ),
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                  // [2] 手势观察层（translucent；点击由 JS tap 上报）
                   Positioned.fill(
                     child: Listener(
                       behavior: HitTestBehavior.translucent,
@@ -543,64 +607,117 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                       },
                     ),
                   ),
-                if (_chromeVisible && state.book != null) ...[
-                  _TopBar(state: state, theme: theme, onBack: _onBack),
-                  Align(
-                    alignment: Alignment.bottomCenter,
-                    child: _BottomBar(
-                      state: state,
-                      theme: theme,
-                      onToc: () => setState(() => _tocOpen = true),
-                      onTypesetting: _showTypesetting,
-                      onSeek: _onSeek,
-                    ),
+                  // [3] chrome 层（内部显隐，不动内容层）
+                  Positioned.fill(
+                    child: (_chromeVisible && state.book != null)
+                        ? Stack(
+                            children: [
+                              _TopBar(
+                                state: state,
+                                theme: theme,
+                                onBack: _onBack,
+                              ),
+                              Align(
+                                alignment: Alignment.bottomCenter,
+                                child: _BottomBar(
+                                  state: state,
+                                  theme: theme,
+                                  onToc: () => setState(() => _tocOpen = true),
+                                  onTypesetting: _showTypesetting,
+                                  onSeek: _onSeek,
+                                ),
+                              ),
+                            ],
+                          )
+                        : const SizedBox.shrink(),
                   ),
+                  // [4] 目录抽屉（内部 AnimatedSwitcher 恒定）
+                  TocDrawer(
+                    open: _tocOpen,
+                    theme: theme,
+                    chapters: state.chapters,
+                    currentHref: _visible.locator?.href,
+                    onDismiss: () => setState(() => _tocOpen = false),
+                    onChapter: _onChapterTap,
+                  ),
+                  // [5] 全屏遮罩：装载错误 / WebView 不可用诊断
+                  Positioned.fill(child: _buildOverlay(state, theme)),
                 ],
-                TocDrawer(
-                  open: _tocOpen,
-                  theme: theme,
-                  chapters: state.chapters,
-                  currentHref: _visible.locator?.href,
-                  onDismiss: () => setState(() => _tocOpen = false),
-                  onChapter: _onChapterTap,
-                ),
-                if (state.loadError != null)
-                  Positioned.fill(
-                    child: ColoredBox(
-                      color: theme.background,
-                      child: Center(
-                        child: Text(
-                          state.loadError!,
-                          style: TextStyle(color: theme.chromeForeground),
-                        ),
-                      ),
-                    ),
-                  ),
-                if (_bootTimedOut)
-                  Positioned.fill(
-                    child: ColoredBox(
-                      color: theme.background,
-                      child: Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(32),
-                          child: Text(
-                            '当前平台暂不支持 WebView 渲染。\n'
-                            '请在 Android 设备上验收阅读器；Windows 需安装 WebView2 运行时。',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: theme.chromeForeground),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
     );
   }
 
+  /// 全屏遮罩：装载错误或 WebView 启动诊断（恒定占位，内部条件渲染）。
+  Widget _buildOverlay(ReaderState state, ReadingTheme theme) {
+    if (_windowsBlocked) {
+      return ColoredBox(
+        color: theme.background,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Text(
+              'Windows 桌面端的 WebView2 插件（flutter_inappwebview_windows '
+              '0.6.0 beta）存在合成缺陷：任何界面重排都会丢失已渲染内容。'
+              '\n\n阅读器请安装 Android 安装包验收（qyreader/ 目录下的 APK）；'
+              'Windows 支持待插件稳定后评估。',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: theme.chromeForeground, height: 1.6),
+            ),
+          ),
+        ),
+      );
+    }
+    final message = state.loadError;
+    if (message != null) {
+      return ColoredBox(
+        color: theme.background,
+        child: Center(
+          child: Text(message, style: TextStyle(color: theme.chromeForeground)),
+        ),
+      );
+    }
+    if (_bootTimedOut) {
+      return ColoredBox(
+        color: theme.background,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text(
+              'WebView 未能启动（诊断信息）',
+              style: TextStyle(
+                color: theme.chromeForeground,
+                fontWeight: FontWeight.w600,
+                fontSize: 16,
+              ),
+            ),
+            const SizedBox(height: 12),
+            for (final line in _diag)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  line,
+                  style: TextStyle(
+                    color: theme.chromeForeground.withValues(alpha: 0.8),
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  /// 构造某一层。所有状态（静止/翻页中/隐藏）共享同一棵 widget 结构
+  /// （Positioned.fill > RepaintBoundary > Opacity > Transform.translate >
+  /// Stack[Transform > pane, 遮罩]），只改数值参数——避免 Windows 平台
+  /// 视图在子树结构变化时丢内容。隐藏态 = 恒定位移到屏幕外右侧。
   Widget _viewLayer(
     _ViewSlot slot,
     double width,
@@ -611,82 +728,86 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final turn = _turn;
     final forwardTurn = turn != null && turn.isForward;
     final mode = settings.pageTurnMode;
+    final t = turn?.t ?? 0;
 
-    Widget layer = _WebViewPane(
-      key: _paneKeyFor(slot),
-      slot: slot,
-      htmlUri: _readerUri!,
-      bookBase64: _bookBase64,
-      // JS 自主首渲：可视层带初始定位，隐藏层从头显示（随后 syncNext 对齐）
-      locatorJson: slot == _visible ? _initialLocatorJson : null,
-      onJsEvent: (args) => _onJsEvent(slot, args),
-    );
-
+    // 数值化变换参数（无结构分支）
+    double dx = 0;
+    double dy = 0;
+    double dim = 0;
+    double rotY = 0;
+    double opacity = 1;
     if (isHidden) {
-      if (!forwardTurn) {
-        // 静止与后翻期间隐藏层不参与绘制（GlobalKey 保持平台视图存活）
-        return Offstage(child: layer);
+      if (forwardTurn) {
+        switch (mode) {
+          case PageTurnMode.slide:
+            dx = width * (1 - t);
+            rotY = -0.035 * (1 - t); // ≈ 2° 透视
+          case PageTurnMode.cover:
+            dx = width * (1 - t);
+          case PageTurnMode.fade:
+            opacity = t;
+          case PageTurnMode.none:
+            dx = width;
+        }
+      } else {
+        // 静止/后翻期间：恒定位移到屏幕外右侧（结构不变）
+        dx = width;
       }
-      layer = _hiddenTransform(layer, turn.t, width, mode);
-    } else if (forwardTurn) {
-      layer = _visibleTransform(layer, turn.t, width, mode);
+    } else {
+      if (forwardTurn) {
+        switch (mode) {
+          case PageTurnMode.slide:
+            dx = -width * t;
+          case PageTurnMode.cover:
+            dx = -width * 0.08 * t;
+            dim = 0.15 * t;
+          case PageTurnMode.fade:
+            opacity = 1 - t;
+            dy = -2 * t;
+          case PageTurnMode.none:
+            dx = 0;
+        }
+      }
     }
-    return Positioned.fill(child: RepaintBoundary(child: layer));
-  }
 
-  Widget _visibleTransform(
-      Widget child, double t, double width, PageTurnMode mode) {
-    switch (mode) {
-      case PageTurnMode.slide:
-        return Transform.translate(offset: Offset(-width * t, 0), child: child);
-      case PageTurnMode.cover:
-        return Stack(
-          children: [
-            Transform.translate(
-              offset: Offset(-width * 0.08 * t, 0),
-              child: child,
+    return Positioned.fill(
+      child: RepaintBoundary(
+        child: Opacity(
+          opacity: opacity,
+          child: Transform.translate(
+            offset: Offset(dx, dy),
+            child: Stack(
+              children: [
+                Transform(
+                  alignment: Alignment.centerLeft,
+                  transform: Matrix4.identity()
+                    ..setEntry(3, 2, 0.002)
+                    ..rotateY(rotY),
+                  child: _WebViewPane(
+                    key: _paneKeyFor(slot),
+                    slot: slot,
+                    htmlUri: _readerUri!,
+                    bookBase64: _bookBase64,
+                    // JS 自主首渲：可视层带初始定位，隐藏层从头显示
+                    locatorJson: slot == _visible ? _initialLocatorJson : null,
+                    onJsEvent: (args) => _onJsEvent(slot, args),
+                    onDiag: _diagLog,
+                  ),
+                ),
+                // cover 模式：可视层压暗
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ColoredBox(
+                      color: Colors.black.withValues(alpha: dim),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            Positioned.fill(
-              child: ColoredBox(
-                color: Colors.black.withValues(alpha: 0.15 * t),
-              ),
-            ),
-          ],
-        );
-      case PageTurnMode.fade:
-        return Opacity(
-          opacity: 1 - t,
-          child: Transform.translate(offset: Offset(0, -2 * t), child: child),
-        );
-      case PageTurnMode.none:
-        return child;
-    }
-  }
-
-  Widget _hiddenTransform(
-      Widget child, double t, double width, PageTurnMode mode) {
-    switch (mode) {
-      case PageTurnMode.slide:
-        return Transform.translate(
-          offset: Offset(width * (1 - t), 0),
-          child: Transform(
-            alignment: Alignment.centerLeft,
-            transform: Matrix4.identity()
-              ..setEntry(3, 2, 0.002)
-              ..rotateY(-0.035 * (1 - t)), // ≈ 2° 透视
-            child: child,
           ),
-        );
-      case PageTurnMode.cover:
-        return Transform.translate(
-          offset: Offset(width * (1 - t), 0),
-          child: child,
-        );
-      case PageTurnMode.fade:
-        return Opacity(opacity: t, child: child);
-      case PageTurnMode.none:
-        return child;
-    }
+        ),
+      ),
+    );
   }
 }
 
@@ -698,6 +819,7 @@ class _WebViewPane extends StatefulWidget {
     required this.bookBase64,
     required this.locatorJson,
     required this.onJsEvent,
+    required this.onDiag,
     super.key,
   });
 
@@ -712,6 +834,7 @@ class _WebViewPane extends StatefulWidget {
   /// 初始定位 JSON（可空）。
   final String? locatorJson;
   final void Function(List<dynamic> args) onJsEvent;
+  final void Function(String line) onDiag;
 
   @override
   State<_WebViewPane> createState() => _WebViewPaneState();
@@ -728,6 +851,7 @@ class _WebViewPaneState extends State<_WebViewPane> {
         supportZoom: false,
       ),
       onWebViewCreated: (controller) {
+        widget.onDiag('webview created (${widget.slot.id})');
         widget.slot.bridge = ReaderBridge(controller);
         controller.addJavaScriptHandler(
           handlerName: 'readerEvent',
@@ -737,16 +861,24 @@ class _WebViewPaneState extends State<_WebViewPane> {
           },
         );
       },
-      onConsoleMessage: (_, message) {
-        // JS 侧诊断信息（未捕获错误经 window.error → 桥上报，这里兜底采集）
-        debugPrint(
-          'reader[${widget.slot.id}] js(${message.messageLevel}): '
-          '${message.message}',
+      onLoadStart: (_, __) => widget.onDiag('[${widget.slot.id}] loadStart'),
+      onLoadStop: (_, __) {
+        widget.onDiag('[${widget.slot.id}] loadStop → loadBook');
+        widget.slot.bridge?.loadBook(
+          widget.bookBase64,
+          locatorJson: widget.locatorJson,
         );
       },
-      onLoadStop: (_, __) {
-        widget.slot.bridge?.loadBook(widget.bookBase64,
-            locatorJson: widget.locatorJson);
+      onReceivedError: (_, request, error) => widget.onDiag(
+        '[${widget.slot.id}] receivedError ${error.type} ${error.description} url=${request.url}',
+      ),
+      onReceivedHttpError: (_, request, response) => widget.onDiag(
+        '[${widget.slot.id}] receivedHttpError ${response.statusCode} url=${request.url}',
+      ),
+      onConsoleMessage: (_, message) {
+        widget.onDiag(
+          '[${widget.slot.id}] js(${message.messageLevel}): ${message.message}',
+        );
       },
     );
   }
@@ -839,8 +971,10 @@ class _BottomBar extends StatelessWidget {
               children: [
                 TextButton(
                   onPressed: onToc,
-                  child:
-                      Text('目录', style: TextStyle(color: theme.chromeForeground)),
+                  child: Text(
+                    '目录',
+                    style: TextStyle(color: theme.chromeForeground),
+                  ),
                 ),
                 Expanded(
                   child: Slider(
@@ -851,8 +985,10 @@ class _BottomBar extends StatelessWidget {
                 ),
                 TextButton(
                   onPressed: onTypesetting,
-                  child:
-                      Text('Aa', style: TextStyle(color: theme.chromeForeground)),
+                  child: Text(
+                    'Aa',
+                    style: TextStyle(color: theme.chromeForeground),
+                  ),
                 ),
               ],
             ),

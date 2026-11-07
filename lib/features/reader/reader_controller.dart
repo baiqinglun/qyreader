@@ -116,7 +116,11 @@ class ReaderController extends _$ReaderController {
 
   @override
   ReaderState build(String bookId) {
-    ref.onDispose(() => _saveDebounce?.cancel());
+    debugPrint('reader-ctrl: build($bookId) re-created');
+    ref.onDispose(() {
+      debugPrint('reader-ctrl: DISPOSED ($bookId)');
+      _saveDebounce?.cancel();
+    });
     return const ReaderState();
   }
 
