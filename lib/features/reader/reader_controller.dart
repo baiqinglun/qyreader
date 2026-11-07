@@ -114,11 +114,16 @@ Locator? pickInitialLocator(ReadingProgressSnapshot? progress) {
 class ReaderController extends _$ReaderController {
   Timer? _saveDebounce;
 
+  /// 页面销毁后异步链（init 的多次 await）不得再写 state，
+  /// 否则触发 defunct 元素断言（debug 崩溃）。
+  bool _disposed = false;
+
   @override
   ReaderState build(String bookId) {
     debugPrint('reader-ctrl: build($bookId) re-created');
     ref.onDispose(() {
       debugPrint('reader-ctrl: DISPOSED ($bookId)');
+      _disposed = true;
       _saveDebounce?.cancel();
     });
     return const ReaderState();
@@ -128,16 +133,20 @@ class ReaderController extends _$ReaderController {
   Future<void> init() async {
     final bookRepo = await ref.read(bookRepositoryProvider.future);
     final progressRepo = await ref.read(progressRepositoryProvider.future);
+    if (_disposed) return;
 
     final book = await bookRepo.getById(bookId);
+    if (_disposed) return;
     if (book == null) {
       state = state.copyWith(loadError: '书籍不存在或已被删除');
       return;
     }
     await bookRepo.touchOpened(bookId);
     final chapters = await bookRepo.getChapters(bookId);
+    if (_disposed) return;
 
     final progress = await progressRepo.getProgress(bookId);
+    if (_disposed) return;
     state = state.copyWith(
       book: book,
       chapters: chapters,

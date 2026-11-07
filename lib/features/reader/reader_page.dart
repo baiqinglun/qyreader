@@ -46,6 +46,10 @@ class _ViewSlot {
   bool bookReady = false;
   Locator? locator;
 
+  /// 本槽位页面的事件序号去重（__n 按页面各自计数，A/B 不能共享集合，
+  /// 否则 B 页事件与 A 全部撞号被丢，隐藏池永不就绪、前翻失效）。
+  final Set<int> seenEventSeq = <int>{};
+
   /// 隐藏层同步簿记：最近一次对齐的可视层位置 / 正在对齐的目标。
   Locator? lastSyncedVisible;
   Locator? pendingSyncVisible;
@@ -92,8 +96,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   _Turn? _turn;
   late final AnimationController _settle;
 
+  /// 拖拽起点（手势层局部坐标）。null = 无进行中的拖拽。
   Offset? _pointerStart;
-  Duration _pointerStartAt = Duration.zero;
 
   Uint8List? _backOverlay;
   bool _backInFlight = false;
@@ -252,6 +256,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       v.lastSyncedVisible = null;
       v.pendingSyncVisible = null;
     }
+    // 新页面 JS 侧 __n 从 0 重新计数，不清空会把新页面事件全部当成
+    // 旧页面的重复而丢弃（实测：切换排版后 relocated/bookReady 全失效）
+    for (final v in <_ViewSlot>[_a, _b]) {
+      v.seenEventSeq.clear();
+    }
     _reloadEpoch++;
     if (!mounted) return;
     setState(() => _booted = false);
@@ -261,9 +270,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   // ---- 桥事件 ----
 
-  final Set<int> _seenEventSeq = <int>{};
-
-  /// 三通道（console.error/console.log/callHandler）并发投递，按 __n 去重。
+  /// 三通道（console.error/console.log/callHandler）并发投递，按 __n 去重
+  ///（序号按槽位页面各自计数，集合随槽位隔离）。
   int? _eventSeq(String raw) {
     try {
       final decoded = jsonDecode(raw);
@@ -279,9 +287,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (raw == null) return;
     final seq = _eventSeq(raw);
     if (seq != null) {
-      if (!_seenEventSeq.add(seq)) return; // 三路重复，丢弃
-      while (_seenEventSeq.length > 128) {
-        _seenEventSeq.remove(_seenEventSeq.first);
+      if (!slot.seenEventSeq.add(seq)) return; // 三路重复，丢弃
+      while (slot.seenEventSeq.length > 128) {
+        slot.seenEventSeq.remove(slot.seenEventSeq.first);
       }
     }
     final event = parseReaderEvent(raw);
@@ -458,6 +466,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       oldVisible.pendingSyncVisible = target;
       oldVisible.bridge?.syncNextMap(_locatorMap(target));
     }
+    // 新可视层自隐藏期起未再上报位置（它已预渲染下一页，交换后无 relocated），
+    // 控制器的 atStart/atEnd/percent/locator 会停留在其旧值——后翻会被误判
+    // 书首、进度会存错页。让新可视层立即重报。
+    newVisible.bridge?.reportLocation();
     setState(() {});
   }
 
@@ -494,16 +506,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   // ---- 手势 ----
+  //
+  // 拖拽必须走 GestureDetector（手势竞技场声明制），不能用裸 Listener：
+  // HC 平台视图的转发识别器参与竞技场，裸 Listener 不参与、收不到被
+  // WebView 消费的拖拽（实测滑动翻页无反应）。本层声明横向拖拽后框架
+  // 不再把它转发给 WebView；tap 与纵向滚动仍归 WebView（点击经 JS 上报，
+  // 滚动模式竖滑不受影响）。
 
-  void _onPointerDown(PointerDownEvent e) {
-    _pointerStart = e.position;
-    _pointerStartAt = e.timeStamp;
+  void _onDragStart(DragStartDetails d) {
+    _pointerStart = d.localPosition;
   }
 
-  void _onPointerMove(PointerMoveEvent e, double width) {
+  void _onDragUpdate(DragUpdateDetails d, double width) {
     final start = _pointerStart;
     if (start == null) return;
-    final dx = e.position.dx - start.dx;
+    final dx = d.localPosition.dx - start.dx;
 
     final turn = _turn;
     if (turn == null) {
@@ -532,17 +549,24 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     setState(() => turn.t = t);
   }
 
-  void _onPointerUp(PointerUpEvent e, double width) {
+  void _onDragEnd(DragEndDetails d) {
     final start = _pointerStart;
     _pointerStart = null;
     final turn = _turn;
     if (turn == null || start == null) return;
-    final ms = (e.timeStamp - _pointerStartAt).inMilliseconds.clamp(1, 100000);
-    final vx = (e.position.dx - start.dx) / ms * 1000;
+    // primaryVelocity：横向速度 px/s（负=向左）
+    final vx = d.primaryVelocity ?? 0.0;
     final draggingForward = turn.isForward;
     final sameDirection = vx.sign == (draggingForward ? -1.0 : 1.0);
     final committed = turn.t > 0.5 || (sameDirection && vx.abs() > 800);
     _settleTurn(commit: committed);
+  }
+
+  void _onDragCancel() {
+    _pointerStart = null;
+    if (_turn != null && !_settle.isAnimating) {
+      _settleTurn(commit: false);
+    }
   }
 
   // ---- 点击分区 ----
@@ -688,19 +712,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                           )
                         : const SizedBox.shrink(),
                   ),
-                  // [2] 手势观察层（translucent；点击由 JS tap 上报）
+                  // [2] 手势层：TLHC 模式触摸经竞技场转发，横向拖拽在此
+                  // 声明后不再转发给 WebView；点击仍由 WebView JS tap 上报
                   Positioned.fill(
-                    child: Listener(
+                    child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
-                      onPointerDown: _onPointerDown,
-                      onPointerMove: (e) => _onPointerMove(e, width),
-                      onPointerUp: (e) => _onPointerUp(e, width),
-                      onPointerCancel: (_) {
-                        _pointerStart = null;
-                        if (_turn != null && !_settle.isAnimating) {
-                          _settleTurn(commit: false);
-                        }
-                      },
+                      onHorizontalDragStart: _onDragStart,
+                      onHorizontalDragUpdate: (d) => _onDragUpdate(d, width),
+                      onHorizontalDragEnd: _onDragEnd,
+                      onHorizontalDragCancel: _onDragCancel,
                     ),
                   ),
                   // [3] chrome 层（内部显隐，不动内容层）
@@ -903,22 +923,22 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                 //（表现为 WebView 事件全通但永远不出像素，relocated 也不触发）。
                 // 必须用 Positioned.fill 强制满尺寸紧约束。
                 Positioned.fill(
-                  child: Transform(
-                    alignment: Alignment.centerLeft,
-                    transform: Matrix4.identity()
-                      ..setEntry(3, 2, 0.002)
-                      ..rotateY(rotY),
-                    child: _WebViewPane(
-                      key: _paneKeyFor(slot),
-                      slot: slot,
-                      pageUri: _readerUri!,
-                      bookUrl: _bookUrl!,
-                      // JS 自主首渲：可视层带初始定位，隐藏层从头显示
-                      locatorJson: slot == _visible ? _initialLocatorJson : null,
-                      onJsEvent: (args) => _onJsEvent(slot, args),
-                      onDiag: _diagLog,
+                    child: Transform(
+                      alignment: Alignment.centerLeft,
+                      transform: Matrix4.identity()
+                        ..setEntry(3, 2, 0.002)
+                        ..rotateY(rotY),
+                      child: _WebViewPane(
+                        key: _paneKeyFor(slot),
+                        slot: slot,
+                        pageUri: _readerUri!,
+                        bookUrl: _bookUrl!,
+                        // JS 自主首渲：可视层带初始定位，隐藏层从头显示
+                        locatorJson: slot == _visible ? _initialLocatorJson : null,
+                        onJsEvent: (args) => _onJsEvent(slot, args),
+                        onDiag: _diagLog,
+                      ),
                     ),
-                  ),
                 ),
                 // cover 模式：可视层压暗
                 Positioned.fill(
@@ -1023,14 +1043,16 @@ class _WebViewPaneState extends State<_WebViewPane> {
 
   @override
   Widget build(BuildContext context) {
-    // Android 上启用 Hybrid Composition（原生直接合成）：
-    // 默认的 SurfaceTexture 虚拟显示模式在部分设备/模拟器上
-    // 存在整层不出像素的白屏问题（flutter#104889/#116954）。
+    // Android 用默认 TLHC（虚拟显示）模式：触摸必须经 Flutter 手势竞技场
+    // 转发，外层横向拖拽识别器可声明手势实现原生翻页。HC（原生合成）下
+    // WebView 作为真实 Android 子视图直接消费触摸、绕过竞技场，Flutter
+    // 层任何手势都收不到（实测）。旧结论「TLHC 整层不出像素」出自
+    // 0×0 布局塌缩/转场快照误诊时代，真因修复后实测 TLHC 渲染正常。
     if (defaultTargetPlatform == TargetPlatform.android) {
       return WebViewWidget.fromPlatformCreationParams(
         params: AndroidWebViewWidgetCreationParams(
           controller: _controller.platform,
-          displayWithHybridComposition: true,
+          displayWithHybridComposition: false,
         ),
       );
     }
