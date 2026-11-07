@@ -46,3 +46,6 @@ app.*.map.json
 
 # ZCode 工具文件
 .zcode/
+
+# APK 产物目录（每轮对话构建放入）
+/qyreader/
