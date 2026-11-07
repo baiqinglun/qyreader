@@ -183,9 +183,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (!mounted) return;
     setState(() => _booted = true);
 
-    // WebView 平台不可用（无 WebView2 / 插件缺实现）的兜底提示
+    // 看门狗一：WebView 桥 12s 未就绪（插件缺实现/页面未加载）
     Timer(const Duration(seconds: 12), () {
       if (mounted && !_a.bridgeReady && !_b.bridgeReady) {
+        _diagLog('watchdog: bridgeReady 超时');
+        setState(() => _bootTimedOut = true);
+      }
+    });
+    // 看门狗二：桥就绪但书籍 25s 未渲染完成（如大文件注入失败）
+    Timer(const Duration(seconds: 25), () {
+      if (mounted && !_a.bookReady && !_b.bookReady) {
+        _diagLog('watchdog: bookReady 超时（见上方桥/错误日志）');
         setState(() => _bootTimedOut = true);
       }
     });
@@ -250,7 +258,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       case ReaderTap(:final x, :final y):
         _onContentTap(x, y);
       case ReaderError(:final code, :final message):
-        debugPrint('reader[${slot.id}] error($code): $message');
+        _diagLog('[${slot.id}] error($code): $message');
+        // 书籍打开/渲染失败 → 屏幕可见（此前静默白屏）
+        if (code.startsWith('book') || code.startsWith('render')) {
+          _controller.onLoadError('打开失败：$code $message');
+        }
     }
     if (mounted) setState(() {});
   }
@@ -541,7 +553,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final settings = ref.watch(readingSettingsControllerProvider);
     final theme = settings.theme;
 
-    final contentReady = _booted &&
+    final contentReady =
+        _booted &&
         state.book != null &&
         !_bootTimedOut &&
         !_windowsBlocked &&

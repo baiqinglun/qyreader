@@ -135,6 +135,27 @@
     }
   }
 
+  // ---- 分块书籍载入：大文件 base64 一次性经 evaluateJavascript 注入
+  // ---- 在 Android WebView 上会静默失败，改为 Dart 分块推送、JS 端拼接。
+  var __chunks = [];
+  var __bookLocator = null;
+
+  function beginBook(locatorJson) {
+    __chunks = [];
+    __bookLocator = locatorJson;
+  }
+
+  function appendBookChunk(chunk) {
+    __chunks.push(chunk);
+  }
+
+  function finishBook() {
+    var b64 = __chunks.join('');
+    __chunks = [];
+    loadBook(b64, __bookLocator);
+    __bookLocator = null;
+  }
+
   /// Dart → JS：载入书籍并渲染。
   /// locatorJson 可空；非空时首次 display 直接定位（JS 自主首渲，
   /// 不依赖 Dart 二次指令，规避桥时序问题）。

@@ -13,11 +13,24 @@ class ReaderBridge {
 
   final InAppWebViewController _controller;
 
-  /// 载入书籍（base64）并渲染；[locatorJson] 非空时首次 display 直接定位
-  /// （JS 自主首渲，规避桥时序问题）。大文件一次性注入，M1 接受。
-  Future<void> loadBook(String base64, {String? locatorJson}) => _eval(
-        'loadBook(${_jsStr(base64)}, ${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
-      );
+  /// 分块载入书籍（base64）并渲染；[locatorJson] 非空时首次 display 直接定位
+  /// （JS 自主首渲，规避桥时序问题）。
+  ///
+  /// Android evaluateJavascript 对超大字符串会静默失败，
+  /// 按 256KB 分块推送、JS 端拼接后再解码。
+  Future<void> loadBook(String base64, {String? locatorJson}) async {
+    const int chunkSize = 256 * 1024;
+    await _eval(
+      'beginBook(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+    );
+    for (var i = 0; i < base64.length; i += chunkSize) {
+      final end = (i + chunkSize) < base64.length
+          ? (i + chunkSize)
+          : base64.length;
+      await _eval('appendBookChunk(${_jsStr(base64.substring(i, end))})');
+    }
+    await _eval('finishBook()');
+  }
 
   /// 注入排版样式（含主题色）。
   Future<void> applyStyle(String styleJson) =>
