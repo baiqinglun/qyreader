@@ -28,7 +28,9 @@
       overflow: hidden;
       -webkit-user-select: none; user-select: none;
     }
-    #viewer { width: 100%; height: 100%; }
+    /* 尺寸由 JS 以像素显式设置（Android WebView 对百分比容器
+       在初次布局时可能解析为 0，导致分页渲染到 0x0） */
+    #viewer { width: 100%; height: 100%; overflow: hidden; }
   </style>
 </head>
 <body>
@@ -47,13 +49,12 @@
   var __seq = 0;
 
   function post(msg) {
-    msg.__n = ++__seq;
+    // 双通道：console（QYEVT: 前缀）+ JavaScriptChannel（readerEvent.postMessage）
     var j = JSON.stringify(msg);
-    try { console.error('QYEVT:' + j); } catch (e) {}
     try { console.log('QYEVT:' + j); } catch (e) {}
     try {
-      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-        window.flutter_inappwebview.callHandler('readerEvent', j);
+      if (window.readerEvent && window.readerEvent.postMessage) {
+        window.readerEvent.postMessage(j);
       }
     } catch (e) {}
   }
@@ -140,14 +141,18 @@
   async function loadBook(bookUrl, locatorJson) {
     try {
       book = ePub(bookUrl);
+      // 用窗口像素尺寸显式渲染（百分比容器在 Android WebView 上
+      // 初次布局可能解析为 0，导致分页区域 0x0、内容不可见）
       rendition = book.renderTo('viewer', {
-        width: '100%',
-        height: '100%',
+        width: window.innerWidth + 'px',
+        height: window.innerHeight + 'px',
         flow: 'paginated',
         spread: 'none',
         // FIXME: 需核对文档——minSpreadWidth 大值强制单页排版，窄屏本就单页。
         minSpreadWidth: 100000,
-        allowScriptedContent: false
+        // epub.js 需要在渲染 iframe 内注入脚本完成分页；false 会使 iframe
+        // 被 sandbox 拦截脚本（Android 上直接白屏）。
+        allowScriptedContent: true
       });
       rendition.on('relocated', function (location) {
         post({

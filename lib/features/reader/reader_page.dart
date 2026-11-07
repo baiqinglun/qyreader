@@ -17,15 +17,15 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme/reading_theme.dart';
 import '../../core/locator.dart';
-import 'reader_asset_server.dart' show ReaderAssetServer;
-import 'reader_assets.dart';
 import 'reader_bridge.dart';
+import 'reader_asset_server.dart';
+import 'reader_assets.dart';
 import 'reader_bridge_events.dart';
 import 'reader_controller.dart';
 import 'reader_settings.dart';
@@ -79,6 +79,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   final ReaderAssetServer _assetServer = ReaderAssetServer();
   Uri? _readerUri;
+  String? _bookUrl;
   String? _initialLocatorJson;
   bool _booted = false;
   bool _bootTimedOut = false;
@@ -174,11 +175,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final book = state.book;
     if (book == null) return;
 
-    _readerUri = await _assetServer.start(
+    // 页面：loadFlutterAsset（webview_flutter 直接读 Flutter assets）；
+    // 书籍：经本地 HTTP 服务提供（file:// XHR 在新版 WebView 上受限）。
+    await _assetServer.start(
       html: await loadReaderHtml(),
       bookPath: book.filePath,
     );
-    _diagLog('local server: $_readerUri');
+    _readerUri = Uri.parse('assets/reader/reader.html');
+    _bookUrl = _assetServer.pageUri!.replace(path: '/book.epub').toString();
+    _diagLog('page: $_readerUri book: $_bookUrl');
     final initial = state.initialLocator;
     _initialLocatorJson = initial == null ? null : locatorToJson(initial);
     _diagLog('book ${book.fileSize}B, initial locator: $_initialLocatorJson');
@@ -225,9 +230,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         _diagLog('[${slot.id}] dumpDiag failed: $e');
       }
     }
-    // 通道探针：主动注入一条 QYEVT 消息，若通道可用会置位 bridgeReady
-    final probe = await _a.bridge?.probeChannel();
-    _diagLog('[A] probeChannel sent=$probe bridgeReady=${_a.bridgeReady}');
   }
 
   void _applyStyleToAll() {
@@ -285,9 +287,28 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
     switch (event) {
       case ReaderBridgeReady():
+        _diagLog('[${slot.id}] bridgeReady=true');
         slot.bridgeReady = true;
       case ReaderBookReady():
+        _diagLog('[${slot.id}] bookReady=true');
         _onBookReady(slot);
+        // 诊断：WebView 内部截图（绕过 Flutter 合成层）
+        Future<void>.delayed(const Duration(milliseconds: 2500), () async {
+          final shot = await slot.bridge?.screenshot();
+          _diagLog(
+            '[${slot.id}] internal screenshot: ${shot == null ? "null" : "${shot.lengthInBytes}B"}',
+          );
+          if (shot != null) {
+            try {
+              final dir = await Directory.systemTemp.createTemp('qyshot');
+              final f = File('${dir.path}/webview_${slot.id}.png');
+              await f.writeAsBytes(shot);
+              _diagLog('[${slot.id}] saved: ${f.path}');
+            } catch (e) {
+              _diagLog('[${slot.id}] save failed: $e');
+            }
+          }
+        });
       case ReaderLocationsReady():
         _controller.onLocationsReady();
         // locations 就绪后让可视层重报位置，补齐 percent（进度保存依赖它）
@@ -295,8 +316,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           slot.bridge?.reportLocation();
         }
       case ReaderRelocated(:final locator, :final atStart, :final atEnd):
+        _diagLog(
+          '[${slot.id}] relocated ch=${locator.chapterIndex} cfi=${locator.cfi != null}',
+        );
         _onRelocated(slot, locator, atStart, atEnd);
       case ReaderTap(:final x, :final y):
+        _diagLog('[${slot.id}] tap ($x,$y)');
         _onContentTap(x, y);
       case ReaderError(:final code, :final message):
         _diagLog('[${slot.id}] error($code): $message');
@@ -875,8 +900,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                   child: _WebViewPane(
                     key: _paneKeyFor(slot),
                     slot: slot,
-                    htmlUri: _readerUri!,
-                    bookUrl: _readerUri!.replace(path: '/book.epub').toString(),
+                    pageUri: _readerUri!,
+                    bookUrl: _bookUrl!,
                     // JS 自主首渲：可视层带初始定位，隐藏层从头显示
                     locatorJson: slot == _visible ? _initialLocatorJson : null,
                     onJsEvent: (args) => _onJsEvent(slot, args),
@@ -900,11 +925,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 }
 
-/// 单个 WebView 面板。
+/// 单个 WebView 面板（webview_flutter 官方插件实现）。
 class _WebViewPane extends StatefulWidget {
   const _WebViewPane({
     required this.slot,
-    required this.htmlUri,
+    required this.pageUri,
     required this.bookUrl,
     required this.locatorJson,
     required this.onJsEvent,
@@ -914,10 +939,10 @@ class _WebViewPane extends StatefulWidget {
 
   final _ViewSlot slot;
 
-  /// 渲染页地址（本地资源服务）。
-  final Uri htmlUri;
+  /// 渲染页地址（Flutter assets）。
+  final Uri pageUri;
 
-  /// 书籍地址（本地资源服务）。
+  /// 书籍地址（同源 file）。
   final String bookUrl;
 
   /// 初始定位 JSON（可空）。
@@ -930,67 +955,63 @@ class _WebViewPane extends StatefulWidget {
 }
 
 class _WebViewPaneState extends State<_WebViewPane> {
+  late final WebViewController _controller;
+
   @override
-  Widget build(BuildContext context) {
-    return InAppWebView(
-      initialUrlRequest: URLRequest(url: WebUri(widget.htmlUri.toString())),
-      initialSettings: InAppWebViewSettings(
-        transparentBackground: true,
-        disableContextMenu: true,
-        supportZoom: false,
-      ),
-      onWebViewCreated: (controller) {
-        widget.onDiag('webview created (${widget.slot.id})');
-        widget.slot.bridge = ReaderBridge(controller);
-        controller.addJavaScriptHandler(
-          handlerName: 'readerEvent',
-          callback: (args) {
-            widget.onJsEvent(args);
-            return null;
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.transparent)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => widget.onDiag('[${widget.slot.id}] loadStart'),
+          onPageFinished: (_) {
+            widget.onDiag('[${widget.slot.id}] loadStop → loadBook');
+            widget.slot.bridge?.loadBook(
+              widget.bookUrl,
+              locatorJson: widget.locatorJson,
+            );
           },
-        );
-      },
-      onLoadStart: (_, __) => widget.onDiag('[${widget.slot.id}] loadStart'),
-      onLoadStop: (_, __) {
-        widget.onDiag('[${widget.slot.id}] loadStop → loadBook');
-        widget.slot.bridge?.loadBook(
-          widget.bookUrl,
-          locatorJson: widget.locatorJson,
-        );
-      },
-      onReceivedError: (_, request, error) {
-        widget.onDiag(
-          '[${widget.slot.id}] receivedError ${error.type} ${error.description} url=${request.url}',
-        );
-        // 主文档加载失败直接上屏（此前只在诊断日志里，用户只见白屏）
-        final url = request.url.toString();
-        final isMainFrame =
-            url == widget.htmlUri.toString() || !url.contains('/');
-        if (isMainFrame) {
-          widget.onJsEvent([
-            '{"type":"error","code":"page.load","message":"${error.type}: ${error.description} ($url)"}',
-          ]);
-        }
-      },
-      onReceivedHttpError: (_, request, response) => widget.onDiag(
-        '[${widget.slot.id}] receivedHttpError ${response.statusCode} url=${request.url}',
-      ),
-      onConsoleMessage: (_, message) {
-        var text = message.message;
-        // WebView2 会给 console.log 的字符串实参加引号，剥掉再匹配
-        if (text.length > 1 && text.startsWith('"') && text.endsWith('"')) {
-          text = text.substring(1, text.length - 1);
-        }
+          onHttpError: (e) => widget.onDiag(
+            '[${widget.slot.id}] httpError ${e.response?.statusCode ?? "?"}',
+          ),
+          onNavigationRequest: (request) {
+            // 正文内链接跳外链/其他源时拦截（M2 脚注处理，避免污染渲染页）
+            final url = request.url;
+            if (url.startsWith('file://') ||
+                url.startsWith('http://127.0.0.1')) {
+              return NavigationDecision.navigate;
+            }
+            widget.onDiag('[${widget.slot.id}] nav blocked: $url');
+            return NavigationDecision.prevent;
+          },
+        ),
+      )
+      ..addJavaScriptChannel(
+        'readerEvent',
+        onMessageReceived: (message) {
+          widget.onJsEvent([message.message]);
+        },
+      )
+      ..setOnConsoleMessage((message) {
+        final text = message.message;
         final idx = text.indexOf('QYEVT:');
         if (idx >= 0) {
           widget.onJsEvent([text.substring(idx + 6)]);
         } else if (text.startsWith('QYERR:')) {
           widget.onDiag('[${widget.slot.id}] ${text.substring(6)}');
-        } else {
+        } else if (text.isNotEmpty) {
           widget.onDiag('[${widget.slot.id}] js: $text');
         }
-      },
-    );
+      })
+      ..loadFlutterAsset(widget.pageUri.path);
+    widget.slot.bridge = ReaderBridge(_controller);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return WebViewWidget(controller: _controller);
   }
 }
 

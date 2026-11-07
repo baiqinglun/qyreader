@@ -42,6 +42,8 @@ class ReaderAssetServer {
 
   Future<void> _handle(HttpRequest request) async {
     try {
+      // loadFlutterAsset 页面的 origin 为 null，XHR 需显式放行
+      request.response.headers.set('Access-Control-Allow-Origin', '*');
       switch (request.uri.path) {
         case '/reader.html':
           request.response.headers.contentType = ContentType(

@@ -1,20 +1,24 @@
 /// Dart → JS 调用封装（桥协议下行方向）。
+///
+/// 基于 webview_flutter 官方插件（其 Android platform view 实现成熟稳定；
+/// flutter_inappwebview Android 在本机实测 platform view 不出像素后替换）。
+/// JS → Dart 事件经 console 'QYEVT:' 前缀与 JavaScriptChannel 双通道。
 library;
 
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 /// 封装 reader.html 暴露的全局函数。
 class ReaderBridge {
   /// 绑定某个 WebView 实例的控制器。
   ReaderBridge(this._controller);
 
-  final InAppWebViewController _controller;
+  final WebViewController _controller;
 
-  /// 载入书籍并渲染：[bookUrl] 为本地资源服务地址（同源，epub.js 自行
-  /// 拉取），[locatorJson] 非空时首次 display 直接定位（JS 自主首渲）。
+  /// 载入书籍并渲染：[bookUrl] 为同源书籍地址（file:// 或本地服务），
+  /// [locatorJson] 非空时首次 display 直接定位（JS 自主首渲）。
   Future<void> loadBook(String bookUrl, {String? locatorJson}) => _eval(
     'loadBook(${_jsStr(bookUrl)}, ${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
   );
@@ -42,41 +46,27 @@ class ReaderBridge {
   /// 后退一页。
   Future<void> prevPage() => _eval('prevPage()');
 
-  /// 重报当前位置（locations 就绪后补 percent）。
-  Future<void> reportLocation() => _eval('reportLocation()');
-
   /// 与目标位置对齐后前进一页（reserve 池同步用）。
   Future<void> syncNextMap(Map<String, dynamic> locator) =>
       _eval('syncNext(${_jsStr(jsonEncode(locator))})');
 
-  /// 通道探针：经 console 注入一条 bridgeReady 事件验证下行解析。
-  Future<bool> probeChannel() async {
-    try {
-      await _controller.evaluateJavascript(
-        source:
-            r"console.log('QYEVT:' + JSON.stringify({type: 'bridgeReady'})); return true;",
-      );
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
+  /// 重报当前位置（locations 就绪后补 percent）。
+  Future<void> reportLocation() => _eval('reportLocation()');
+
+  /// 截取 WebView 当前画面。
+  ///
+  /// webview_flutter 不提供内部截图 API（flutter_inappwebview 才有），
+  /// 返回 null；后翻页覆盖动画在无截图时自动降级为直接切换。
+  /// TODO(M2): 用页面内 canvas（html2canvas 思路）实现内容截图。
+  Future<Uint8List?> screenshot() async => null;
 
   /// 拉取页面内部诊断（__diagDump）：错误文本与桥/书状态。
   Future<String?> dumpDiag() async {
     try {
-      return await _controller.evaluateJavascript(
-        source: r'window.__diagDump ? window.__diagDump() : null',
+      final result = await _controller.runJavaScriptReturningResult(
+        'window.__diagDump ? window.__diagDump() : null',
       );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// 截取当前页（后翻覆盖层用）；平台不支持时返回 null。
-  Future<Uint8List?> screenshot() async {
-    try {
-      return await _controller.takeScreenshot();
+      return result.toString();
     } catch (_) {
       return null;
     }
@@ -87,9 +77,9 @@ class ReaderBridge {
 
   Future<void> _eval(String source) async {
     try {
-      await _controller.evaluateJavascript(source: source);
+      await _controller.runJavaScript(source);
     } catch (_) {
-      // WebView 已销毁/平台不支持时静默丢弃；翻页锁由 relocated 超时兜底解除。
+      // WebView 已销毁/页面未就绪时静默丢弃；事件由重试与看门狗兜底。
     }
   }
 }
