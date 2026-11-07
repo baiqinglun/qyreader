@@ -958,9 +958,20 @@ class _WebViewPaneState extends State<_WebViewPane> {
           locatorJson: widget.locatorJson,
         );
       },
-      onReceivedError: (_, request, error) => widget.onDiag(
-        '[${widget.slot.id}] receivedError ${error.type} ${error.description} url=${request.url}',
-      ),
+      onReceivedError: (_, request, error) {
+        widget.onDiag(
+          '[${widget.slot.id}] receivedError ${error.type} ${error.description} url=${request.url}',
+        );
+        // 主文档加载失败直接上屏（此前只在诊断日志里，用户只见白屏）
+        final url = request.url.toString();
+        final isMainFrame =
+            url == widget.htmlUri.toString() || !url.contains('/');
+        if (isMainFrame) {
+          widget.onJsEvent([
+            '{"type":"error","code":"page.load","message":"${error.type}: ${error.description} ($url)"}',
+          ]);
+        }
+      },
       onReceivedHttpError: (_, request, response) => widget.onDiag(
         '[${widget.slot.id}] receivedHttpError ${response.statusCode} url=${request.url}',
       ),

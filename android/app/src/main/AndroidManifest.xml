@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 阅读器本地资源服务（127.0.0.1）与 WebView 回环请求必需；
+         模板只在 debug 构建声明，release 必须显式声明（M4 S3 同步也需要） -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="qy_reader"
         android:name="${applicationName}"
