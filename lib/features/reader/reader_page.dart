@@ -13,11 +13,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 import 'package:go_router/go_router.dart';
 
@@ -1011,6 +1013,17 @@ class _WebViewPaneState extends State<_WebViewPane> {
 
   @override
   Widget build(BuildContext context) {
+    // Android 上启用 Hybrid Composition（原生直接合成）：
+    // 默认的 SurfaceTexture 虚拟显示模式在部分设备/模拟器上
+    // 存在整层不出像素的白屏问题（flutter#104889/#116954）。
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return WebViewWidget.fromPlatformCreationParams(
+        params: AndroidWebViewWidgetCreationParams(
+          controller: _controller.platform,
+          displayWithHybridComposition: true,
+        ),
+      );
+    }
     return WebViewWidget(controller: _controller);
   }
 }
