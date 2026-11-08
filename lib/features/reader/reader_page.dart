@@ -42,7 +42,11 @@ import 'reader_controller.dart';
 import 'reader_settings.dart';
 import 'widgets/annotation_sheet.dart';
 import 'widgets/note_editor_sheet.dart';
+import 'tts/tts_playback.dart';
+import 'tts/tts_settings.dart';
 import 'widgets/selection_menu.dart';
+import 'widgets/tts_bar.dart';
+import 'widgets/tts_sheet.dart';
 import 'widgets/toc_drawer.dart';
 import 'widgets/typesetting_panel.dart';
 
@@ -135,6 +139,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   /// 正在操作的既有划线（非空 = 显示划线操作面板）。
   Annotation? _activeAnnotation;
 
+  /// TTS 播放控制器（句级朗读 + 跟读高亮 + 自动翻页/续章）。
+  late final TtsPlaybackController _tts;
+
   /// 启动诊断（看门狗触发时展示在兜底面板）
   final List<String> _diag = <String>[];
   void _diagLog(String line) {
@@ -154,6 +161,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _settle.addStatusListener((status) {
       if (status == AnimationStatus.completed) _finalizeTurn();
     });
+    _tts = TtsPlaybackController(
+      bridge: () => _visible.bridge,
+      onFinishedChapter: () {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已朗读到全书末尾')),
+        );
+      },
+    );
     _boot();
   }
 
@@ -178,6 +194,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _settle.dispose();
     unawaited(_annotationsSub?.cancel());
     unawaited(_bookmarksSub?.cancel());
+    unawaited(_tts.dispose());
     unawaited(_assetServer.stop());
     ref.read(readerControllerProvider(widget.bookId).notifier).flushProgress();
     super.dispose();
@@ -849,6 +866,24 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     );
   }
 
+  /// 朗读入口：设置面板 → 开始朗读。
+  Future<void> _showTtsSheet() async {
+    // 朗读时收起 chrome 与抽屉，避免遮挡正文
+    final started = await showTtsSheet(
+      context,
+      theme: _theme,
+      loadVoices: _tts.availableVoices,
+    );
+    if (started != true || !mounted) return;
+    setState(() => _chromeVisible = false);
+    await _tts.start(ref.read(ttsSettingsControllerProvider));
+    if (_tts.value.error != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_tts.value.error!)),
+      );
+    }
+  }
+
   ReadingTheme get _theme => ref.read(readingSettingsControllerProvider).theme;
 
   // ---- build ----
@@ -947,19 +982,64 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                               ),
                               Align(
                                 alignment: Alignment.bottomCenter,
-                                child: _BottomBar(
-                                  state: state,
-                                  theme: theme,
-                                  bookmarked: _currentPageBookmarked,
-                                  onToc: () => setState(() => _tocOpen = true),
-                                  onTypesetting: _showTypesetting,
-                                  onToggleBookmark: _toggleBookmark,
-                                  onSeek: _onSeek,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // 控制条是独立层（chrome 隐藏时仍可见），
+                                    // 此处留出底栏高度避免遮挡
+                                    SizedBox(
+                                      height: _tts.value.active ? 64 : 0,
+                                    ),
+                                    _BottomBar(
+                                      state: state,
+                                      theme: theme,
+                                      bookmarked: _currentPageBookmarked,
+                                      ttsActive: _tts.value.active,
+                                      onToc: () =>
+                                          setState(() => _tocOpen = true),
+                                      onTypesetting: _showTypesetting,
+                                      onToggleBookmark: _toggleBookmark,
+                                      onTts: _showTtsSheet,
+                                      onSeek: _onSeek,
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           )
                         : const SizedBox.shrink(),
+                  ),
+                  // [3.5] 朗读控制条：独立于 chrome（朗读时 chrome 自动隐藏，
+                  // 控制条必须仍然可见可操作）
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          bottom: (_chromeVisible && state.book != null)
+                              ? 56
+                              : 8,
+                        ),
+                        child: ValueListenableBuilder<TtsPlaybackState>(
+                          valueListenable: _tts,
+                          builder: (context, ttsState, _) {
+                            if (!ttsState.active) {
+                              return const SizedBox.shrink();
+                            }
+                            return TtsBar(
+                              state: ttsState,
+                              theme: theme,
+                              onPause: _tts.pause,
+                              onResume: _tts.resume,
+                              onStop: _tts.stop,
+                            );
+                          },
+                        ),
+                      ),
+                    ),
                   ),
                   // [4] 目录抽屉（目录/书签/标注三 Tab）。
                   // 必须 Positioned.fill：Stack 尺寸由非定位子节点决定，
@@ -1402,9 +1482,11 @@ class _BottomBar extends StatelessWidget {
     required this.state,
     required this.theme,
     required this.bookmarked,
+    required this.ttsActive,
     required this.onToc,
     required this.onTypesetting,
     required this.onToggleBookmark,
+    required this.onTts,
     required this.onSeek,
   });
 
@@ -1413,9 +1495,13 @@ class _BottomBar extends StatelessWidget {
 
   /// 当前页是否已加书签（图标实/空心切换）。
   final bool bookmarked;
+
+  /// 是否正在朗读（图标高亮）。
+  final bool ttsActive;
   final VoidCallback onToc;
   final VoidCallback onTypesetting;
   final VoidCallback onToggleBookmark;
+  final VoidCallback onTts;
   final void Function(double percent) onSeek;
 
   @override
@@ -1442,6 +1528,14 @@ class _BottomBar extends StatelessWidget {
                     value: (state.percent ?? 0).clamp(0.0, 1.0),
                     onChanged: state.locationsReady ? onSeek : null,
                     activeColor: theme.accent,
+                  ),
+                ),
+                IconButton(
+                  tooltip: '朗读',
+                  onPressed: onTts,
+                  icon: Icon(
+                    Icons.headphones,
+                    color: ttsActive ? theme.accent : theme.chromeForeground,
                   ),
                 ),
                 IconButton(

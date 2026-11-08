@@ -284,8 +284,17 @@
 
       function findViewForCfi(cfiRange) {
         var found = null;
-        rendition.views().forEach(function (v) {
-          if (found || !v.contents) return;
+        // CFI 的 spinePos 决定它属于哪一章；仅在该章视图里解析。
+        // 否则 epub.js 会按位置把别的章的 CFI 解析到当前文档（跨章串染）。
+        var spinePos = -1;
+        try {
+          spinePos = new window.ePub.CFI(cfiRange).spinePos;
+        } catch (e) {
+          spinePos = -1;
+        }
+        rendition.views().all().forEach(function (v) {
+          if (found || !v || !v.contents) return;
+          if (spinePos >= 0 && v.index !== spinePos) return;
           try {
             v.contents.range(cfiRange);
             found = v;
@@ -329,6 +338,17 @@
         highlightRegistry.forEach(collectRects);
         var layer = ensureMarksLayer();
         layer.innerHTML = '';
+        // TTS 跟读高亮（与划线同层，单独一份矩形）
+        if (ttsRects.length) {
+          ttsRects.forEach(function (r) {
+            var box = document.createElement('div');
+            box.style.cssText =
+              'position:absolute;border-radius:2px;background:' + TTS_COLOR +
+              ';left:' + r.left + 'px;top:' + r.top + 'px;width:' +
+              r.width + 'px;height:' + r.height + 'px';
+            layer.appendChild(box);
+          });
+        }
         markRects.forEach(function (m) {
           var box = document.createElement('div');
           box.style.cssText =
@@ -431,6 +451,141 @@
           });
           renderMarks();
         } catch (e) { postError('annotation.remove', e); }
+      };
+
+      // ---- TTS 句级跟读 ----
+      // 句子切分：当前视图正文按句末标点切段，每段用 Range→CFI 固化位置。
+      // Dart 逐句朗读；本层负责高亮与「朗读句不在当前页时自动翻页」。
+      var TTS_COLOR = 'rgba(156, 195, 245, 0.42)';
+      var ttsRects = [];
+      var ttsSegments = [];
+
+      function currentView() {
+        if (!rendition) return null;
+        // views() 是 epub.js 自定义集合：用 all()，不支持下标
+        var views = rendition.views().all();
+        for (var i = 0; i < views.length; i++) {
+          if (views[i] && views[i].contents && views[i].contents.document &&
+              views[i].contents.document.body) {
+            return views[i];
+          }
+        }
+        return null;
+      }
+
+      function segmentSentences(view) {
+        var out = [];
+        if (!view || !view.contents) return out;
+        var doc = view.contents.document;
+        var body = doc.body;
+        if (!body) return out;
+        var walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
+        var END = '。！？!?…\n';
+        var buf = '';
+        var startNode = null, startOff = 0;
+        var endNode = null, endOff = 0;
+        var lastNode = null, lastLen = 0;
+        var n;
+
+        function flush() {
+          var text = buf.trim();
+          if (text.length >= 2 && startNode && endNode) {
+            try {
+              var range = doc.createRange();
+              range.setStart(startNode, startOff);
+              range.setEnd(endNode, endOff);
+              out.push({ cfi: view.contents.cfiFromRange(range), text: text });
+            } catch (e) { /* 无法固化的碎片跳过 */ }
+          }
+          buf = '';
+          startNode = null;
+          endNode = null;
+        }
+
+        while ((n = walker.nextNode())) {
+          var t = n.nodeValue || '';
+          lastNode = n;
+          lastLen = t.length;
+          for (var i = 0; i < t.length; i++) {
+            if (startNode === null) { startNode = n; startOff = i; }
+            buf += t[i];
+            if (END.indexOf(t[i]) >= 0) {
+              endNode = n;
+              endOff = i + 1;
+              flush();
+            }
+          }
+        }
+        if (buf.trim().length >= 2 && startNode && lastNode) {
+          endNode = lastNode;
+          endOff = lastLen;
+          flush();
+        }
+        return out;
+      }
+
+      window.__qyTtsSegments = function () {
+        var view = currentView();
+        ttsSegments = view ? segmentSentences(view) : [];
+        return JSON.stringify(ttsSegments);
+      };
+
+      // 高亮第 idx 句；不在当前页则先翻到该句（自动翻页）。
+      window.__qyTtsShow = function (cfiRange) {
+        ttsRects = [];
+        if (!rendition) return 'no-rendition';
+        var view = findViewForCfi(cfiRange);
+        if (!view || !view.contents) return 'no-view';
+        var apply = function () {
+          try {
+            var range = view.contents.range(cfiRange);
+            var rects = range.getClientRects();
+            for (var i = 0; i < rects.length; i++) {
+              var r = rects[i];
+              if (r.width < 1 || r.height < 1) continue;
+              ttsRects.push({ left: r.left, top: r.top, width: r.width,
+                height: r.height });
+            }
+          } catch (e) { postError('tts.rect', e); }
+          renderMarks();
+        };
+        apply();
+        var visible = ttsRects.some(function (r) {
+          return r.top < window.innerHeight && r.top + r.height > 0;
+        });
+        if (!visible) {
+          try {
+            rendition.display(cfiRange).then(function () {
+              setTimeout(apply, 60);
+            });
+          } catch (e) { postError('tts.turn', e); }
+          return 'turning';
+        }
+        return 'visible';
+      };
+
+      window.__qyTtsClear = function () {
+        ttsRects = [];
+        renderMarks();
+      };
+
+      // 下一章的起始 href（章节末自动续读用）；已是最后一章返回 null。
+      window.__qyTtsNextHref = function () {
+        try {
+          var loc = rendition.currentLocation();
+          if (!loc || !loc.start) return null;
+          // 实测该 epub.js 构建的 spine 只有 spineItems 数组，没有 next()
+          var items = book.spine.spineItems || [];
+          var pos = -1;
+          for (var i = 0; i < items.length; i++) {
+            if (items[i].href === loc.start.href) { pos = i; break; }
+          }
+          if (pos < 0 || pos + 1 >= items.length) return null;
+          return items[pos + 1].href;
+        } catch (e) {
+          postError('tts.next', e);
+          return null;
+        }
       };
 
       window.__qyClearSelection = function () {

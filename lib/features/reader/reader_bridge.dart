@@ -76,6 +76,61 @@ class ReaderBridge {
   Future<void> clearSelection() =>
       _eval('__qyClearSelection && __qyClearSelection()');
 
+  // ---- M3 TTS ----
+
+  /// 当前章节的句子列表（JSON：[{cfi, text}]）；失败返回 null。
+  Future<List<TtsSegment>?> ttsSegments() async {
+    final raw = await _evalReturning(
+      'window.__qyTtsSegments ? window.__qyTtsSegments() : null',
+    );
+    if (raw == null) return null;
+    try {
+      final list = jsonDecode(raw);
+      if (list is! List) return null;
+      return [
+        for (final item in list)
+          if (item is Map<String, dynamic>)
+            if (item['cfi'] is String && item['text'] is String)
+              TtsSegment(
+                cfi: item['cfi'] as String,
+                text: item['text'] as String,
+              ),
+      ];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 高亮第 cfi 句；返回 'visible' | 'turning' | 错误码。
+  Future<String?> ttsShow(String cfiRange) => _evalReturning(
+        'window.__qyTtsShow ? window.__qyTtsShow(${_jsStr(cfiRange)}) : null',
+      );
+
+  /// 清除 TTS 跟读高亮。
+  Future<void> ttsClear() => _eval('__qyTtsClear && __qyTtsClear()');
+
+  /// 下一章 href；已是最后一章返回 null。
+  Future<String?> ttsNextHref() => _evalReturning(
+        'window.__qyTtsNextHref ? window.__qyTtsNextHref() : null',
+      );
+
+  /// 求值并取回字符串结果（页面未就绪/已销毁返回 null）。
+  Future<String?> _evalReturning(String source) async {
+    try {
+      final result =
+          await _controller.runJavaScriptReturningResult(source);
+      final text = result.toString();
+      // Android 返回 JSON 编码字面量（带引号），null 返回 "null"
+      if (text == 'null' || text.isEmpty) return null;
+      if (text.startsWith('"') && text.endsWith('"')) {
+        return jsonDecode(text) as String;
+      }
+      return text;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 截取 WebView 当前画面。
   ///
   /// webview_flutter 不提供内部截图 API（flutter_inappwebview 才有），
@@ -105,4 +160,16 @@ class ReaderBridge {
       // WebView 已销毁/页面未就绪时静默丢弃；事件由重试与看门狗兜底。
     }
   }
+}
+
+
+/// TTS 句子片段。
+class TtsSegment {
+  const TtsSegment({required this.cfi, required this.text});
+
+  /// 句子范围 CFI（epub.js 可直接定位）。
+  final String cfi;
+
+  /// 句子文本。
+  final String text;
 }
