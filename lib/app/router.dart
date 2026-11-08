@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/reader/reader_page.dart';
+import '../features/reader/widgets/search_page.dart';
 import '../features/shelf/shelf_page.dart';
 
 /// 书架路由路径。
@@ -16,11 +17,17 @@ const String kShelfPath = '/';
 /// 阅读器路由路径模板。
 const String kReaderPath = '/reader/:bookId';
 
+/// 阅读器内全书检索路由模板。
+const String kReaderSearchPath = '/reader/:bookId/search';
+
 /// 深链 `reader://book/{id}` 映射的路径。
 const String kDeepLinkBookPath = '/book/:bookId';
 
 /// 生成阅读器具体路径。
 String readerPath(String bookId) => '/reader/$bookId';
+
+/// 生成阅读器检索具体路径。
+String readerSearchPath(String bookId) => '/reader/$bookId/search';
 
 /// 全局路由配置。
 final routerProvider = Provider<GoRouter>((ref) {
@@ -36,6 +43,13 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final bookId = state.pathParameters['bookId'] ?? '';
           return ReaderPage(bookId: bookId);
+        },
+      ),
+      GoRoute(
+        path: kReaderSearchPath,
+        builder: (context, state) {
+          final bookId = state.pathParameters['bookId'] ?? '';
+          return BookSearchPage(bookId: bookId);
         },
       ),
       // 深链别名：reader://book/{id} 经 Android intent-filter 进入后

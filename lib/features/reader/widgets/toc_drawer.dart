@@ -1,11 +1,14 @@
-/// 目录抽屉：左滑入，条目 stagger，当前章高亮。
+/// 目录抽屉：目录 / 书签 / 标注三 Tab，条目 stagger，当前章高亮。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/motion.dart';
 import '../../../app/theme/reading_theme.dart';
+import '../../../core/locator.dart';
+import '../../../domain/entities/annotation.dart';
 import '../../../domain/entities/book.dart';
+import '../../../domain/entities/bookmark.dart';
 
 /// 目录抽屉。
 class TocDrawer extends StatelessWidget {
@@ -14,8 +17,14 @@ class TocDrawer extends StatelessWidget {
     required this.theme,
     required this.chapters,
     required this.currentHref,
+    required this.bookmarks,
+    required this.annotations,
     required this.onDismiss,
     required this.onChapter,
+    required this.onGotoLocator,
+    required this.onDeleteBookmark,
+    required this.onDeleteAnnotation,
+    required this.onExport,
     super.key,
   });
 
@@ -31,11 +40,29 @@ class TocDrawer extends StatelessWidget {
   /// 当前可视页 href（高亮当前章）。
   final String? currentHref;
 
+  /// 书签列表。
+  final List<Bookmark> bookmarks;
+
+  /// 标注列表。
+  final List<Annotation> annotations;
+
   /// 点击遮罩关闭。
   final VoidCallback onDismiss;
 
   /// 点击章节跳转。
   final void Function(String href) onChapter;
+
+  /// 跳转到 locator（书签/标注）。
+  final void Function(String locatorJson) onGotoLocator;
+
+  /// 删除书签。
+  final void Function(String id) onDeleteBookmark;
+
+  /// 删除标注。
+  final void Function(String id) onDeleteAnnotation;
+
+  /// 导出 Markdown。
+  final VoidCallback onExport;
 
   @override
   Widget build(BuildContext context) {
@@ -59,13 +86,19 @@ class TocDrawer extends StatelessWidget {
                   top: 0,
                   bottom: 0,
                   left: 0,
-                  width: MediaQuery.sizeOf(context).width * 0.78,
+                  width: MediaQuery.sizeOf(context).width * 0.82,
                   child: _Panel(
                     theme: theme,
                     chapters: chapters,
                     currentHref: currentHref,
+                    bookmarks: bookmarks,
+                    annotations: annotations,
                     onDismiss: onDismiss,
                     onChapter: onChapter,
+                    onGotoLocator: onGotoLocator,
+                    onDeleteBookmark: onDeleteBookmark,
+                    onDeleteAnnotation: onDeleteAnnotation,
+                    onExport: onExport,
                   ),
                 ),
               ],
@@ -80,15 +113,27 @@ class _Panel extends StatelessWidget {
     required this.theme,
     required this.chapters,
     required this.currentHref,
+    required this.bookmarks,
+    required this.annotations,
     required this.onDismiss,
     required this.onChapter,
+    required this.onGotoLocator,
+    required this.onDeleteBookmark,
+    required this.onDeleteAnnotation,
+    required this.onExport,
   });
 
   final ReadingTheme theme;
   final List<BookChapter> chapters;
   final String? currentHref;
+  final List<Bookmark> bookmarks;
+  final List<Annotation> annotations;
   final VoidCallback onDismiss;
   final void Function(String href) onChapter;
+  final void Function(String locatorJson) onGotoLocator;
+  final void Function(String id) onDeleteBookmark;
+  final void Function(String id) onDeleteAnnotation;
+  final VoidCallback onExport;
 
   @override
   Widget build(BuildContext context) {
@@ -97,12 +142,12 @@ class _Panel extends StatelessWidget {
       color: theme.chromeSurface,
       child: Padding(
         padding: EdgeInsets.fromLTRB(0, padding.top, 0, padding.bottom),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SizedBox(
-              height: 52,
-              child: Row(
+        child: DefaultTabController(
+          length: 3,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
                 children: [
                   const SizedBox(width: 16),
                   Text(
@@ -120,42 +165,226 @@ class _Panel extends StatelessWidget {
                   ),
                 ],
               ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: chapters.isEmpty
-                  ? Center(
-                      child: Text(
-                        '本书没有目录信息',
-                        style: TextStyle(color: theme.chromeForeground),
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      itemCount: chapters.length,
-                      itemBuilder: (context, index) {
-                        final chapter = chapters[index];
-                        final isCurrent = chapter.href == currentHref;
-                        return _AnimatedRow(
-                          index: index,
-                          child: _ChapterRow(
-                            chapter: chapter,
-                            isCurrent: isCurrent,
-                            theme: theme,
-                            onTap: () => onChapter(chapter.href),
-                          ),
-                        );
-                      },
-                    ),
-            ),
-          ],
+              TabBar(
+                labelColor: theme.accent,
+                unselectedLabelColor:
+                    theme.chromeForeground.withValues(alpha: 0.6),
+                indicatorColor: theme.accent,
+                tabs: const [
+                  Tab(text: '目录'),
+                  Tab(text: '书签'),
+                  Tab(text: '标注'),
+                ],
+              ),
+              Divider(height: 1, color: theme.chromeForeground.withValues(alpha: 0.1)),
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    _buildToc(),
+                    _buildBookmarks(),
+                    _buildAnnotations(),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+
+  Widget _buildToc() {
+    return chapters.isEmpty
+        ? Center(
+            child: Text(
+              '本书没有目录信息',
+              style: TextStyle(color: theme.chromeForeground),
+            ),
+          )
+        : ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: chapters.length,
+            itemBuilder: (context, index) {
+              final chapter = chapters[index];
+              final isCurrent = chapter.href == currentHref;
+              return _AnimatedRow(
+                index: index,
+                child: _ChapterRow(
+                  chapter: chapter,
+                  isCurrent: isCurrent,
+                  theme: theme,
+                  onTap: () => onChapter(chapter.href),
+                ),
+              );
+            },
+          );
+  }
+
+  Widget _buildBookmarks() {
+    if (bookmarks.isEmpty) {
+      return Center(
+        child: Text(
+          '点底栏书签图标标记本页',
+          style: TextStyle(
+            color: theme.chromeForeground.withValues(alpha: 0.6),
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: bookmarks.length,
+      itemBuilder: (context, index) {
+        final bm = bookmarks[index];
+        final loc = locatorFromJson(bm.locator);
+        final label = bm.label ?? '书签 ${bookmarks.length - index}';
+        final subtitle = loc?.href ?? '';
+        return Dismissible(
+          key: ValueKey(bm.id),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            color: Colors.redAccent,
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 20),
+            child: const Icon(Icons.delete_outline, color: Colors.white),
+          ),
+          onDismissed: (_) => onDeleteBookmark(bm.id),
+          child: ListTile(
+            leading: Icon(
+              Icons.bookmark,
+              color: theme.accent,
+              size: 22,
+            ),
+            title: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: theme.chromeForeground, fontSize: 14),
+            ),
+            subtitle: subtitle.isEmpty
+                ? null
+                : Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: theme.chromeForeground.withValues(alpha: 0.5),
+                      fontSize: 12,
+                    ),
+                  ),
+            onTap: () => onGotoLocator(bm.locator),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAnnotations() {
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Row(
+        children: [
+          Text(
+            '共 ${annotations.length} 条',
+            style: TextStyle(
+              color: theme.chromeForeground.withValues(alpha: 0.6),
+              fontSize: 12,
+            ),
+          ),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: annotations.isEmpty ? null : onExport,
+            icon: Icon(
+              Icons.ios_share,
+              size: 16,
+              color: theme.chromeForeground.withValues(alpha: 0.8),
+            ),
+            label: Text(
+              '导出',
+              style: TextStyle(
+                color: theme.chromeForeground.withValues(alpha: 0.8),
+                fontSize: 13,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (annotations.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          Expanded(
+            child: Center(
+              child: Text(
+                '选中正文即可划线',
+                style: TextStyle(
+                  color: theme.chromeForeground.withValues(alpha: 0.6),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return ListView.builder(
+      padding: EdgeInsets.zero,
+      itemCount: annotations.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) return header;
+        final a = annotations[index - 1];
+        return Dismissible(
+          key: ValueKey(a.id),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            color: Colors.redAccent,
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 20),
+            child: const Icon(Icons.delete_outline, color: Colors.white),
+          ),
+          onDismissed: (_) => onDeleteAnnotation(a.id),
+          child: ListTile(
+            leading: Container(
+              width: 14,
+              height: 40,
+              decoration: BoxDecoration(
+                color: _colorOf(a),
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+            title: Text(
+              a.quotedText ?? '',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: theme.chromeForeground, fontSize: 13),
+            ),
+            subtitle: a.note == null || a.note!.isEmpty
+                ? null
+                : Text(
+                    '笔记：${a.note}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: theme.chromeForeground.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+            onTap: () => onGotoLocator(a.locatorStart),
+          ),
+        );
+      },
+    );
+  }
+
+  Color _colorOf(Annotation a) => switch (a.color) {
+        AnnotationColor.yellow => const Color(0xFFF7D774),
+        AnnotationColor.green => const Color(0xFFA9D98B),
+        AnnotationColor.blue => const Color(0xFF9CC3F5),
+        AnnotationColor.rose => const Color(0xFFF2A9B8),
+      };
 }
 
-/// 条目 stagger 淡入（每条 +12ms，封顶 300ms）。
 class _AnimatedRow extends StatelessWidget {
   const _AnimatedRow({required this.index, required this.child});
 

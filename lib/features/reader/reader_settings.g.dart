@@ -7,7 +7,7 @@ part of 'reader_settings.dart';
 // **************************************************************************
 
 String _$readingSettingsControllerHash() =>
-    r'afb61cd270c10f3c42a4453e702c3e8aa7479dfc';
+    r'1e09ae785fd7946a1036771e8a26f3e40f38d146';
 
 /// 排版设置控制器：读写 shared_preferences。
 ///

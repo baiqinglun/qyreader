@@ -53,6 +53,29 @@ class ReaderBridge {
   /// 重报当前位置（locations 就绪后补 percent）。
   Future<void> reportLocation() => _eval('reportLocation()');
 
+  // ---- M2 标注 ----
+
+  /// 批量注入划线（bookReady 后对双池各调一次；单条新增用 [addHighlight]）。
+  Future<void> applyHighlights(String itemsJson) =>
+      _eval('__qyApplyHighlights && __qyApplyHighlights($itemsJson)');
+
+  /// 新增一条划线。
+  Future<void> addHighlight({
+    required String id,
+    required String cfiRange,
+    required String colorToken,
+  }) =>
+      _eval('__qyAddHighlight && __qyAddHighlight('
+          '${_jsStr(id)}, ${_jsStr(cfiRange)}, ${_jsStr(colorToken)})');
+
+  /// 移除一条划线（按选区 CFI，epub.js 的注销键）。
+  Future<void> removeHighlight(String cfiRange) =>
+      _eval('__qyRemoveHighlight && __qyRemoveHighlight(${_jsStr(cfiRange)})');
+
+  /// 清除 iframe 内当前文本选区（标注菜单关闭时调用）。
+  Future<void> clearSelection() =>
+      _eval('__qyClearSelection && __qyClearSelection()');
+
   /// 截取 WebView 当前画面。
   ///
   /// webview_flutter 不提供内部截图 API（flutter_inappwebview 才有），

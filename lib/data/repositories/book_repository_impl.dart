@@ -117,7 +117,7 @@ class BookRepositoryImpl implements BookRepository {
         metaJson: parsed.metaJson,
       );
 
-      // 6) 事务写库：books + chapters + sync_ops 原子提交
+      // 6) 事务写库：books + chapters + book_fts + sync_ops 原子提交
       await _db.transaction(() async {
         await _db.into(_db.books).insert(_companionOf(book));
         if (parsed.chapters.isNotEmpty) {
@@ -137,6 +137,22 @@ class BookRepositoryImpl implements BookRepository {
               );
             }
           });
+        }
+        // 全书检索索引（派生数据，不同步）：跳过的 href（单文件多章）只索引一次
+        final indexedHrefs = <String>{};
+        for (final c in parsed.chapters) {
+          if (c.bodyText.isEmpty || !indexedHrefs.add(c.href)) continue;
+          await _db.customInsert(
+            'INSERT INTO book_fts(book_id, chapter_idx, href, title, body) '
+            'VALUES(?, ?, ?, ?, ?)',
+            variables: [
+              Variable(id),
+              Variable(c.idx),
+              Variable(c.href),
+              Variable(c.title),
+              Variable(c.bodyText),
+            ],
+          );
         }
         await _appendSyncOp(
           entity: 'book',

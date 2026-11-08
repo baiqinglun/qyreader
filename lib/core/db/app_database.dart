@@ -9,6 +9,7 @@ import 'package:drift/native.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'daos/annotation_dao.dart';
 import 'daos/book_dao.dart';
 import 'daos/progress_dao.dart';
 import 'tables.dart';
@@ -28,33 +29,42 @@ part 'app_database.g.dart';
     SyncOps,
     SyncState,
   ],
-  daos: [BookDao, ProgressDao],
+  daos: [BookDao, ProgressDao, AnnotationDao, BookmarkDao],
 )
 class AppDatabase extends _$AppDatabase {
   /// 注入 QueryExecutor（生产用 [openAppDatabase]，测试用 NativeDatabase.memory）。
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async {
           await m.createAll();
-          // FTS5 全文索引：中文必须 trigram（unicode61 分词对中文无效）。
-          // drift 表模型无法声明虚拟表 tokenizer，这里用原生 SQL；
-          // M2 接入检索时再补写入同步。
-          await customStatement(
-            'CREATE VIRTUAL TABLE IF NOT EXISTS book_fts USING fts5('
-            'book_id UNINDEXED, chapter_idx UNINDEXED, title, body, '
-            "tokenize = 'trigram')",
-          );
+          await _createBookFts();
         },
         onUpgrade: (m, from, to) async {
           // 迁移纪律：每个版本单独处理，永不删表重建。
-          // schemaVersion 1 为初始版本，暂无升级路径。
+          if (from < 2) {
+            // v2：book_fts 增加 href 列（检索命中跳转需要章 href）。
+            // book_fts 是派生数据（可由书籍文件重建），直接重建安全。
+            await customStatement('DROP TABLE IF EXISTS book_fts');
+            await _createBookFts();
+          }
         },
       );
+
+  /// 创建 FTS5 全文索引虚拟表。
+  Future<void> _createBookFts() async {
+    // 中文必须 trigram（unicode61 分词对中文无效）。
+    // drift 表模型无法声明虚拟表 tokenizer，用原生 SQL。
+    await customStatement(
+      'CREATE VIRTUAL TABLE IF NOT EXISTS book_fts USING fts5('
+      'book_id UNINDEXED, chapter_idx UNINDEXED, href UNINDEXED, title, body, '
+      "tokenize = 'trigram')",
+    );
+  }
 }
 
 /// 用应用支持目录打开生产数据库（后台线程执行 IO）。

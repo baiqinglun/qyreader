@@ -58,6 +58,68 @@ class ReaderTap extends ReaderEvent {
   final double y;
 }
 
+/// 文本选区完成（M2 划线入口）。
+class ReaderSelected extends ReaderEvent {
+  const ReaderSelected({
+    required this.cfiRange,
+    required this.text,
+    required this.rect,
+  });
+
+  /// 选区范围 CFI（epub.js annotations API 直接可用）。
+  final String cfiRange;
+
+  /// 选中的原文。
+  final String text;
+
+  /// 选区在视口内的矩形（CSS px ≈ 逻辑 px，用于定位标注菜单）。
+  final SelectionRect rect;
+}
+
+/// 轻量矩形（纯 Dart，便于单测；不用 dart:ui）。
+class SelectionRect {
+  const SelectionRect({
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+  });
+
+  /// 左上角 X。
+  final double left;
+
+  /// 左上角 Y。
+  final double top;
+
+  /// 宽。
+  final double width;
+
+  /// 高。
+  final double height;
+}
+
+/// 划线点击（epub.js markClicked 转发）。
+class ReaderMarkClicked extends ReaderEvent {
+  const ReaderMarkClicked({required this.cfiRange, required this.annotationId});
+
+  /// 划线选区 CFI。
+  final String cfiRange;
+
+  /// 标注 id（data.id；可能为 null，由 Dart 按 cfi 兜底匹配）。
+  final String? annotationId;
+}
+
+/// 横向滑动（HC 模式 JS 侧检测上报；dx<0 为向左=前翻方向）。
+class ReaderSwipe extends ReaderEvent {
+  const ReaderSwipe({required this.dx, required this.dt});
+
+  /// 横向位移（CSS px，负=向左）。
+  final double dx;
+
+  /// 时长 ms。
+  final int dt;
+}
+
 /// 渲染/解析错误。
 class ReaderError extends ReaderEvent {
   const ReaderError(this.code, this.message);
@@ -97,6 +159,31 @@ ReaderEvent? parseReaderEvent(String raw) {
       return ReaderTap(
         (json['x'] as num?)?.toDouble() ?? 0,
         (json['y'] as num?)?.toDouble() ?? 0,
+      );
+    case 'selected':
+      final cfi = json['cfiRange'] as String?;
+      if (cfi == null || cfi.isEmpty) return null;
+      return ReaderSelected(
+        cfiRange: cfi,
+        text: json['text']?.toString() ?? '',
+        rect: SelectionRect(
+          left: (json['x'] as num?)?.toDouble() ?? 0,
+          top: (json['y'] as num?)?.toDouble() ?? 0,
+          width: (json['w'] as num?)?.toDouble() ?? 0,
+          height: (json['h'] as num?)?.toDouble() ?? 0,
+        ),
+      );
+    case 'markClicked':
+      final cfi = json['cfiRange'] as String?;
+      if (cfi == null || cfi.isEmpty) return null;
+      return ReaderMarkClicked(
+        cfiRange: cfi,
+        annotationId: json['id'] as String?,
+      );
+    case 'swipe':
+      return ReaderSwipe(
+        dx: (json['dx'] as num?)?.toDouble() ?? 0,
+        dt: (json['dt'] as num?)?.toInt() ?? 0,
       );
     case 'error':
       return ReaderError(

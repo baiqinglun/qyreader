@@ -51,4 +51,35 @@ void main() {
     expect(parseReaderEvent('[]'), isNull);
     expect(parseReaderEvent('{"type":"unknown"}'), isNull);
   });
+  test('selected 事件解析出 CFI/原文/矩形', () {
+    final e = parseReaderEvent(
+      '{"type":"selected","cfiRange":"epubcfi(/6/4,/1:0,/1:20)",'
+      '"text":"山川湖海","x":12.5,"y":88,"w":160,"h":24}',
+    );
+    expect(e, isA<ReaderSelected>());
+    final sel = e! as ReaderSelected;
+    expect(sel.cfiRange, 'epubcfi(/6/4,/1:0,/1:20)');
+    expect(sel.text, '山川湖海');
+    expect(sel.rect.left, 12.5);
+    expect(sel.rect.height, 24);
+  });
+
+  test('selected 缺 cfiRange 返回 null', () {
+    expect(parseReaderEvent('{"type":"selected","text":"x"}'), isNull);
+  });
+
+  test('markClicked 解析 id；缺失 id 为 null', () {
+    final e = parseReaderEvent(
+      '{"type":"markClicked","cfiRange":"epubcfi(/6/4)","id":"a-1"}',
+    );
+    final m = e! as ReaderMarkClicked;
+    expect(m.annotationId, 'a-1');
+
+    final e2 = parseReaderEvent(
+      '{"type":"markClicked","cfiRange":"epubcfi(/6/4)"}',
+    );
+    final m2 = e2! as ReaderMarkClicked;
+    expect(m2.annotationId, isNull);
+  });
+
 }

@@ -14,23 +14,35 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, kIsWeb;
+    show defaultTargetPlatform, kDebugMode, kIsWeb;
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
-import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter/services.dart'
+    show Clipboard, ClipboardData, KeyDownEvent, LogicalKeyboardKey;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 import 'package:go_router/go_router.dart';
 
+import '../../app/providers.dart';
+import '../../app/router.dart' show readerSearchPath;
 import '../../app/theme/reading_theme.dart';
 import '../../core/locator.dart';
+import '../../domain/entities/annotation.dart';
+import '../../domain/entities/bookmark.dart';
+import '../../domain/repositories/search_repository.dart';
+import '../../domain/services/annotations_markdown.dart';
 import 'reader_bridge.dart';
 import 'reader_asset_server.dart';
 import 'reader_assets.dart';
 import 'reader_bridge_events.dart';
 import 'reader_controller.dart';
 import 'reader_settings.dart';
+import 'widgets/annotation_sheet.dart';
+import 'widgets/note_editor_sheet.dart';
+import 'widgets/selection_menu.dart';
 import 'widgets/toc_drawer.dart';
 import 'widgets/typesetting_panel.dart';
 
@@ -45,6 +57,10 @@ class _ViewSlot {
   bool bridgeReady = false;
   bool bookReady = false;
   Locator? locator;
+
+  /// 等待注入划线（bookReady 时视图尚未滚动到目标列，高亮会画偏；
+  /// 首次 relocated（display 落定）后再注入）。
+  bool pendingHighlights = true;
 
   /// 本槽位页面的事件序号去重（__n 按页面各自计数，A/B 不能共享集合，
   /// 否则 B 页事件与 A 全部撞号被丢，隐藏池永不就绪、前翻失效）。
@@ -96,9 +112,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   _Turn? _turn;
   late final AnimationController _settle;
 
-  /// 拖拽起点（手势层局部坐标）。null = 无进行中的拖拽。
-  Offset? _pointerStart;
-
   Uint8List? _backOverlay;
   bool _backInFlight = false;
   bool _hiddenResyncing = false;
@@ -107,6 +120,20 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   bool _chromeVisible = true;
   bool _tocOpen = false;
   bool _diagVisible = false;
+
+  // ---- M2 标注/书签/检索 ----
+
+  /// 标注与书签的本地镜像（仓储 watch 流驱动，动作做定点桥同步）。
+  List<Annotation> _annotations = const [];
+  List<Bookmark> _bookmarks = const [];
+  StreamSubscription<List<Annotation>>? _annotationsSub;
+  StreamSubscription<List<Bookmark>>? _bookmarksSub;
+
+  /// 当前文本选区（非空 = 显示标注菜单）。
+  ReaderSelected? _selection;
+
+  /// 正在操作的既有划线（非空 = 显示划线操作面板）。
+  Annotation? _activeAnnotation;
 
   /// 启动诊断（看门狗触发时展示在兜底面板）
   final List<String> _diag = <String>[];
@@ -149,6 +176,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   void dispose() {
     _lockTimeout?.cancel();
     _settle.dispose();
+    unawaited(_annotationsSub?.cancel());
+    unawaited(_bookmarksSub?.cancel());
     unawaited(_assetServer.stop());
     ref.read(readerControllerProvider(widget.bookId).notifier).flushProgress();
     super.dispose();
@@ -180,6 +209,18 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final state = _controllerState;
     final book = state.book;
     if (book == null) return;
+
+    // M2：标注/书签流（watch 实时刷新列表；桥定点同步在动作处做）
+    final annRepo = await ref.read(annotationRepositoryProvider.future);
+    _annotationsSub = annRepo.watchForBook(widget.bookId).listen((list) {
+      _diagLog('watch: annotations=${list.length}');
+      _annotations = list;
+      if (mounted) setState(() {});
+    });
+    _bookmarksSub = annRepo.watchBookmarks(widget.bookId).listen((list) {
+      _bookmarks = list;
+      if (mounted) setState(() {});
+    });
 
     // 页面：loadFlutterAsset（webview_flutter 直接读 Flutter assets）；
     // 书籍：经本地 HTTP 服务提供（file:// XHR 在新版 WebView 上受限）。
@@ -255,6 +296,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       v.locator = null;
       v.lastSyncedVisible = null;
       v.pendingSyncVisible = null;
+      v.pendingHighlights = true;
     }
     // 新页面 JS 侧 __n 从 0 重新计数，不清空会把新页面事件全部当成
     // 旧页面的重复而丢弃（实测：切换排版后 relocated/bookReady 全失效）
@@ -331,8 +373,28 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         );
         _onRelocated(slot, locator, atStart, atEnd);
       case ReaderTap(:final x, :final y):
-        _diagLog('[${slot.id}] tap ($x,$y)');
+        _diagLog('[${slot.id}] tap ($x,$y) chrome=$_chromeVisible');
         _onContentTap(x, y);
+      case final ReaderSelected sel:
+        // 文本选区完成：弹出标注菜单（双池都会报，仅可视层处理）
+        if (slot == _visible) {
+          setState(() => _selection = sel);
+        }
+      case ReaderSwipe(:final dx):
+        // JS 检测的横向滑动：向左=前翻，向右=后翻
+        if (slot != _visible) break;
+        if (dx < 0) {
+          _goForward();
+        } else {
+          _goBackward();
+        }
+      case ReaderMarkClicked(:final annotationId, :final cfiRange):
+        _diagLog('[${slot.id}] markClicked id=$annotationId');
+        if (slot != _visible) break;
+        final match = _matchAnnotation(annotationId, cfiRange);
+        if (match != null) {
+          unawaited(_showAnnotationSheet(match));
+        }
       case ReaderError(:final code, :final message):
         _diagLog('[${slot.id}] error($code): $message');
         // 书籍打开/渲染失败 → 屏幕可见（此前静默白屏）
@@ -343,6 +405,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (mounted) setState(() {});
   }
 
+  /// 按事件携带的 id（或 CFI 兜底）匹配既有标注。
+  Annotation? _matchAnnotation(String? id, String cfiRange) {
+    for (final a in _annotations) {
+      if (id != null && a.id == id) return a;
+    }
+    for (final a in _annotations) {
+      if (a.locatorStart.contains(cfiRange)) return a;
+    }
+    return null;
+  }
+
   void _onBookReady(_ViewSlot slot) {
     slot.bookReady = true;
     final settings = ref.read(readingSettingsControllerProvider);
@@ -350,8 +423,35 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _syncHiddenIfNeeded();
   }
 
+  /// 把既有划线批量注入某槽位。必须在视图滚动到目标列（relocated）之后：
+  /// pane 高亮按注入瞬间的列偏移定位，注入过早会画到屏幕外一整列（实测）。
+  void _applyHighlightsTo(_ViewSlot slot) {
+    if (_annotations.isEmpty || !slot.pendingHighlights) return;
+    slot.pendingHighlights = false;
+    slot.bridge?.applyHighlights(
+      jsonEncode([
+        for (final a in _annotations)
+          {'id': a.id, 'cfiRange': _cfiRangeOf(a), 'color': a.color.token},
+      ]),
+    );
+  }
+
+  /// 取标注的选区 CFI（locatorStart JSON 里的 cfi 字段）。
+  String _cfiRangeOf(Annotation a) {
+    final loc = locatorFromJson(a.locatorStart);
+    return loc?.cfi ?? '';
+  }
+
   void _onRelocated(_ViewSlot slot, Locator locator, bool atStart, bool atEnd) {
     slot.locator = locator;
+
+    // 首次 relocated = display 已落定到目标列，此时注入高亮坐标才正确
+    _applyHighlightsTo(slot);
+
+    // 翻页/跳转后选区已失效：收菜单并清 WebView 选区
+    if (slot == _visible && _selection != null) {
+      _dismissAnnotationUi();
+    }
 
     if (slot == _visible) {
       _controller.onRelocated(locator, atStart: atStart, atEnd: atEnd);
@@ -505,74 +605,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     }
   }
 
-  // ---- 手势 ----
-  //
-  // 拖拽必须走 GestureDetector（手势竞技场声明制），不能用裸 Listener：
-  // HC 平台视图的转发识别器参与竞技场，裸 Listener 不参与、收不到被
-  // WebView 消费的拖拽（实测滑动翻页无反应）。本层声明横向拖拽后框架
-  // 不再把它转发给 WebView；tap 与纵向滚动仍归 WebView（点击经 JS 上报，
-  // 滚动模式竖滑不受影响）。
-
-  void _onDragStart(DragStartDetails d) {
-    _pointerStart = d.localPosition;
-  }
-
-  void _onDragUpdate(DragUpdateDetails d, double width) {
-    final start = _pointerStart;
-    if (start == null) return;
-    final dx = d.localPosition.dx - start.dx;
-
-    final turn = _turn;
-    if (turn == null) {
-      if (dx.abs() < 12) return;
-      if (_settle.isAnimating) return;
-      final settings = ref.read(readingSettingsControllerProvider);
-      if (settings.flow == ReadingFlow.scrolled) return;
-      final forward = dx < 0;
-      if (forward && !_canForward) return;
-      if (!forward && !_canBackward) return;
-      setState(
-        () => _turn = _Turn(
-          isForward: forward,
-          t: ((forward ? -dx : dx) / width).clamp(0, 1),
-        ),
-      );
-      if (!forward) {
-        // 后翻：先截屏再驱动两个视图 prev
-        _captureAndTurnBack();
-      }
-      return;
-    }
-
-    if (_settle.isAnimating) return;
-    final t = ((turn.isForward ? -dx : dx) / width).clamp(0.0, 1.0);
-    setState(() => turn.t = t);
-  }
-
-  void _onDragEnd(DragEndDetails d) {
-    final start = _pointerStart;
-    _pointerStart = null;
-    final turn = _turn;
-    if (turn == null || start == null) return;
-    // primaryVelocity：横向速度 px/s（负=向左）
-    final vx = d.primaryVelocity ?? 0.0;
-    final draggingForward = turn.isForward;
-    final sameDirection = vx.sign == (draggingForward ? -1.0 : 1.0);
-    final committed = turn.t > 0.5 || (sameDirection && vx.abs() > 800);
-    _settleTurn(commit: committed);
-  }
-
-  void _onDragCancel() {
-    _pointerStart = null;
-    if (_turn != null && !_settle.isAnimating) {
-      _settleTurn(commit: false);
-    }
-  }
-
   // ---- 点击分区 ----
 
   void _onContentTap(double x, double y) {
     if (_turn != null || _settle.isAnimating) return;
+    // 标注菜单/划线面板打开时，任意正文点击先收起
+    if (_selection != null || _activeAnnotation != null) {
+      _dismissAnnotationUi();
+      return;
+    }
     final width = MediaQuery.sizeOf(context).width;
     final settings = ref.read(readingSettingsControllerProvider);
     if (settings.flow == ReadingFlow.scrolled) {
@@ -636,6 +677,179 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       builder: (_) => const TypesettingPanel(),
     );
   }
+
+  // ---- M2 标注/书签 ----
+
+  /// 收起标注菜单/划线面板并清掉 WebView 里的文本选区。
+  void _dismissAnnotationUi() {
+    if (_selection == null && _activeAnnotation == null) return;
+    setState(() {
+      _selection = null;
+      _activeAnnotation = null;
+    });
+    for (final v in [_a, _b]) {
+      unawaited(v.bridge?.clearSelection());
+    }
+  }
+
+  /// 按选区创建划线（4 色 / 笔记共用入口）。
+  Future<void> _createHighlight(
+    AnnotationColor color,
+    ReaderSelected sel, {
+    String note = '',
+  }) async {
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    final created = await repo.addHighlight(
+      bookId: widget.bookId,
+      cfiRange: sel.cfiRange,
+      color: color,
+      quotedText: sel.text,
+    );
+    if (note.isNotEmpty) {
+      await repo.setNote(created.id, note);
+    }
+    // 双池定点注入（watch 流刷新列表 UI）
+    final cfi = _cfiRangeOf(created);
+    for (final v in [_a, _b]) {
+      unawaited(v.bridge?.addHighlight(
+        id: created.id,
+        cfiRange: cfi,
+        colorToken: created.color.token,
+      ));
+    }
+    _dismissAnnotationUi();
+  }
+
+  /// 修改既有划线颜色：换皮 = 移除旧 CFI 再注入新样式（双池）。
+  Future<void> _recolorAnnotation(Annotation a, AnnotationColor color) async {
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.setColor(a.id, color);
+    final cfi = _cfiRangeOf(a);
+    for (final v in [_a, _b]) {
+      unawaited(v.bridge?.removeHighlight(cfi));
+      unawaited(v.bridge?.addHighlight(
+        id: a.id,
+        cfiRange: cfi,
+        colorToken: color.token,
+      ));
+    }
+    setState(() => _activeAnnotation = null);
+  }
+
+  /// 删除划线（软删 + 双池移除绘制）。
+  Future<void> _deleteAnnotation(Annotation a) async {
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.remove(a.id);
+    final cfi = _cfiRangeOf(a);
+    for (final v in [_a, _b]) {
+      unawaited(v.bridge?.removeHighlight(cfi));
+    }
+    setState(() => _activeAnnotation = null);
+  }
+
+  /// 编辑笔记（模态输入）。
+  Future<void> _editAnnotationNote(Annotation a) async {
+    final note = await showNoteEditorSheet(context, theme: _theme, initial: a.note);
+    if (note == null || !mounted) return;
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.setNote(a.id, note);
+    setState(() => _activeAnnotation = null);
+  }
+
+  /// 划线操作面板。
+  Future<void> _showAnnotationSheet(Annotation a) async {
+    final theme = _theme;
+    setState(() => _activeAnnotation = a);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: theme.chromeSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => AnnotationSheet(
+        annotation: a,
+        theme: theme,
+        onColor: (c) => _recolorAnnotation(a, c),
+        onDelete: () => _deleteAnnotation(a),
+        onEditNote: () => _editAnnotationNote(a),
+      ),
+    );
+    if (mounted) setState(() => _activeAnnotation = null);
+  }
+
+  /// 当前页是否已加书签（当前 relocated CFI 精确匹配）。
+  bool get _currentPageBookmarked {
+    final cfi = _controllerState.currentLocator?.cfi;
+    if (cfi == null) return false;
+    return _bookmarks.any(
+      (b) => locatorFromJson(b.locator)?.cfi == cfi,
+    );
+  }
+
+  /// 书签开关。
+  Future<void> _toggleBookmark() async {
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    final loc = _controllerState.currentLocator;
+    final cfi = loc?.cfi;
+    debugPrint('reader-diag: toggleBookmark loc=${loc != null} cfi=$cfi '
+        'bookmarks=${_bookmarks.length}');
+    if (loc == null || cfi == null) return;
+    final existing = _bookmarks
+        .where((b) => locatorFromJson(b.locator)?.cfi == cfi)
+        .firstOrNull;
+    if (existing != null) {
+      await repo.removeBookmark(existing.id);
+    } else {
+      await repo.addBookmark(bookId: widget.bookId, locatorJson: locatorToJson(loc));
+    }
+  }
+
+  /// 目录跳转到标注/书签的 locator。
+  void _gotoLocatorJson(String locatorJson) {
+    setState(() => _tocOpen = false);
+    final loc = locatorFromJson(locatorJson);
+    final bridge = _visible.bridge;
+    if (bridge == null) return;
+    if (loc?.cfi != null) {
+      bridge.gotoLocatorMap(_locatorMap(loc!));
+    } else if (loc?.href != null) {
+      bridge.gotoHref(loc!.href!);
+    }
+    _resetHiddenSync();
+  }
+
+  /// 全书搜索入口。
+  Future<void> _openSearch() async {
+    final hit = await context.push<BookSearchHit>(
+      readerSearchPath(widget.bookId),
+    );
+    if (hit == null) return;
+    unawaited(_visible.bridge?.gotoHref(hit.href));
+    _resetHiddenSync();
+  }
+
+  /// 标注导出 Markdown：写入应用文档目录 exports/，SnackBar 给出路径。
+  Future<void> _exportAnnotations() async {
+    final state = _controllerState;
+    final book = state.book;
+    if (book == null) return;
+    final md = annotationsToMarkdown(book, _annotations);
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(docs.path, 'QYReader', 'exports'));
+    if (!await dir.exists()) await dir.create(recursive: true);
+    final now = DateTime.now();
+    final stamp =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+    final safe = book.title.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    final file = File(p.join(dir.path, '$safe-标注-$stamp.md'));
+    await file.writeAsString(md, flush: true);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已导出：${file.path}')),
+    );
+  }
+
+  ReadingTheme get _theme => ref.read(readingSettingsControllerProvider).theme;
 
   // ---- build ----
 
@@ -712,17 +926,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                           )
                         : const SizedBox.shrink(),
                   ),
-                  // [2] 手势层：TLHC 模式触摸经竞技场转发，横向拖拽在此
-                  // 声明后不再转发给 WebView；点击仍由 WebView JS tap 上报
-                  Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onHorizontalDragStart: _onDragStart,
-                      onHorizontalDragUpdate: (d) => _onDragUpdate(d, width),
-                      onHorizontalDragEnd: _onDragEnd,
-                      onHorizontalDragCancel: _onDragCancel,
-                    ),
-                  ),
+                  // [2] 手势占位：HC 模式触摸由 WebView 原生消费（文本
+                  // 选择需要实时触摸），横向滑动由 reader.html JS 检测后
+                  // 以 swipe 事件上报，Dart 触发翻页动画
+                  Positioned.fill(child: const SizedBox.shrink()),
                   // [3] chrome 层（内部显隐，不动内容层）
                   Positioned.fill(
                     child: (_chromeVisible && state.book != null)
@@ -732,16 +939,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                                 state: state,
                                 theme: theme,
                                 onBack: _onBack,
-                                onDiag: () =>
-                                    setState(() => _diagVisible = true),
+                                onDiag: () async {
+                                  setState(() => _diagVisible = true);
+                                  await _dumpPageDiag();
+                                },
+                                onSearch: _openSearch,
                               ),
                               Align(
                                 alignment: Alignment.bottomCenter,
                                 child: _BottomBar(
                                   state: state,
                                   theme: theme,
+                                  bookmarked: _currentPageBookmarked,
                                   onToc: () => setState(() => _tocOpen = true),
                                   onTypesetting: _showTypesetting,
+                                  onToggleBookmark: _toggleBookmark,
                                   onSeek: _onSeek,
                                 ),
                               ),
@@ -749,7 +961,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                           )
                         : const SizedBox.shrink(),
                   ),
-                  // [4] 目录抽屉（内部 AnimatedSwitcher 恒定）。
+                  // [4] 目录抽屉（目录/书签/标注三 Tab）。
                   // 必须 Positioned.fill：Stack 尺寸由非定位子节点决定，
                   // 收起时的 SizedBox.shrink 会把整个根 Stack 塌缩成 0×0，
                   // 连带所有 Positioned.fill 子树（含 WebView 平台视图）归零。
@@ -759,10 +971,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                       theme: theme,
                       chapters: state.chapters,
                       currentHref: _visible.locator?.href,
+                      bookmarks: _bookmarks,
+                      annotations: _annotations,
                       onDismiss: () => setState(() => _tocOpen = false),
                       onChapter: _onChapterTap,
+                      onGotoLocator: _gotoLocatorJson,
+                      onDeleteBookmark: (id) async {
+                        final repo =
+                            await ref.read(annotationRepositoryProvider.future);
+                        await repo.removeBookmark(id);
+                      },
+                      onDeleteAnnotation: (id) async {
+                        final a =
+                            _annotations.where((x) => x.id == id).firstOrNull;
+                        if (a != null) await _deleteAnnotation(a);
+                      },
+                      onExport: _exportAnnotations,
                     ),
                   ),
+                  // [4.5] 选区标注菜单（锚定选区矩形上方/下方，z 序高于抽屉）
+                  if (_selection != null)
+                    SelectionMenu(
+                      rect: _selection!.rect,
+                      theme: theme,
+                      onColor: (c) => _createHighlight(c, _selection!),
+                      onNote: () async {
+                        final sel = _selection;
+                        if (sel == null) return;
+                        final note = await showNoteEditorSheet(
+                          context,
+                          theme: theme,
+                        );
+                        if (note == null) return;
+                        if (!mounted) return;
+                        await _createHighlight(
+                          AnnotationColor.yellow,
+                          sel,
+                          note: note,
+                        );
+                      },
+                      onCopy: () {
+                        Clipboard.setData(
+                          ClipboardData(text: _selection?.text ?? ''),
+                        );
+                        _dismissAnnotationUi();
+                      },
+                    ),
                   // [5] 全屏遮罩：装载错误 / WebView 不可用诊断
                   Positioned.fill(child: _buildOverlay(state, theme)),
                 ],
@@ -992,6 +1246,10 @@ class _WebViewPaneState extends State<_WebViewPane> {
   @override
   void initState() {
     super.initState();
+    if (kDebugMode) {
+      // chrome://inspect 远程调试 WebView（仅 debug 构建）
+      AndroidWebViewController.enableDebugging(true);
+    }
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.transparent)
@@ -1043,16 +1301,16 @@ class _WebViewPaneState extends State<_WebViewPane> {
 
   @override
   Widget build(BuildContext context) {
-    // Android 用默认 TLHC（虚拟显示）模式：触摸必须经 Flutter 手势竞技场
-    // 转发，外层横向拖拽识别器可声明手势实现原生翻页。HC（原生合成）下
-    // WebView 作为真实 Android 子视图直接消费触摸、绕过竞技场，Flutter
-    // 层任何手势都收不到（实测）。旧结论「TLHC 整层不出像素」出自
-    // 0×0 布局塌缩/转场快照误诊时代，真因修复后实测 TLHC 渲染正常。
+    // Android 用 HC（Hybrid Composition）：WebView 作为真实 Android 子视图
+    // 实时接收原生触摸——长按选字（原生选区 + 选择手柄）是 M2 标注的硬前提；
+    // TLHC 的触摸为竞技场裁决后批量转发，WebView 收到时已错过自身长按判定，
+    // 文本选择永远无法触发（实测）。代价是 Flutter 收不到任何触摸：滑动
+    // 翻页下沉到 reader.html JS 检测（swipe 事件），点击经 click 兜底上报。
     if (defaultTargetPlatform == TargetPlatform.android) {
       return WebViewWidget.fromPlatformCreationParams(
         params: AndroidWebViewWidgetCreationParams(
           controller: _controller.platform,
-          displayWithHybridComposition: false,
+          displayWithHybridComposition: true,
         ),
       );
     }
@@ -1067,12 +1325,14 @@ class _TopBar extends StatelessWidget {
     required this.theme,
     required this.onBack,
     required this.onDiag,
+    required this.onSearch,
   });
 
   final ReaderState state;
   final ReadingTheme theme;
   final VoidCallback onBack;
   final VoidCallback onDiag;
+  final VoidCallback onSearch;
 
   @override
   Widget build(BuildContext context) {
@@ -1111,6 +1371,14 @@ class _TopBar extends StatelessWidget {
                   ),
                 ),
                 IconButton(
+                  tooltip: '全书搜索',
+                  onPressed: onSearch,
+                  icon: Icon(
+                    Icons.search,
+                    color: theme.chromeForeground,
+                  ),
+                ),
+                IconButton(
                   tooltip: '诊断',
                   onPressed: onDiag,
                   icon: Icon(
@@ -1133,15 +1401,21 @@ class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.state,
     required this.theme,
+    required this.bookmarked,
     required this.onToc,
     required this.onTypesetting,
+    required this.onToggleBookmark,
     required this.onSeek,
   });
 
   final ReaderState state;
   final ReadingTheme theme;
+
+  /// 当前页是否已加书签（图标实/空心切换）。
+  final bool bookmarked;
   final VoidCallback onToc;
   final VoidCallback onTypesetting;
+  final VoidCallback onToggleBookmark;
   final void Function(double percent) onSeek;
 
   @override
@@ -1168,6 +1442,14 @@ class _BottomBar extends StatelessWidget {
                     value: (state.percent ?? 0).clamp(0.0, 1.0),
                     onChanged: state.locationsReady ? onSeek : null,
                     activeColor: theme.accent,
+                  ),
+                ),
+                IconButton(
+                  tooltip: bookmarked ? '移除书签' : '添加书签',
+                  onPressed: onToggleBookmark,
+                  icon: Icon(
+                    bookmarked ? Icons.bookmark : Icons.bookmark_border,
+                    color: bookmarked ? theme.accent : theme.chromeForeground,
                   ),
                 ),
                 TextButton(

@@ -15,10 +15,14 @@ import 'package:uuid/uuid.dart';
 
 import '../core/db/app_database.dart';
 import '../core/hlc.dart';
+import '../data/repositories/annotation_repository_impl.dart';
 import '../data/repositories/book_repository_impl.dart';
 import '../data/repositories/progress_repository_impl.dart';
+import '../data/repositories/search_repository_impl.dart';
+import '../domain/repositories/annotation_repository.dart';
 import '../domain/repositories/book_repository.dart';
 import '../domain/repositories/progress_repository.dart';
+import '../domain/repositories/search_repository.dart';
 
 part 'providers.g.dart';
 
@@ -71,5 +75,24 @@ Future<ProgressRepository> progressRepository(Ref ref) async {
     db: ref.watch(appDatabaseProvider),
     hlcClock: await ref.watch(hlcClockProvider.future),
     deviceId: await ref.watch(deviceIdProvider.future),
+  );
+}
+
+/// 标注 + 书签仓储单例。
+@Riverpod(keepAlive: true)
+Future<AnnotationRepository> annotationRepository(Ref ref) async {
+  return AnnotationRepositoryImpl(
+    db: ref.watch(appDatabaseProvider),
+    hlcClock: await ref.watch(hlcClockProvider.future),
+    deviceId: await ref.watch(deviceIdProvider.future),
+  );
+}
+
+/// 全书检索仓储单例。
+@Riverpod(keepAlive: true)
+Future<SearchRepository> searchRepository(Ref ref) async {
+  return SearchRepositoryImpl(
+    db: ref.watch(appDatabaseProvider),
+    books: await ref.watch(bookRepositoryProvider.future),
   );
 }

@@ -121,5 +121,45 @@ final progressRepositoryProvider = FutureProvider<ProgressRepository>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef ProgressRepositoryRef = FutureProviderRef<ProgressRepository>;
+String _$annotationRepositoryHash() =>
+    r'0f3d99c05e8e9a7a0e07c610b1b2d2fc0194dff6';
+
+/// 标注 + 书签仓储单例。
+///
+/// Copied from [annotationRepository].
+@ProviderFor(annotationRepository)
+final annotationRepositoryProvider =
+    FutureProvider<AnnotationRepository>.internal(
+      annotationRepository,
+      name: r'annotationRepositoryProvider',
+      debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+          ? null
+          : _$annotationRepositoryHash,
+      dependencies: null,
+      allTransitiveDependencies: null,
+    );
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef AnnotationRepositoryRef = FutureProviderRef<AnnotationRepository>;
+String _$searchRepositoryHash() => r'a07d3cd82cb34f35215b2c1bf7bcbdc29b788eb4';
+
+/// 全书检索仓储单例。
+///
+/// Copied from [searchRepository].
+@ProviderFor(searchRepository)
+final searchRepositoryProvider = FutureProvider<SearchRepository>.internal(
+  searchRepository,
+  name: r'searchRepositoryProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$searchRepositoryHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef SearchRepositoryRef = FutureProviderRef<SearchRepository>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package

@@ -77,11 +77,21 @@
 
   /// Dart 诊断拉取：返回页面内错误与桥状态（evaluateJavascript 直接取返回值）。
   window.__diagDump = function () {
+    var hl = -1;
+    try {
+      // pane 覆盖层在视图元素（父页面）里，不在 iframe 文档里
+      rendition.views().forEach(function (v) {
+        if (v.element) {
+          var n = v.element.querySelectorAll('.epubjs-hl,.qy-annotation').length;
+          hl = Math.max(hl, n);
+        }
+      });
+    } catch (e) { hl = -2; }
     return JSON.stringify({
-      errs: __errs,
-      hasBridge: !!(window.flutter_inappwebview && window.flutter_inappwebview.callHandler),
+      errs: __errs.slice(0, 5),
       hasBook: !!window.book,
-      hasRendition: !!window.rendition
+      hasRendition: !!window.rendition,
+      highlights: hl
     });
   };
 
@@ -197,11 +207,242 @@
         // rendered 可能对同一文档多次触发（重排/重渲染），防重复挂监听
         if (doc.__qyTapHooked) return;
         doc.__qyTapHooked = true;
-        doc.addEventListener('click', function (e) {
-          var r = iframe.getBoundingClientRect();
-          reportTap(e.clientX + r.left, e.clientY + r.top);
-        });
+
+        // 挂在 window 捕获阶段：document 级监听在本 WebView 上实测会失效
+        //（epub.js 重渲染替换文档后丢失），window 捕获先于一切文档处理器
+        var win = doc.defaultView;
+        win.addEventListener('click', function (e) {
+          try {
+            // 命中划线（几何判定）：上报 markClicked 并抑制普通 tap
+            var hit = null;
+            try {
+              hit = hitTestMark(e.clientX, e.clientY);
+            } catch (inner) {
+              postError('click.hittest', inner);
+            }
+            if (hit) {
+              markClickedAt = Date.now();
+              post({ type: 'markClicked', cfiRange: hit.cfi, id: hit.id });
+              return;
+            }
+            if (Date.now() - markClickedAt < 500) return;
+            var r = iframe.getBoundingClientRect();
+            reportTap(e.clientX + r.left, e.clientY + r.top);
+          } catch (err) {
+            postError('click.handler', err);
+          }
+        }, true);
+
+        // 章节重渲染后自绘划线会被清掉；重放由 rendition.on('relocated')
+        // 统一触发（见下方 relocated 处理器里的 replayHighlights）
+        scheduleRenderMarks();
+
+        // ---- 滑动翻页检测（HC 模式触摸由 WebView 原生消费，Flutter 层
+        // 收不到拖拽；横向滑动在这里判定后上报 Dart 触发翻页）----
+        // 长按（>600ms，选字）与非横向主导的移动不算滑动；选区存在时也不翻。
+        var touchStart = null;
+        win.addEventListener('touchstart', function (e) {
+          if (e.touches.length === 1) {
+            touchStart = {
+              x: e.touches[0].clientX,
+              y: e.touches[0].clientY,
+              t: Date.now()
+            };
+          } else {
+            touchStart = null;
+          }
+        }, { passive: true, capture: true });
+        win.addEventListener('touchend', function (e) {
+          if (!touchStart) return;
+          var t = e.changedTouches[0];
+          var dx = t.clientX - touchStart.x;
+          var dy = t.clientY - touchStart.y;
+          var dt = Date.now() - touchStart.t;
+          touchStart = null;
+          if (dt > 600) return;
+          if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+          var sel = doc.defaultView.getSelection();
+          if (sel && !sel.isCollapsed) return;
+          post({ type: 'swipe', dx: dx, dt: dt });
+        }, { passive: true, capture: true });
       });
+
+      // ---- 标注（划线）----
+      // 实现：CFI → DOM Range → 几何矩形 → 父文档覆盖层画色块。
+      // 不用 epub.js annotations.add/pane：其 SVG 标记与分栏容器坐标错位一整列
+      // （实测画到屏幕外）；也不包 span（会改变元素索引破坏 epubcfi）。
+      // 点击命中按矩形几何判定（hitTestMark）。
+      var markClickedAt = 0;
+      var HIGHLIGHT_FILLS = {
+        yellow: 'rgba(247, 215, 116, 0.45)',
+        green: 'rgba(169, 217, 139, 0.45)',
+        blue: 'rgba(156, 195, 245, 0.42)',
+        rose: 'rgba(242, 169, 184, 0.42)'
+      };
+      // id → {cfiRange, color}；rendered 重放与删除都依赖它
+      var highlightRegistry = [];
+
+      function findViewForCfi(cfiRange) {
+        var found = null;
+        rendition.views().forEach(function (v) {
+          if (found || !v.contents) return;
+          try {
+            v.contents.range(cfiRange);
+            found = v;
+          } catch (e) { /* 不属于该视图的章节 */ }
+        });
+        return found;
+      }
+
+      // 划线几何矩形表（命中检测与覆盖层绘制共用；不改 DOM——包裹 span
+      // 会改变元素索引，破坏 epubcfi 的稳定性）
+      var markRects = [];
+
+      function collectRects(item) {
+        var view = findViewForCfi(item.cfiRange);
+        if (!view || !view.contents) return;
+        try {
+          var range = view.contents.range(item.cfiRange);
+          var rects = range.getClientRects();
+          for (var i = 0; i < rects.length; i++) {
+            var r = rects[i];
+            if (r.width < 1 || r.height < 1) continue;
+            markRects.push({
+              cfi: item.cfiRange,
+              id: item.id,
+              color: item.color,
+              left: r.left,
+              top: r.top,
+              width: r.width,
+              height: r.height
+            });
+          }
+        } catch (e) {
+          postError('annotation.range', e);
+        }
+      }
+
+      // 按当前布局重算所有划线矩形并重建覆盖层（翻页/重排后调用）
+      function renderMarks() {
+        if (!rendition) return;
+        markRects = [];
+        highlightRegistry.forEach(collectRects);
+        var layer = ensureMarksLayer();
+        layer.innerHTML = '';
+        markRects.forEach(function (m) {
+          var box = document.createElement('div');
+          box.style.cssText =
+            'position:absolute;border-radius:2px;background:' +
+            (HIGHLIGHT_FILLS[m.color] || HIGHLIGHT_FILLS.yellow) +
+            ';left:' + m.left + 'px;top:' + m.top + 'px;width:' +
+            m.width + 'px;height:' + m.height + 'px';
+          layer.appendChild(box);
+        });
+      }
+
+      function scheduleRenderMarks() {
+        setTimeout(renderMarks, 80);
+      }
+
+      // 点击点落在某条划线上 → 返回该条（用于 markClicked 上报）
+      function hitTestMark(x, y) {
+        for (var i = 0; i < markRects.length; i++) {
+          var m = markRects[i];
+          if (x >= m.left && x <= m.left + m.width &&
+              y >= m.top && y <= m.top + m.height) {
+            return m;
+          }
+        }
+        return null;
+      }
+
+      rendition.on('markClicked', function () { /* 占位：无 pane 后不再触发 */ });
+
+      rendition.on('resized', scheduleRenderMarks);
+
+      // ---- 划线视觉层（父文档覆盖 div）：iframe 内 inline 背景不重绘，
+      // 改在父页面画矩形（父层绘制经实验验证可靠）----
+      var marksLayer = null;
+      function ensureMarksLayer() {
+        if (marksLayer && marksLayer.isConnected) return marksLayer;
+        marksLayer = document.createElement('div');
+        marksLayer.id = 'qy-marks';
+        marksLayer.style.cssText =
+          'position:fixed;left:0;top:0;right:0;bottom:0;' +
+          'pointer-events:none;z-index:99999;overflow:hidden';
+        document.body.appendChild(marksLayer);
+        return marksLayer;
+      }
+
+      // 翻页/重渲染后重放自绘划线（span 会被 DOM 重排清掉）
+      var replayTimer = null;
+      rendition.on('relocated', function () {
+        if (replayTimer) clearTimeout(replayTimer);
+        replayTimer = setTimeout(renderMarks, 150);
+      });
+
+      rendition.on('selected', function (cfiRange, contents) {
+        try {
+          // 选区文本 + 视口矩形（外层视口坐标，iframe 偏移已并入）
+          var range = contents.range(cfiRange);
+          var text = range ? String(range) : '';
+          var rect = range ? range.getBoundingClientRect() : null;
+          var frame = contents.frame || (contents.document &&
+            contents.document.defaultView && contents.document.defaultView.frameElement);
+          if (!text || !rect || !frame) return;
+          var fr = frame.getBoundingClientRect();
+          post({
+            type: 'selected',
+            cfiRange: cfiRange,
+            text: text,
+            x: rect.left + fr.left,
+            y: rect.top + fr.top,
+            w: rect.width,
+            h: rect.height
+          });
+        } catch (e) {
+          postError('selected', e);
+        }
+      });
+
+      window.__qyApplyHighlights = function (list) {
+        try {
+          // 兼容字符串与数组字面量两种入参（Dart 侧 runJavaScript 直传字面量）
+          var items = typeof list === 'string' ? JSON.parse(list) : list;
+          items.forEach(function (it) {
+            window.__qyAddHighlight(it.id, it.cfiRange, it.color);
+          });
+          scheduleRenderMarks();
+        } catch (e) { postError('annotation.apply', e); }
+      };
+
+      window.__qyAddHighlight = function (id, cfiRange, color) {
+        if (!rendition) { postError('annotation.add', 'no rendition'); return; }
+        var item = { id: id, cfiRange: cfiRange, color: color };
+        highlightRegistry.push(item);
+        scheduleRenderMarks();
+      };
+
+      window.__qyRemoveHighlight = function (cfiRange) {
+        if (!rendition) return;
+        try {
+          highlightRegistry = highlightRegistry.filter(function (it) {
+            return it.cfiRange !== cfiRange;
+          });
+          renderMarks();
+        } catch (e) { postError('annotation.remove', e); }
+      };
+
+      window.__qyClearSelection = function () {
+        if (!rendition) return;
+        try {
+          rendition.views().forEach(function (view) {
+            var win = view && view.contents && view.contents.document &&
+              view.contents.document.defaultView;
+            if (win && win.getSelection) win.getSelection().removeAllRanges();
+          });
+        } catch (e) { postError('selection.clear', e); }
+      };
       var initial = null;
       try { initial = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { initial = null; }
       book.ready.then(function () {

@@ -22,6 +22,7 @@ class ParsedChapter {
     this.level = 0,
     this.startOffset = 0,
     this.charCount = 0,
+    this.bodyText = '',
   });
 
   /// 章序号（0 基）。
@@ -41,6 +42,20 @@ class ParsedChapter {
 
   /// 章内字符数。
   final int charCount;
+
+  /// 章正文纯文本（M2 全书检索索引用；空串表示未提取）。
+  final String bodyText;
+
+  /// 拷贝（正文提取回填用）。
+  ParsedChapter copyWith({String? bodyText}) => ParsedChapter(
+        idx: idx,
+        title: title,
+        href: href,
+        level: level,
+        startOffset: startOffset,
+        charCount: charCount,
+        bodyText: bodyText ?? this.bodyText,
+      );
 }
 
 /// 解析产出：元数据 + 章节 + 封面字节。
@@ -157,7 +172,22 @@ ParsedEbook parseEpub(Uint8List bytes, String fileName) {
     chapters = _chaptersFromSpine(reader, manifestItems, spineIdrefs, opfDir);
   }
 
-  // 5) 正文字数：spine 文档去标签文本长度求和
+  // 5) 章正文纯文本（M2 全书检索索引用）：按 href 提取，同 href 复用
+  final bodyCache = <String, String>{};
+  chapters = [
+    for (final c in chapters)
+      c.copyWith(
+        bodyText: bodyCache.putIfAbsent(
+          c.href,
+          () {
+            final raw = reader.readAsString(c.href);
+            return raw == null ? '' : _extractBodyText(raw);
+          },
+        ),
+      ),
+  ];
+
+  // 6) 正文字数：spine 文档去标签文本长度求和
   var wordCount = 0;
   for (final idref in spineIdrefs) {
     final item = manifestItems[idref];
@@ -461,6 +491,31 @@ List<ParsedChapter> _chaptersFromSpine(
   }
   return result;
 }
+
+/// 提取章正文纯文本：去 script/style，标签替换为空白并收敛空白。
+/// 检索索引用；对中文无分词诉求，只需保证字符连续可查。
+String _extractBodyText(String raw) {
+  try {
+    final doc = XmlDocument.parse(raw);
+    // 剔除 script/style（innerText 会带上其内容，污染检索索引）
+    for (final tag in ['script', 'style']) {
+      for (final el in doc.findAllElements(tag).toList()) {
+        el.parent?.children.remove(el);
+      }
+    }
+    return _collapseWhitespace(doc.rootElement.innerText);
+  } on XmlException {
+    final noScriptStyle = raw.replaceAll(
+      RegExp(r'<(script|style)[\s\S]*?</\1>', caseSensitive: false),
+      '',
+    );
+    return _collapseWhitespace(noScriptStyle.replaceAll(RegExp(r'<[^>]+>'), ' '));
+  }
+}
+
+/// 收敛空白：连续空白合一，去首尾。
+String _collapseWhitespace(String s) =>
+    s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
 /// 提取 HTML/XHTML 文本的近似长度（去标签）。
 int _extractTextLength(String raw) {
