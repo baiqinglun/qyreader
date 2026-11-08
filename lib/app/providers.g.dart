@@ -180,9 +180,28 @@ final syncSpaceIdProvider = FutureProvider<String>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef SyncSpaceIdRef = FutureProviderRef<String>;
-String _$objectStoreHash() => r'cf25c12c87af05c9658f402f2158f0b8736b89c6';
+String _$syncBackendStoreHash() => r'a9d97fddff03530a9370a6e02472e175690f3e0b';
 
-/// 对象存储（M4 用本地目录模拟桶；接 S3 时只换此实现）。
+/// 同步后端配置存储（偏好 + 安全凭据）。
+///
+/// Copied from [syncBackendStore].
+@ProviderFor(syncBackendStore)
+final syncBackendStoreProvider = Provider<SyncBackendStore>.internal(
+  syncBackendStore,
+  name: r'syncBackendStoreProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$syncBackendStoreHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef SyncBackendStoreRef = ProviderRef<SyncBackendStore>;
+String _$objectStoreHash() => r'78a7190aab6d0c8ba4658ae710c805008a7ead2b';
+
+/// 对象存储：按配置切本地桶 / S3（M6）；S3 配置不完整时回退本地桶。
 ///
 /// Copied from [objectStore].
 @ProviderFor(objectStore)

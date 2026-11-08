@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 品牌青（与 AppTheme.seed 一致） -->
+    <color name="ic_launcher_background">#2E7D6B</color>
+    <color name="splash_background">#F7F3EB</color>
+</resources>

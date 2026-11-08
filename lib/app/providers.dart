@@ -22,6 +22,8 @@ import '../data/repositories/search_repository_impl.dart';
 import '../data/repositories/stats_repository_impl.dart';
 import '../data/repositories/sync_repository_impl.dart';
 import '../data/sync/local_object_store.dart';
+import '../data/sync/s3_object_store.dart';
+import '../data/sync/sync_backend_store.dart';
 import '../domain/repositories/annotation_repository.dart';
 import '../domain/repositories/book_repository.dart';
 import '../domain/repositories/progress_repository.dart';
@@ -118,11 +120,32 @@ Future<String> syncSpaceId(Ref ref) async {
   return id;
 }
 
-/// 对象存储（M4 用本地目录模拟桶；接 S3 时只换此实现）。
+/// 同步后端配置存储（偏好 + 安全凭据）。
+@Riverpod(keepAlive: true)
+SyncBackendStore syncBackendStore(Ref ref) => SyncBackendStore();
+
+/// 对象存储：按配置切本地桶 / S3（M6）；S3 配置不完整时回退本地桶。
 @Riverpod(keepAlive: true)
 Future<ObjectStore> objectStore(Ref ref) async {
-  final dir = await getApplicationSupportDirectory();
+  final store = ref.watch(syncBackendStoreProvider);
+  final config = await store.loadConfig();
   final spaceId = await ref.watch(syncSpaceIdProvider.future);
+  if (config.type == SyncBackendType.s3 && config.s3Complete) {
+    final creds = await store.loadCredentials();
+    if (creds.configured) {
+      return S3ObjectStore(
+        endPoint: config.endPoint,
+        bucket: config.bucket,
+        prefix: config.prefix,
+        accessKey: creds.accessKey,
+        secretKey: creds.secretKey,
+        region: config.region,
+        useSSL: config.useSSL,
+        port: config.port,
+      );
+    }
+  }
+  final dir = await getApplicationSupportDirectory();
   return LocalObjectStore(
     Directory(p.join(dir.path, 'sync_store', spaceId)),
   );

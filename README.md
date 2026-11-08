@@ -1,16 +1,101 @@
-# qy_reader
+# QYReader
 
-A new Flutter project.
+本地优先的跨平台阅读器（v1，Android 验收）。书架 / EPUB 阅读 / 4 色标注 / 全书检索 /
+TTS 朗读 / 多设备同步 / 阅读统计，数据以 SQLite 为唯一真相源，离线可用。
 
-## Getting Started
+## 功能（v1）
 
-This project is a starting point for a Flutter application.
+| 模块 | 能力 |
+|---|---|
+| 书架 | EPUB 导入（内容寻址去重）、封面、进度条、空态 |
+| 阅读器 | epub.js 渲染、双 WebView 池预渲染、4 种翻页动画 + 仿真折叠、目录/进度条/排版（主题/字号/行距/边距/分页或滚动） |
+| 标注 | 长按选字 → 4 色划线、笔记、复制；点划线改色/编辑/删除；书签；抽屉「目录/书签/标注」三页；标注导出 Markdown |
+| 检索 | 全书 FTS5 trigram（中文），<3 字自动降级 LIKE，命中片段高亮并跳转 |
+| 朗读 | 系统 TTS（离线）、句级跟读高亮、自动翻页与续章、0.5–2.0 倍速、中文音色选择、5/15/30/60 分钟定时停止 |
+| 同步 | 操作日志复制（书籍文件 + 进度 + 标注 + 书签），LWW + 最远进度 max；后端可选本地桶或 S3 兼容存储（AWS/R2/B2/MinIO）；幂等重放 |
+| 统计 | 前台阅读时长、字数（页级位置增量）、阅读天数/连续天数、近 14 天柱状图、每日目标 |
 
-A few resources to get you started if this is your first Flutter project:
+## 构建
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+```bash
+flutter pub get
+dart run build_runner build --delete-conflicting-outputs
+flutter analyze          # 要求 0 issues
+flutter test             # 全绿
+flutter build apk --release
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+产物：`build/app/outputs/flutter-apk/app-release.apk`。
+
+### 正式签名
+
+- 密钥：`android/qyreader-release.jks`（alias `qyreader`），密码在
+  `android/key.properties`；两者都已被 `.gitignore` 排除，**请自行备份**，丢失后
+  无法覆盖升级安装。
+- 缺少 `key.properties` 时自动退回 debug 签名（仍可侧载调试）。
+- 查看当前 APK 签名：
+  `apksigner verify --print-certs build/app/outputs/flutter-apk/app-release.apk`
+
+### 依赖版本注意
+
+- `fl_chart` 锁 **0.69.2**：1.x 需要 vector_math 2.2，Flutter 3.32 锁 2.1.4。
+- `flutter_tts` 要求 `minSdk >= 24`（已配置）；minSdk≥23 时 AGP 默认不压缩 .so，
+  本项目用 `packaging { jniLibs { useLegacyPackaging = true } }` 维持 ~27MB。
+
+## 同步配置
+
+1. 书架 → 云图标 → 齿轮「存储设置」。
+2. 选「本地桶」（默认，离线可用）或「S3」：
+   - 端点（域名/IP，不含协议）、桶名、对象前缀（建议 `qyreader/`，用于限定授权）、
+     区域（AWS 必填）、端口、HTTPS 开关、AccessKey/SecretKey。
+   - 密钥存 `flutter_secure_storage`（系统安全存储），不入库、不写偏好文件。
+   - 「测试连接」校验桶存在与读权限。
+3. 多台设备配置**相同的桶 + 前缀**即共享同一同步空间。
+
+同步协议：本地每次写同事务追加 `sync_ops`；推送未上传操作到
+`<prefix>/spaces/<空间>/ops/<opId>.json`，书籍文件按 sha256 存
+`<prefix>/spaces/<空间>/books/<sha>.epub`；拉取按 `opId` 幂等去重，实体按
+HLC LWW 合并（进度最远百分比取 max）。
+
+## 已知限制
+
+- **Windows 桌面阅读器禁用**：`flutter_inappwebview_windows` 0.6.0 beta 有合成
+  缺陷；待插件稳定后再评估（记入后续版本）。
+- **iOS 后台朗读**不支持；`Info.plist` 已配显示名，但本机无 macOS 未验证构建。
+- **仿真翻页**是透视折叠近似（WebView 无截图能力，非真纸张卷曲像素），翻页动画
+  在抬手后播放（触摸由页面内 JS 判定）。
+- 同步：无端到端加密（设计预留 AES-GCM + Argon2id，未实现）；封面不同步；
+  同实体并发按 HLC 整行 LWW，无字段级合并。
+- 阅读字数按页级位置增量 × 全书字数估算，非精确逐字统计。
+- 统计：会话 = 前台连续时间，<10s 丢弃；切后台即结算。
+- 阅读器 `chapterIndex+offset` 字符偏移兜底未实现（降级链为 CFI → pos → 章起始）。
+
+## 诊断
+
+- 阅读器顶栏 🐛 打开诊断面板；`adb logcat | grep reader-diag` 查看全链路打点。
+- 看门狗：桥 8s / 书籍渲染 45s 未就绪时自动展示诊断。
+- debug 构建启用 WebView 远程调试：
+  `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`，配合
+  `tools/devtools_eval.dart` 可在页面内求值（含 iframe 穿透）。
+
+## 目录
+
+```
+lib/
+  app/            主题、路由、providers
+  core/           HLC、Locator、drift 数据库与 DAO
+  data/           仓储实现、EPUB 解析、对象存储（local/S3）
+  domain/         实体与仓储接口（页面层不依赖 data/core-db）
+  features/
+    shelf/        书架、导入、同步面板与存储设置
+    reader/       阅读器（池化 WebView、桥、标注、TTS）、检索页
+    stats/        阅读统计
+assets/reader/    reader.html + epub.js/jszip（内联注入）
+tools/            诊断脚本（vm_dump / devtools_eval）
+```
+
+## 数据库
+
+schema v2：books / chapters / reading_progress / annotations / bookmarks /
+reading_sessions / daily_stats / sync_ops / sync_state + `book_fts`（FTS5 trigram
+虚拟表，派生数据可重建）。迁移纪律：按版本增量迁移，不删表重建。

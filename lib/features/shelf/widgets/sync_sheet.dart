@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../app/providers.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../../../domain/sync/sync_status.dart';
+import 'sync_backend_settings.dart';
 
 /// 弹出同步面板。
 Future<void> showSyncSheet(BuildContext context) {
@@ -40,6 +41,14 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
     final status = await repo.status();
     if (!mounted) return;
     setState(() => _status = status);
+  }
+
+  /// 从存储设置返回后刷新（后端可能已切换）。
+  Future<void> _refreshAfterSettings() async {
+    // 让 objectStore provider 重新读取配置
+    ref.invalidate(objectStoreProvider);
+    ref.invalidate(syncRepositoryProvider);
+    await _loadStatus();
   }
 
   Future<void> _syncNow() async {
@@ -96,6 +105,14 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                         color: fg.withValues(alpha: 0.6),
                         fontSize: 12,
                       ),
+                    ),
+                    IconButton(
+                      tooltip: '存储设置',
+                      onPressed: () async {
+                        await showSyncBackendSettings(context);
+                        await _refreshAfterSettings();
+                      },
+                      icon: Icon(Icons.settings_outlined, color: fg),
                     ),
                   ],
                 ),

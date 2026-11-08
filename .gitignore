@@ -52,3 +52,7 @@ app.*.map.json
 
 # 本地构建工具（nuget.exe，勿入库）
 /tools/
+
+# Release 签名（不入库；请自行备份 android/qyreader-release.jks 与 key.properties）
+android/key.properties
+android/*.jks
