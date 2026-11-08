@@ -267,6 +267,8 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
         payload: jsonEncode(<String, dynamic>{
           'id': id,
           'bookId': deleted.bookId,
+          // 墓碑时间必须随 payload 同步，远端据此判定删除
+          'deletedAt': deleted.deletedAt,
           'hlc': hlc.encode(),
           'deviceId': deviceId,
         }),
@@ -302,6 +304,7 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
         payload: jsonEncode(<String, dynamic>{
           'id': id,
           'bookId': deleted.bookId,
+          'deletedAt': deleted.deletedAt,
           'hlc': hlc.encode(),
           'deviceId': deviceId,
         }),

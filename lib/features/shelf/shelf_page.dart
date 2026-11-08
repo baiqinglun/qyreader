@@ -15,6 +15,7 @@ import '../../core/widgets/skeleton.dart';
 import '../../domain/entities/book.dart';
 import 'shelf_controller.dart';
 import 'widgets/book_card.dart';
+import 'widgets/sync_sheet.dart';
 
 /// 首页：书架。
 class ShelfPage extends ConsumerWidget {
@@ -41,6 +42,14 @@ class ShelfPage extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('书架'),
+        actions: [
+          IconButton(
+            tooltip: '同步',
+            onPressed: () => showSyncSheet(context),
+            icon: const Icon(Icons.cloud_sync_outlined),
+          ),
+          const SizedBox(width: 4),
+        ],
         bottom: importing
             ? const PreferredSize(
                 preferredSize: Size.fromHeight(3),

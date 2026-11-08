@@ -19,10 +19,14 @@ import '../data/repositories/annotation_repository_impl.dart';
 import '../data/repositories/book_repository_impl.dart';
 import '../data/repositories/progress_repository_impl.dart';
 import '../data/repositories/search_repository_impl.dart';
+import '../data/repositories/sync_repository_impl.dart';
+import '../data/sync/local_object_store.dart';
 import '../domain/repositories/annotation_repository.dart';
 import '../domain/repositories/book_repository.dart';
 import '../domain/repositories/progress_repository.dart';
 import '../domain/repositories/search_repository.dart';
+import '../domain/repositories/sync_repository.dart';
+import '../domain/sync/object_store.dart';
 
 part 'providers.g.dart';
 
@@ -94,5 +98,43 @@ Future<SearchRepository> searchRepository(Ref ref) async {
   return SearchRepositoryImpl(
     db: ref.watch(appDatabaseProvider),
     books: await ref.watch(bookRepositoryProvider.future),
+  );
+}
+
+/// 同步空间 id（多设备填同一空间即互相同步；默认 local 单机空间）。
+const String _kSyncSpaceKey = 'sync.spaceId';
+
+/// 同步空间标识。
+@Riverpod(keepAlive: true)
+Future<String> syncSpaceId(Ref ref) async {
+  final prefs = await SharedPreferences.getInstance();
+  var id = prefs.getString(_kSyncSpaceKey);
+  if (id == null || id.isEmpty) {
+    id = 'local';
+    await prefs.setString(_kSyncSpaceKey, id);
+  }
+  return id;
+}
+
+/// 对象存储（M4 用本地目录模拟桶；接 S3 时只换此实现）。
+@Riverpod(keepAlive: true)
+Future<ObjectStore> objectStore(Ref ref) async {
+  final dir = await getApplicationSupportDirectory();
+  final spaceId = await ref.watch(syncSpaceIdProvider.future);
+  return LocalObjectStore(
+    Directory(p.join(dir.path, 'sync_store', spaceId)),
+  );
+}
+
+/// 同步仓储单例。
+@Riverpod(keepAlive: true)
+Future<SyncRepository> syncRepository(Ref ref) async {
+  return SyncRepositoryImpl(
+    db: ref.watch(appDatabaseProvider),
+    store: await ref.watch(objectStoreProvider.future),
+    spaceId: await ref.watch(syncSpaceIdProvider.future),
+    deviceId: await ref.watch(deviceIdProvider.future),
+    libraryDir: await ref.watch(libraryDirectoryProvider.future),
+    hlcClock: await ref.watch(hlcClockProvider.future),
   );
 }

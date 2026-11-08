@@ -161,5 +161,62 @@ final searchRepositoryProvider = FutureProvider<SearchRepository>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef SearchRepositoryRef = FutureProviderRef<SearchRepository>;
+String _$syncSpaceIdHash() => r'6077aba0b8f6a0b9faaa888f5e4a359d9f8ff0a9';
+
+/// 同步空间标识。
+///
+/// Copied from [syncSpaceId].
+@ProviderFor(syncSpaceId)
+final syncSpaceIdProvider = FutureProvider<String>.internal(
+  syncSpaceId,
+  name: r'syncSpaceIdProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$syncSpaceIdHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef SyncSpaceIdRef = FutureProviderRef<String>;
+String _$objectStoreHash() => r'cf25c12c87af05c9658f402f2158f0b8736b89c6';
+
+/// 对象存储（M4 用本地目录模拟桶；接 S3 时只换此实现）。
+///
+/// Copied from [objectStore].
+@ProviderFor(objectStore)
+final objectStoreProvider = FutureProvider<ObjectStore>.internal(
+  objectStore,
+  name: r'objectStoreProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$objectStoreHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef ObjectStoreRef = FutureProviderRef<ObjectStore>;
+String _$syncRepositoryHash() => r'9d3c68bcf548ce8da877825e9c53d8081dc1a947';
+
+/// 同步仓储单例。
+///
+/// Copied from [syncRepository].
+@ProviderFor(syncRepository)
+final syncRepositoryProvider = FutureProvider<SyncRepository>.internal(
+  syncRepository,
+  name: r'syncRepositoryProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$syncRepositoryHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef SyncRepositoryRef = FutureProviderRef<SyncRepository>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
