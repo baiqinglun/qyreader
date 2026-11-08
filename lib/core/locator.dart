@@ -38,6 +38,10 @@ abstract class Locator with _$Locator {
     /// 全书百分比 0..1，仅展示用，不参与定位。
     double? percent,
 
+    /// 细粒度全书位置 0..1（章索引 + 章内页比例）。percent 受 locations
+    /// 分块量化（同一 location 内多页百分比相同），统计字数用这个。
+    double? pos,
+
     /// PDF 页码（1 基）。
     int? page,
 
@@ -58,6 +62,7 @@ String locatorToJson(Locator l) =>
       if (l.chapterIndex != null) 'chapterIndex': l.chapterIndex,
       if (l.offset != null) 'offset': l.offset,
       if (l.percent != null) 'percent': l.percent,
+      if (l.pos != null) 'pos': l.pos,
       if (l.page != null) 'page': l.page,
       if (l.x != null) 'x': l.x,
       if (l.y != null) 'y': l.y,
@@ -75,6 +80,7 @@ Locator? locatorFromJson(String raw) {
       chapterIndex: (json['chapterIndex'] as num?)?.toInt(),
       offset: (json['offset'] as num?)?.toInt(),
       percent: (json['percent'] as num?)?.toDouble(),
+      pos: (json['pos'] as num?)?.toDouble(),
       page: (json['page'] as num?)?.toInt(),
       x: (json['x'] as num?)?.toDouble(),
       y: (json['y'] as num?)?.toDouble(),

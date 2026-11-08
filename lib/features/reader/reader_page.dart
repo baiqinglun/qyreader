@@ -40,6 +40,7 @@ import 'reader_assets.dart';
 import 'reader_bridge_events.dart';
 import 'reader_controller.dart';
 import 'reader_settings.dart';
+import 'reading_session_tracker.dart';
 import 'widgets/annotation_sheet.dart';
 import 'widgets/note_editor_sheet.dart';
 import 'tts/tts_playback.dart';
@@ -142,6 +143,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   /// TTS 播放控制器（句级朗读 + 跟读高亮 + 自动翻页/续章）。
   late final TtsPlaybackController _tts;
 
+  /// 阅读会话跟踪（统计时长/字数）。
+  ReadingSessionTracker? _session;
+
   /// 启动诊断（看门狗触发时展示在兜底面板）
   final List<String> _diag = <String>[];
   void _diagLog(String line) {
@@ -195,6 +199,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     unawaited(_annotationsSub?.cancel());
     unawaited(_bookmarksSub?.cancel());
     unawaited(_tts.dispose());
+    final session = _session;
+    if (session != null) {
+      unawaited(session.flush());
+      session.dispose();
+    }
     unawaited(_assetServer.stop());
     ref.read(readerControllerProvider(widget.bookId).notifier).flushProgress();
     super.dispose();
@@ -226,6 +235,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final state = _controllerState;
     final book = state.book;
     if (book == null) return;
+
+    // M5：阅读会话计时（字数按 relocated 正增量估算）
+    final statsRepo = await ref.read(statsRepositoryProvider.future);
+    _session = ReadingSessionTracker(
+      repository: statsRepo,
+      bookId: widget.bookId,
+      wordCount: book.wordCount,
+    )..start();
 
     // M2：标注/书签流（watch 实时刷新列表；桥定点同步在动作处做）
     final annRepo = await ref.read(annotationRepositoryProvider.future);
@@ -464,6 +481,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
     // 首次 relocated = display 已落定到目标列，此时注入高亮坐标才正确
     _applyHighlightsTo(slot);
+
+    // 统计：按可视层 percent 正增量累计字数
+    if (slot == _visible) {
+      _session?.onPercent(locator.pos ?? locator.percent);
+    }
 
     // 翻页/跳转后选区已失效：收菜单并清 WebView 选区
     if (slot == _visible && _selection != null) {
@@ -1221,6 +1243,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
             dx = width * (1 - t);
           case PageTurnMode.fade:
             opacity = t;
+          case PageTurnMode.curl:
+            dx = 0; // 下一页原地露出，由旧页折叠揭开
           case PageTurnMode.none:
             dx = width;
         }
@@ -1239,6 +1263,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           case PageTurnMode.fade:
             opacity = 1 - t;
             dy = -2 * t;
+          case PageTurnMode.curl:
+            // 沿左缘折叠翻起：透视旋转 + 轻微左移；折线由下方阴影层画
+            rotY = -1.15 * t;
+            dx = -width * 0.03 * t;
+            dim = 0.22 * t;
           case PageTurnMode.none:
             dx = 0;
         }
@@ -1282,6 +1311,26 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                     ),
                   ),
                 ),
+                // curl 模式：折缝阴影（右缘抬起处最深，向内渐变消散）
+                if (!isHidden && forwardTurn && mode == PageTurnMode.curl)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.centerRight,
+                            end: Alignment.centerLeft,
+                            colors: [
+                              Colors.black.withValues(alpha: 0.30 * t),
+                              Colors.black.withValues(alpha: 0.10 * t),
+                              Colors.transparent,
+                            ],
+                            stops: const [0.0, 0.16, 0.55],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),

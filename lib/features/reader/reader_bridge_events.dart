@@ -205,6 +205,7 @@ Locator? _locatorFromBridgeJson(dynamic raw) {
       cfi: raw['cfi'] as String?,
       chapterIndex: (raw['chapterIndex'] as num?)?.toInt(),
       percent: (raw['percent'] as num?)?.toDouble(),
+      pos: (raw['pos'] as num?)?.toDouble(),
     );
   } catch (_) {
     return null;

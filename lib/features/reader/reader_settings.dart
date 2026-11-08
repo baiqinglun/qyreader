@@ -42,7 +42,11 @@ enum PageTurnMode {
   none('无'),
 
   /// 淡入：交叉淡入 + 2px 上移。
-  fade('淡入');
+  fade('淡入'),
+
+  /// 仿真：当前页沿左缘 3D 折叠翻起，下一页原样露出（无 WebView 截图，
+  /// 以透视折叠 + 折线阴影近似仿真翻页）。
+  curl('仿真');
 
   const PageTurnMode(this.label);
 

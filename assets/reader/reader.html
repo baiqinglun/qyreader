@@ -111,6 +111,14 @@
         var p = book.locations.percentageFromCfi(location.start.cfi);
         if (p !== null && !isNaN(p)) loc.percent = p;
       }
+      // 细粒度位置：章索引 + 章内页比例（percent 被 locations 分块量化，
+      // 同块内多页 percent 相同，统计字数需要页级精度）
+      var disp = location.start.displayed;
+      var spineItems = book.spine.spineItems || [];
+      if (disp && disp.total > 0 && spineItems.length > 0) {
+        var si = spineItem ? spineItem.index : 0;
+        loc.pos = (si + disp.page / disp.total) / spineItems.length;
+      }
     } catch (e) {
       postError('locator.build', e);
     }

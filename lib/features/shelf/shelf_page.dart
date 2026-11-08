@@ -44,6 +44,11 @@ class ShelfPage extends ConsumerWidget {
         title: const Text('书架'),
         actions: [
           IconButton(
+            tooltip: '阅读统计',
+            onPressed: () => context.push(kStatsPath),
+            icon: const Icon(Icons.insights_outlined),
+          ),
+          IconButton(
             tooltip: '同步',
             onPressed: () => showSyncSheet(context),
             icon: const Icon(Icons.cloud_sync_outlined),

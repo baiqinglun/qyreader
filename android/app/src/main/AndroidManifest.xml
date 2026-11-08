@@ -3,7 +3,7 @@
          模板只在 debug 构建声明，release 必须显式声明（M4 S3 同步也需要） -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="qy_reader"
+        android:label="QYReader"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config">

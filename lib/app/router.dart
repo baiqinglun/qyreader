@@ -9,6 +9,7 @@ import 'package:go_router/go_router.dart';
 
 import '../features/reader/reader_page.dart';
 import '../features/reader/widgets/search_page.dart';
+import '../features/stats/stats_page.dart';
 import '../features/shelf/shelf_page.dart';
 
 /// 书架路由路径。
@@ -19,6 +20,9 @@ const String kReaderPath = '/reader/:bookId';
 
 /// 阅读器内全书检索路由模板。
 const String kReaderSearchPath = '/reader/:bookId/search';
+
+/// 阅读统计页路径。
+const String kStatsPath = '/stats';
 
 /// 深链 `reader://book/{id}` 映射的路径。
 const String kDeepLinkBookPath = '/book/:bookId';
@@ -44,6 +48,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           final bookId = state.pathParameters['bookId'] ?? '';
           return ReaderPage(bookId: bookId);
         },
+      ),
+      GoRoute(
+        path: kStatsPath,
+        builder: (context, state) => const StatsPage(),
       ),
       GoRoute(
         path: kReaderSearchPath,

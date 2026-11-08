@@ -19,12 +19,14 @@ import '../data/repositories/annotation_repository_impl.dart';
 import '../data/repositories/book_repository_impl.dart';
 import '../data/repositories/progress_repository_impl.dart';
 import '../data/repositories/search_repository_impl.dart';
+import '../data/repositories/stats_repository_impl.dart';
 import '../data/repositories/sync_repository_impl.dart';
 import '../data/sync/local_object_store.dart';
 import '../domain/repositories/annotation_repository.dart';
 import '../domain/repositories/book_repository.dart';
 import '../domain/repositories/progress_repository.dart';
 import '../domain/repositories/search_repository.dart';
+import '../domain/repositories/stats_repository.dart';
 import '../domain/repositories/sync_repository.dart';
 import '../domain/sync/object_store.dart';
 
@@ -136,5 +138,14 @@ Future<SyncRepository> syncRepository(Ref ref) async {
     deviceId: await ref.watch(deviceIdProvider.future),
     libraryDir: await ref.watch(libraryDirectoryProvider.future),
     hlcClock: await ref.watch(hlcClockProvider.future),
+  );
+}
+
+/// 阅读统计仓储单例。
+@Riverpod(keepAlive: true)
+Future<StatsRepository> statsRepository(Ref ref) async {
+  return StatsRepositoryImpl(
+    db: ref.watch(appDatabaseProvider),
+    deviceId: await ref.watch(deviceIdProvider.future),
   );
 }
