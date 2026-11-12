@@ -19,7 +19,7 @@
 
 功能面：书架（导入 / 分类 / 标签 / 最近在读）、EPUB 阅读器（Flutter 原生排版）、
 4 色划线笔记、全书检索（FTS5 trigram）、TTS 朗读、S3/本地桶同步、阅读统计。
-详细能力清单见 `README.md`（注意：README 里「epub.js 渲染」的描述已过时，见 §7）。
+详细能力清单与真机截图见 `README.md`。
 
 ## 2. 当前状态
 
@@ -28,6 +28,8 @@
 - 门禁：`flutter analyze` 0 issues、`flutter test` 413 项全绿（2026-11-12 验证）
 - 最近一次构建：`qyreader/QYReader-v2.40.0-20261112-multiselect-delete-confirm.apk`（31.3 MB，正式签名）
 - Windows 桌面版：`qyreader/QYReader-v2.40.0-20261112-windows-x64.zip`（15.7 MB，解压后运行 `qy_reader.exe`）
+- 文档：`README.md` 已按 v2.40.0 重写（功能总览 / 下载 / 构建 / 签名 / 同步 / 架构 / 数据库 / 已知限制），
+  6 张真机截图在 `docs/screenshots/1.jpg` – `6.jpg`
 - 已知待办/限制：见 §7 与 `README.md`「已知限制」
 
 ## 3. 每轮对话的硬性动作
@@ -188,7 +190,7 @@ qyreader/        APK 归档目录
   按需下载」、`cloud_download_dialog_test.dart`。
 - **阅读器只有原生实现**：`reader_page.dart` 的 `_useNative()` 恒为 `true`，
   WebView + epub.js 渲染链（`reader_bridge.dart` / `reader_asset_server.dart` /
-  `assets/reader/reader.html`）仍在库里但已被旁路；`README.md` 的「epub.js 渲染」描述过时。
+  `assets/reader/reader.html`）仍在库里但已被旁路（`README.md`「已知限制」已注明）。
 - **打开书籍卡在「正在打开…」（v2.20.2）**：`_restoreThenBoot` 原来无条件先构造
   `syncRepositoryProvider`（会读 OSS 配置 + 安全存储），冷启动首次可能很慢，
   结果正文启动被同步库初始化卡住；本地书源明明存在却一直转圈，退出再开又好了
@@ -637,3 +639,4 @@ qyreader/        APK 归档目录
 | 2026-11-12 | 2.38.3+128 | 页眉/页脚边距改为**绝对边距**、不再叠加系统安全区：`_runningHeight` 与 `_pageContent` 只用 `headerMarginTop` / `footerMarginBottom`；`ReaderPage._pagePadding` 不再加 `insets.top/bottom`；`MarginEditorOverlay` 去掉 `safeTop/safeBottom`，几何从 0 / size.height 起算；边距直调页与阅读页保持同一套坐标 | `qyreader/QYReader-v2.38.3-20261112-absolute-margins.apk`、`qyreader/QYReader-v2.38.3-20261112-windows-x64.zip` |
 | 2026-11-12 | 2.39.0+129 | 阅读状态自动切换：导入默认「未读」；`ReaderController.init` 打开书时按已有进度给状态（<100% → 在读，=100% → 已读），并写回书籍；`_write` 每次进度落库后按 `readStatusForProgress(percent)` 同步（100% → 已读，回翻到前面 → 在读），状态相同不重复写；新增 `readStatusForProgress` / `kReadFinishedThreshold`；补 3 项回归（共 412 项） | `qyreader/QYReader-v2.39.0-20261112-auto-read-status.apk`、`qyreader/QYReader-v2.39.0-20261112-windows-x64.zip` |
 | 2026-11-12 | 2.40.0+130 | ① 多选只选当前目录：书架首屏（根目录）只铺没有分类的书，分类里只铺该分类的书（新增 `rootShelfItems`，`ShelfPage` 多选时按 filter 选作用域）；② 删除确认统一为「取消 / 删除书籍 / 删除全部」：删除书籍保留笔记划线，删除全部连笔记、划线、书签与阅读记录一起删；选「删除全部」再弹「危险操作」二次确认（红色警示 + 继续删除），取消则什么都不删；单本与批量共用 `confirmDeleteAllDanger`；③ 单本删除不再提供「保留并导出」（导出入口随菜单移除）；补 2 项回归（共 413 项） | `qyreader/QYReader-v2.40.0-20261112-multiselect-delete-confirm.apk`、`qyreader/QYReader-v2.40.0-20261112-windows-x64.zip` |
+| 2026-11-12 | 2.40.0+130 | ① `README.md` 按 v2.40.0 重写：6 张真机截图（`docs/screenshots/1–6.jpg`）、版本 / 技术栈、功能总览、下载与安装、构建与签名、同步协议、数据与备份、架构、schema v5、已知限制与更新日志入口；② 修正旧 README 的过时描述（Windows 阅读器禁用 / epub.js 渲染 / schema v3 / 封面不同步）；仅文档更新，未递增版本 | `qyreader/QYReader-v2.40.0-20261112-multiselect-delete-confirm.apk`（同版本重出）、`qyreader/QYReader-v2.40.0-20261112-windows-x64.zip`（沿用） |
