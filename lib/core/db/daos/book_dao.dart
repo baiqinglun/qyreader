@@ -3,6 +3,7 @@ library;
 
 import 'package:drift/drift.dart';
 
+import '../../locator.dart';
 import '../app_database.dart';
 import '../tables.dart';
 
@@ -20,7 +21,17 @@ class ShelfEntry {
   final ReadingProgressRow? progress;
 
   /// 展示用百分比 0..1。
-  double get percent => progress?.percent ?? 0;
+  ///
+  /// 优先用 Locator.pos（页级位置）：percent 受 locations 分块量化，
+  /// 短书/短章里连续多页都会是 0，书架会误显示“未读”。
+  double get percent {
+    final raw = progress?.locator;
+    if (raw != null) {
+      final pos = locatorFromJson(raw)?.pos;
+      if (pos != null && pos > 0) return pos.clamp(0.0, 1.0);
+    }
+    return progress?.percent ?? 0;
+  }
 }
 
 /// 书籍相关查询。
@@ -43,6 +54,10 @@ class BookDao extends DatabaseAccessor<AppDatabase> with _$BookDaoMixin {
           .where((entry) => entry.book.deletedAt == null)
           .toList()
         ..sort((a, b) {
+          // 置顶优先（最近置顶在前），再按最近打开，最后按入库时间
+          final aPin = a.book.pinnedAt ?? 0;
+          final bPin = b.book.pinnedAt ?? 0;
+          if (aPin != bPin) return bPin - aPin;
           final aOpened = a.book.lastOpenedAt ?? 0;
           final bOpened = b.book.lastOpenedAt ?? 0;
           if (aOpened != bOpened) return bOpened - aOpened;

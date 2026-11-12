@@ -9,6 +9,7 @@ import '../../../core/locator.dart';
 import '../../../domain/entities/annotation.dart';
 import '../../../domain/entities/book.dart';
 import '../../../domain/entities/bookmark.dart';
+import 'annotation_tab.dart';
 
 /// 目录抽屉。
 class TocDrawer extends StatelessWidget {
@@ -24,6 +25,7 @@ class TocDrawer extends StatelessWidget {
     required this.onGotoLocator,
     required this.onDeleteBookmark,
     required this.onDeleteAnnotation,
+    required this.onEditNote,
     required this.onExport,
     super.key,
   });
@@ -60,6 +62,9 @@ class TocDrawer extends StatelessWidget {
 
   /// 删除标注。
   final void Function(String id) onDeleteAnnotation;
+
+  /// 给标注添加/编辑想法。
+  final void Function(Annotation annotation) onEditNote;
 
   /// 导出 Markdown。
   final VoidCallback onExport;
@@ -98,6 +103,7 @@ class TocDrawer extends StatelessWidget {
                     onGotoLocator: onGotoLocator,
                     onDeleteBookmark: onDeleteBookmark,
                     onDeleteAnnotation: onDeleteAnnotation,
+                    onEditNote: onEditNote,
                     onExport: onExport,
                   ),
                 ),
@@ -120,6 +126,7 @@ class _Panel extends StatelessWidget {
     required this.onGotoLocator,
     required this.onDeleteBookmark,
     required this.onDeleteAnnotation,
+    required this.onEditNote,
     required this.onExport,
   });
 
@@ -133,6 +140,7 @@ class _Panel extends StatelessWidget {
   final void Function(String locatorJson) onGotoLocator;
   final void Function(String id) onDeleteBookmark;
   final void Function(String id) onDeleteAnnotation;
+  final void Function(Annotation annotation) onEditNote;
   final VoidCallback onExport;
 
   @override
@@ -280,109 +288,17 @@ class _Panel extends StatelessWidget {
   }
 
   Widget _buildAnnotations() {
-    final header = Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      child: Row(
-        children: [
-          Text(
-            '共 ${annotations.length} 条',
-            style: TextStyle(
-              color: theme.chromeForeground.withValues(alpha: 0.6),
-              fontSize: 12,
-            ),
-          ),
-          const Spacer(),
-          TextButton.icon(
-            onPressed: annotations.isEmpty ? null : onExport,
-            icon: Icon(
-              Icons.ios_share,
-              size: 16,
-              color: theme.chromeForeground.withValues(alpha: 0.8),
-            ),
-            label: Text(
-              '导出',
-              style: TextStyle(
-                color: theme.chromeForeground.withValues(alpha: 0.8),
-                fontSize: 13,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (annotations.isEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          header,
-          Expanded(
-            child: Center(
-              child: Text(
-                '选中正文即可划线',
-                style: TextStyle(
-                  color: theme.chromeForeground.withValues(alpha: 0.6),
-                ),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-    return ListView.builder(
-      padding: EdgeInsets.zero,
-      itemCount: annotations.length + 1,
-      itemBuilder: (context, index) {
-        if (index == 0) return header;
-        final a = annotations[index - 1];
-        return Dismissible(
-          key: ValueKey(a.id),
-          direction: DismissDirection.endToStart,
-          background: Container(
-            color: Colors.redAccent,
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 20),
-            child: const Icon(Icons.delete_outline, color: Colors.white),
-          ),
-          onDismissed: (_) => onDeleteAnnotation(a.id),
-          child: ListTile(
-            leading: Container(
-              width: 14,
-              height: 40,
-              decoration: BoxDecoration(
-                color: _colorOf(a),
-                borderRadius: BorderRadius.circular(3),
-              ),
-            ),
-            title: Text(
-              a.quotedText ?? '',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: theme.chromeForeground, fontSize: 13),
-            ),
-            subtitle: a.note == null || a.note!.isEmpty
-                ? null
-                : Text(
-                    '笔记：${a.note}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: theme.chromeForeground.withValues(alpha: 0.6),
-                      fontSize: 12,
-                    ),
-                  ),
-            onTap: () => onGotoLocator(a.locatorStart),
-          ),
-        );
-      },
+    return AnnotationTab(
+      theme: theme,
+      chapters: chapters,
+      annotations: annotations,
+      onGotoLocator: onGotoLocator,
+      onDelete: onDeleteAnnotation,
+      onEditNote: onEditNote,
+      onExport: onExport,
     );
   }
 
-  Color _colorOf(Annotation a) => switch (a.color) {
-        AnnotationColor.yellow => const Color(0xFFF7D774),
-        AnnotationColor.green => const Color(0xFFA9D98B),
-        AnnotationColor.blue => const Color(0xFF9CC3F5),
-        AnnotationColor.rose => const Color(0xFFF2A9B8),
-      };
 }
 
 class _AnimatedRow extends StatelessWidget {

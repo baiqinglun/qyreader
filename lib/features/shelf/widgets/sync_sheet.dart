@@ -1,12 +1,16 @@
 /// 同步面板：空间信息 / 待上传数 / 上次同步时间 / 立即同步。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/providers.dart';
+import '../../../app/theme/motion.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../../../domain/sync/sync_status.dart';
+import '../../reader/fonts/reader_fonts.dart';
 import 'sync_backend_settings.dart';
 
 /// 弹出同步面板。
@@ -14,8 +18,31 @@ Future<void> showSyncSheet(BuildContext context) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
+    sheetAnimationStyle: kSmoothSheetAnimation,
     builder: (_) => const _SyncSheet(),
   );
+}
+
+/// 同步完成后给用户看的一句话总结（书架快捷同步与同步面板共用）。
+String syncResultSummary(SyncResult result) {
+  if (!result.ok) return '同步失败：${result.error}';
+  final parts = <String>[];
+  if (result.pushed > 0) parts.add('上传 ${result.pushed} 条改动');
+  if (result.applied > 0) parts.add('合并 ${result.applied} 处云端改动');
+  if (result.backedUpFiles > 0) {
+    parts.add(
+      '补齐 ${result.backedUpFiles} 个本地文件'
+      '（${(result.backedUpBytes / 1024).toStringAsFixed(0)} KB）',
+    );
+  }
+  if (result.fontsSynced > 0) parts.add('同步 ${result.fontsSynced} 个字体');
+  if (result.backgroundsSynced > 0) {
+    parts.add('同步 ${result.backgroundsSynced} 张背景');
+  }
+  final backupError = result.dbError ?? result.backupError;
+  if (backupError != null) parts.add('备份失败：$backupError');
+  if (parts.isEmpty) return '已是最新，没有需要同步的改动';
+  return parts.join('；');
 }
 
 class _SyncSheet extends ConsumerStatefulWidget {
@@ -29,6 +56,8 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
   SyncStatus? _status;
   SyncResult? _lastResult;
   bool _running = false;
+  SyncProgress? _progress;
+  List<String> _pendingBooks = const [];
 
   @override
   void initState() {
@@ -39,8 +68,12 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
   Future<void> _loadStatus() async {
     final repo = await ref.read(syncRepositoryProvider.future);
     final status = await repo.status();
+    final pending = await repo.pendingShardBooks();
     if (!mounted) return;
-    setState(() => _status = status);
+    setState(() {
+      _status = status;
+      _pendingBooks = pending;
+    });
   }
 
   /// 从存储设置返回后刷新（后端可能已切换）。
@@ -55,14 +88,26 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
     if (_running) return;
     setState(() => _running = true);
     final repo = await ref.read(syncRepositoryProvider.future);
-    final result = await repo.syncNow();
+    final result = await repo.syncNow(
+      onProgress: (p) {
+        if (mounted) setState(() => _progress = p);
+      },
+    );
     final status = await repo.status();
+    // 字体也参与同步：拉回来的字体立刻出现在字体列表里（不用重启）
+    unawaited(
+      ref.read(readerFontsControllerProvider.notifier).reload(),
+    );
     if (!mounted) return;
     setState(() {
       _running = false;
+      _progress = null;
       _lastResult = result;
       _status = status;
     });
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(syncResultSummary(result))));
   }
 
   @override
@@ -177,6 +222,41 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                           ? reading.accent
                           : Colors.redAccent,
                       fontSize: 12,
+                    ),
+                  ),
+                ],
+                if (_pendingBooks.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    '待同步  本书：'
+                    '',
+                    style: TextStyle(
+                      color: reading.chromeForeground.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+                if (_running) ...[
+                  const SizedBox(height: 10),
+                  LinearProgressIndicator(
+                    value: _progress?.fraction,
+                    color: reading.accent,
+                    backgroundColor:
+                        reading.chromeForeground.withValues(alpha: 0.12),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _progress == null
+                        ? '准备中…'
+                        : (_progress!.total > 0
+                            ? '${_progress!.label}'
+                                '（${_progress!.done}/${_progress!.total}）'
+                            : _progress!.label),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: reading.chromeForeground.withValues(alpha: 0.6),
+                      fontSize: 11,
                     ),
                   ),
                 ],

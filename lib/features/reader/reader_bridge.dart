@@ -10,8 +10,26 @@ import 'dart:typed_data';
 
 import 'package:webview_flutter/webview_flutter.dart';
 
+/// 朗读所需的最小接口（WebView 与原生文本两种实现共用）。
+abstract class TtsSurface {
+  /// 当前章节的句子列表。
+  Future<List<TtsSegment>?> ttsSegments();
+
+  /// 高亮句子；返回 'visible' | 'turning' | 错误码。
+  Future<String?> ttsShow(String cfiRange);
+
+  /// 清除高亮。
+  Future<void> ttsClear();
+
+  /// 下一章 href；已是最后一章返回 null。
+  Future<String?> ttsNextHref();
+
+  /// 跳到章节（WebView 传 href；原生实现里 href 已被编码为 `@章:起:止`）。
+  Future<void> gotoChapter(String target);
+}
+
 /// 封装 reader.html 暴露的全局函数。
-class ReaderBridge {
+class ReaderBridge implements TtsSurface {
   /// 绑定某个 WebView 实例的控制器。
   ReaderBridge(this._controller);
 
@@ -19,9 +37,15 @@ class ReaderBridge {
 
   /// 载入书籍并渲染：[bookUrl] 为同源书籍地址（file:// 或本地服务），
   /// [locatorJson] 非空时首次 display 直接定位（JS 自主首渲）。
-  Future<void> loadBook(String bookUrl, {String? locatorJson}) => _eval(
-    'loadBook(${_jsStr(bookUrl)}, ${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
-  );
+  /// [styleJson] 非空时在首帧前确定边距/主题，避免先满屏再缩进。
+  Future<void> loadBook(
+    String bookUrl, {
+    String? locatorJson,
+    String? styleJson,
+  }) =>
+      _eval('loadBook(${_jsStr(bookUrl)}, '
+          '${locatorJson == null ? 'null' : _jsStr(locatorJson)}, '
+          '${styleJson == null ? 'null' : _jsStr(styleJson)})');
 
   /// 注入排版样式（含主题色）。
   Future<void> applyStyle(String styleJson) =>
@@ -40,6 +64,23 @@ class ReaderBridge {
   /// 按全书百分比跳转（进度条 scrub）。
   Future<void> gotoPercent(double percent) => _eval('gotoPercent($percent)');
 
+  /// 按页级位置跳转（pos = 章索引 + 章内页比例）。
+  ///
+  /// 与 [gotoPercent] 不同：pos 是页级口径（应用里的 percent 就是它），
+  /// gotoPercent 走的是 epub.js 的字符级 locations 百分比，两者不等价。
+  Future<void> gotoPos(double pos) => _eval('gotoPos($pos)');
+
+  /// 下发全书字数（导入时解析得到）：页面用它估算全书页数。
+  Future<void> setTotalChars(int chars) => _eval('setTotalChars($chars)');
+
+  /// 取当前阅读位置（Locator JSON）；页面未就绪返回 null。
+  ///
+  /// 退出阅读时用：最后一条 relocated 可能还没送达 Dart，这里同步问一次
+  /// 页面拿真实位置落库。
+  Future<String?> currentLocatorJson() => _evalReturning(
+        'window.currentLocatorJson ? window.currentLocatorJson() : null',
+      );
+
   /// 前进一页。
   Future<void> nextPage() => _eval('nextPage()');
 
@@ -47,8 +88,19 @@ class ReaderBridge {
   Future<void> prevPage() => _eval('prevPage()');
 
   /// 与目标位置对齐后前进一页（reserve 池同步用）。
-  Future<void> syncNextMap(Map<String, dynamic> locator) =>
-      _eval('syncNext(${_jsStr(jsonEncode(locator))})');
+  /// [seq] 原样回传在 syncDone 里，供 Dart 丢弃过期回调。
+  Future<void> syncNextMap(Map<String, dynamic> locator, {required int seq}) =>
+      _eval('syncNext(${_jsStr(jsonEncode(locator))}, $seq)');
+
+  /// 边距松手后按 WebView 新尺寸重排并回到原 CFI。
+  Future<void> flushViewport(String? locatorJson) => _eval(
+        'flushViewport(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+      );
+
+  /// 字号/行距变化后强制重新分页并回到原 CFI。
+  Future<void> relayout(String? locatorJson) => _eval(
+        'relayout(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+      );
 
   /// 重报当前位置（locations 就绪后补 percent）。
   Future<void> reportLocation() => _eval('reportLocation()');
@@ -79,6 +131,7 @@ class ReaderBridge {
   // ---- M3 TTS ----
 
   /// 当前章节的句子列表（JSON：[{cfi, text}]）；失败返回 null。
+  @override
   Future<List<TtsSegment>?> ttsSegments() async {
     final raw = await _evalReturning(
       'window.__qyTtsSegments ? window.__qyTtsSegments() : null',
@@ -102,14 +155,20 @@ class ReaderBridge {
   }
 
   /// 高亮第 cfi 句；返回 'visible' | 'turning' | 错误码。
+  @override
   Future<String?> ttsShow(String cfiRange) => _evalReturning(
         'window.__qyTtsShow ? window.__qyTtsShow(${_jsStr(cfiRange)}) : null',
       );
 
   /// 清除 TTS 跟读高亮。
+  @override
   Future<void> ttsClear() => _eval('__qyTtsClear && __qyTtsClear()');
 
+  @override
+  Future<void> gotoChapter(String target) => gotoHref(target);
+
   /// 下一章 href；已是最后一章返回 null。
+  @override
   Future<String?> ttsNextHref() => _evalReturning(
         'window.__qyTtsNextHref ? window.__qyTtsNextHref() : null',
       );

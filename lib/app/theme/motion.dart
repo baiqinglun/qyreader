@@ -7,6 +7,17 @@ library;
 
 import 'package:flutter/material.dart';
 
+/// 慢—快—慢的贝塞尔曲线：`cubic-bezier(0.65, 0, 0.35, 1)`。
+///
+/// 弹窗和页面转场统一用它（用户口径「慢快慢」）：起手慢、中段快、落定慢。
+/// 和 Material 默认的 easeOut（快起慢收）不同，别换回 `Curves.easeOutCubic`。
+const Curve kSmoothCurve = Cubic(0.65, 0, 0.35, 1);
+
+/// 弹窗（底部面板 / 对话框）统一动效：只改曲线，时长沿用 Material 默认。
+const AnimationStyle kSmoothSheetAnimation = AnimationStyle(
+  curve: kSmoothCurve,
+);
+
 /// 动效 token 集。
 ///
 /// | Token      | 时长   | 用途                     |

@@ -203,6 +203,18 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _readStatusMeta = const VerificationMeta(
+    'readStatus',
+  );
+  @override
+  late final GeneratedColumn<String> readStatus = GeneratedColumn<String>(
+    'read_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('unread'),
+  );
   static const VerificationMeta _isArchivedMeta = const VerificationMeta(
     'isArchived',
   );
@@ -217,6 +229,55 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
       'CHECK ("is_archived" IN (0, 1))',
     ),
     defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _ratingMeta = const VerificationMeta('rating');
+  @override
+  late final GeneratedColumn<int> rating = GeneratedColumn<int>(
+    'rating',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _reviewMeta = const VerificationMeta('review');
+  @override
+  late final GeneratedColumn<String> review = GeneratedColumn<String>(
+    'review',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _tagsMeta = const VerificationMeta('tags');
+  @override
+  late final GeneratedColumn<String> tags = GeneratedColumn<String>(
+    'tags',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _categoryMeta = const VerificationMeta(
+    'category',
+  );
+  @override
+  late final GeneratedColumn<String> category = GeneratedColumn<String>(
+    'category',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _pinnedAtMeta = const VerificationMeta(
+    'pinnedAt',
+  );
+  @override
+  late final GeneratedColumn<int> pinnedAt = GeneratedColumn<int>(
+    'pinned_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
   );
   static const VerificationMeta _deletedAtMeta = const VerificationMeta(
     'deletedAt',
@@ -280,7 +341,13 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     updatedAt,
     lastOpenedAt,
     isFinished,
+    readStatus,
     isArchived,
+    rating,
+    review,
+    tags,
+    category,
+    pinnedAt,
     deletedAt,
     metaJson,
     hlc,
@@ -431,10 +498,46 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
         isFinished.isAcceptableOrUnknown(data['is_finished']!, _isFinishedMeta),
       );
     }
+    if (data.containsKey('read_status')) {
+      context.handle(
+        _readStatusMeta,
+        readStatus.isAcceptableOrUnknown(data['read_status']!, _readStatusMeta),
+      );
+    }
     if (data.containsKey('is_archived')) {
       context.handle(
         _isArchivedMeta,
         isArchived.isAcceptableOrUnknown(data['is_archived']!, _isArchivedMeta),
+      );
+    }
+    if (data.containsKey('rating')) {
+      context.handle(
+        _ratingMeta,
+        rating.isAcceptableOrUnknown(data['rating']!, _ratingMeta),
+      );
+    }
+    if (data.containsKey('review')) {
+      context.handle(
+        _reviewMeta,
+        review.isAcceptableOrUnknown(data['review']!, _reviewMeta),
+      );
+    }
+    if (data.containsKey('tags')) {
+      context.handle(
+        _tagsMeta,
+        tags.isAcceptableOrUnknown(data['tags']!, _tagsMeta),
+      );
+    }
+    if (data.containsKey('category')) {
+      context.handle(
+        _categoryMeta,
+        category.isAcceptableOrUnknown(data['category']!, _categoryMeta),
+      );
+    }
+    if (data.containsKey('pinned_at')) {
+      context.handle(
+        _pinnedAtMeta,
+        pinnedAt.isAcceptableOrUnknown(data['pinned_at']!, _pinnedAtMeta),
       );
     }
     if (data.containsKey('deleted_at')) {
@@ -546,10 +649,34 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
         DriftSqlType.bool,
         data['${effectivePrefix}is_finished'],
       )!,
+      readStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}read_status'],
+      )!,
       isArchived: attachedDatabase.typeMapping.read(
         DriftSqlType.bool,
         data['${effectivePrefix}is_archived'],
       )!,
+      rating: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}rating'],
+      ),
+      review: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}review'],
+      ),
+      tags: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}tags'],
+      ),
+      category: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}category'],
+      ),
+      pinnedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}pinned_at'],
+      ),
       deletedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}deleted_at'],
@@ -630,8 +757,26 @@ class BookRow extends DataClass implements Insertable<BookRow> {
   /// 是否标记读完。
   final bool isFinished;
 
+  /// 阅读状态：unread|reading|finished|dropped（v5）。
+  final String readStatus;
+
   /// 是否归档。
   final bool isArchived;
+
+  /// 个人评分 1..5；NULL = 未评分。
+  final int? rating;
+
+  /// 个人书评。
+  final String? review;
+
+  /// 个人标签（JSON 字符串数组）。
+  final String? tags;
+
+  /// 个人分类（单值，书架按它筛选）；NULL = 未分类。
+  final String? category;
+
+  /// 书架置顶时间（epoch ms）；NULL = 未置顶。
+  final int? pinnedAt;
 
   /// 墓碑：删除时间（epoch ms），参与同步合并。
   final int? deletedAt;
@@ -663,7 +808,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     required this.updatedAt,
     this.lastOpenedAt,
     required this.isFinished,
+    required this.readStatus,
     required this.isArchived,
+    this.rating,
+    this.review,
+    this.tags,
+    this.category,
+    this.pinnedAt,
     this.deletedAt,
     this.metaJson,
     required this.hlc,
@@ -702,7 +853,23 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       map['last_opened_at'] = Variable<int>(lastOpenedAt);
     }
     map['is_finished'] = Variable<bool>(isFinished);
+    map['read_status'] = Variable<String>(readStatus);
     map['is_archived'] = Variable<bool>(isArchived);
+    if (!nullToAbsent || rating != null) {
+      map['rating'] = Variable<int>(rating);
+    }
+    if (!nullToAbsent || review != null) {
+      map['review'] = Variable<String>(review);
+    }
+    if (!nullToAbsent || tags != null) {
+      map['tags'] = Variable<String>(tags);
+    }
+    if (!nullToAbsent || category != null) {
+      map['category'] = Variable<String>(category);
+    }
+    if (!nullToAbsent || pinnedAt != null) {
+      map['pinned_at'] = Variable<int>(pinnedAt);
+    }
     if (!nullToAbsent || deletedAt != null) {
       map['deleted_at'] = Variable<int>(deletedAt);
     }
@@ -746,7 +913,21 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           ? const Value.absent()
           : Value(lastOpenedAt),
       isFinished: Value(isFinished),
+      readStatus: Value(readStatus),
       isArchived: Value(isArchived),
+      rating: rating == null && nullToAbsent
+          ? const Value.absent()
+          : Value(rating),
+      review: review == null && nullToAbsent
+          ? const Value.absent()
+          : Value(review),
+      tags: tags == null && nullToAbsent ? const Value.absent() : Value(tags),
+      category: category == null && nullToAbsent
+          ? const Value.absent()
+          : Value(category),
+      pinnedAt: pinnedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pinnedAt),
       deletedAt: deletedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(deletedAt),
@@ -782,7 +963,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       updatedAt: serializer.fromJson<int>(json['updatedAt']),
       lastOpenedAt: serializer.fromJson<int?>(json['lastOpenedAt']),
       isFinished: serializer.fromJson<bool>(json['isFinished']),
+      readStatus: serializer.fromJson<String>(json['readStatus']),
       isArchived: serializer.fromJson<bool>(json['isArchived']),
+      rating: serializer.fromJson<int?>(json['rating']),
+      review: serializer.fromJson<String?>(json['review']),
+      tags: serializer.fromJson<String?>(json['tags']),
+      category: serializer.fromJson<String?>(json['category']),
+      pinnedAt: serializer.fromJson<int?>(json['pinnedAt']),
       deletedAt: serializer.fromJson<int?>(json['deletedAt']),
       metaJson: serializer.fromJson<String?>(json['metaJson']),
       hlc: serializer.fromJson<String>(json['hlc']),
@@ -811,7 +998,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       'updatedAt': serializer.toJson<int>(updatedAt),
       'lastOpenedAt': serializer.toJson<int?>(lastOpenedAt),
       'isFinished': serializer.toJson<bool>(isFinished),
+      'readStatus': serializer.toJson<String>(readStatus),
       'isArchived': serializer.toJson<bool>(isArchived),
+      'rating': serializer.toJson<int?>(rating),
+      'review': serializer.toJson<String?>(review),
+      'tags': serializer.toJson<String?>(tags),
+      'category': serializer.toJson<String?>(category),
+      'pinnedAt': serializer.toJson<int?>(pinnedAt),
       'deletedAt': serializer.toJson<int?>(deletedAt),
       'metaJson': serializer.toJson<String?>(metaJson),
       'hlc': serializer.toJson<String>(hlc),
@@ -838,7 +1031,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     int? updatedAt,
     Value<int?> lastOpenedAt = const Value.absent(),
     bool? isFinished,
+    String? readStatus,
     bool? isArchived,
+    Value<int?> rating = const Value.absent(),
+    Value<String?> review = const Value.absent(),
+    Value<String?> tags = const Value.absent(),
+    Value<String?> category = const Value.absent(),
+    Value<int?> pinnedAt = const Value.absent(),
     Value<int?> deletedAt = const Value.absent(),
     Value<String?> metaJson = const Value.absent(),
     String? hlc,
@@ -862,7 +1061,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     updatedAt: updatedAt ?? this.updatedAt,
     lastOpenedAt: lastOpenedAt.present ? lastOpenedAt.value : this.lastOpenedAt,
     isFinished: isFinished ?? this.isFinished,
+    readStatus: readStatus ?? this.readStatus,
     isArchived: isArchived ?? this.isArchived,
+    rating: rating.present ? rating.value : this.rating,
+    review: review.present ? review.value : this.review,
+    tags: tags.present ? tags.value : this.tags,
+    category: category.present ? category.value : this.category,
+    pinnedAt: pinnedAt.present ? pinnedAt.value : this.pinnedAt,
     deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
     metaJson: metaJson.present ? metaJson.value : this.metaJson,
     hlc: hlc ?? this.hlc,
@@ -900,9 +1105,17 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       isFinished: data.isFinished.present
           ? data.isFinished.value
           : this.isFinished,
+      readStatus: data.readStatus.present
+          ? data.readStatus.value
+          : this.readStatus,
       isArchived: data.isArchived.present
           ? data.isArchived.value
           : this.isArchived,
+      rating: data.rating.present ? data.rating.value : this.rating,
+      review: data.review.present ? data.review.value : this.review,
+      tags: data.tags.present ? data.tags.value : this.tags,
+      category: data.category.present ? data.category.value : this.category,
+      pinnedAt: data.pinnedAt.present ? data.pinnedAt.value : this.pinnedAt,
       deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
       metaJson: data.metaJson.present ? data.metaJson.value : this.metaJson,
       hlc: data.hlc.present ? data.hlc.value : this.hlc,
@@ -931,7 +1144,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           ..write('updatedAt: $updatedAt, ')
           ..write('lastOpenedAt: $lastOpenedAt, ')
           ..write('isFinished: $isFinished, ')
+          ..write('readStatus: $readStatus, ')
           ..write('isArchived: $isArchived, ')
+          ..write('rating: $rating, ')
+          ..write('review: $review, ')
+          ..write('tags: $tags, ')
+          ..write('category: $category, ')
+          ..write('pinnedAt: $pinnedAt, ')
           ..write('deletedAt: $deletedAt, ')
           ..write('metaJson: $metaJson, ')
           ..write('hlc: $hlc, ')
@@ -960,7 +1179,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     updatedAt,
     lastOpenedAt,
     isFinished,
+    readStatus,
     isArchived,
+    rating,
+    review,
+    tags,
+    category,
+    pinnedAt,
     deletedAt,
     metaJson,
     hlc,
@@ -988,7 +1213,13 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           other.updatedAt == this.updatedAt &&
           other.lastOpenedAt == this.lastOpenedAt &&
           other.isFinished == this.isFinished &&
+          other.readStatus == this.readStatus &&
           other.isArchived == this.isArchived &&
+          other.rating == this.rating &&
+          other.review == this.review &&
+          other.tags == this.tags &&
+          other.category == this.category &&
+          other.pinnedAt == this.pinnedAt &&
           other.deletedAt == this.deletedAt &&
           other.metaJson == this.metaJson &&
           other.hlc == this.hlc &&
@@ -1014,7 +1245,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
   final Value<int> updatedAt;
   final Value<int?> lastOpenedAt;
   final Value<bool> isFinished;
+  final Value<String> readStatus;
   final Value<bool> isArchived;
+  final Value<int?> rating;
+  final Value<String?> review;
+  final Value<String?> tags;
+  final Value<String?> category;
+  final Value<int?> pinnedAt;
   final Value<int?> deletedAt;
   final Value<String?> metaJson;
   final Value<String> hlc;
@@ -1039,7 +1276,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     this.updatedAt = const Value.absent(),
     this.lastOpenedAt = const Value.absent(),
     this.isFinished = const Value.absent(),
+    this.readStatus = const Value.absent(),
     this.isArchived = const Value.absent(),
+    this.rating = const Value.absent(),
+    this.review = const Value.absent(),
+    this.tags = const Value.absent(),
+    this.category = const Value.absent(),
+    this.pinnedAt = const Value.absent(),
     this.deletedAt = const Value.absent(),
     this.metaJson = const Value.absent(),
     this.hlc = const Value.absent(),
@@ -1065,7 +1308,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     required int updatedAt,
     this.lastOpenedAt = const Value.absent(),
     this.isFinished = const Value.absent(),
+    this.readStatus = const Value.absent(),
     this.isArchived = const Value.absent(),
+    this.rating = const Value.absent(),
+    this.review = const Value.absent(),
+    this.tags = const Value.absent(),
+    this.category = const Value.absent(),
+    this.pinnedAt = const Value.absent(),
     this.deletedAt = const Value.absent(),
     this.metaJson = const Value.absent(),
     required String hlc,
@@ -1100,7 +1349,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Expression<int>? updatedAt,
     Expression<int>? lastOpenedAt,
     Expression<bool>? isFinished,
+    Expression<String>? readStatus,
     Expression<bool>? isArchived,
+    Expression<int>? rating,
+    Expression<String>? review,
+    Expression<String>? tags,
+    Expression<String>? category,
+    Expression<int>? pinnedAt,
     Expression<int>? deletedAt,
     Expression<String>? metaJson,
     Expression<String>? hlc,
@@ -1126,7 +1381,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       if (updatedAt != null) 'updated_at': updatedAt,
       if (lastOpenedAt != null) 'last_opened_at': lastOpenedAt,
       if (isFinished != null) 'is_finished': isFinished,
+      if (readStatus != null) 'read_status': readStatus,
       if (isArchived != null) 'is_archived': isArchived,
+      if (rating != null) 'rating': rating,
+      if (review != null) 'review': review,
+      if (tags != null) 'tags': tags,
+      if (category != null) 'category': category,
+      if (pinnedAt != null) 'pinned_at': pinnedAt,
       if (deletedAt != null) 'deleted_at': deletedAt,
       if (metaJson != null) 'meta_json': metaJson,
       if (hlc != null) 'hlc': hlc,
@@ -1154,7 +1415,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Value<int>? updatedAt,
     Value<int?>? lastOpenedAt,
     Value<bool>? isFinished,
+    Value<String>? readStatus,
     Value<bool>? isArchived,
+    Value<int?>? rating,
+    Value<String?>? review,
+    Value<String?>? tags,
+    Value<String?>? category,
+    Value<int?>? pinnedAt,
     Value<int?>? deletedAt,
     Value<String?>? metaJson,
     Value<String>? hlc,
@@ -1180,7 +1447,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       updatedAt: updatedAt ?? this.updatedAt,
       lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
       isFinished: isFinished ?? this.isFinished,
+      readStatus: readStatus ?? this.readStatus,
       isArchived: isArchived ?? this.isArchived,
+      rating: rating ?? this.rating,
+      review: review ?? this.review,
+      tags: tags ?? this.tags,
+      category: category ?? this.category,
+      pinnedAt: pinnedAt ?? this.pinnedAt,
       deletedAt: deletedAt ?? this.deletedAt,
       metaJson: metaJson ?? this.metaJson,
       hlc: hlc ?? this.hlc,
@@ -1246,8 +1519,26 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     if (isFinished.present) {
       map['is_finished'] = Variable<bool>(isFinished.value);
     }
+    if (readStatus.present) {
+      map['read_status'] = Variable<String>(readStatus.value);
+    }
     if (isArchived.present) {
       map['is_archived'] = Variable<bool>(isArchived.value);
+    }
+    if (rating.present) {
+      map['rating'] = Variable<int>(rating.value);
+    }
+    if (review.present) {
+      map['review'] = Variable<String>(review.value);
+    }
+    if (tags.present) {
+      map['tags'] = Variable<String>(tags.value);
+    }
+    if (category.present) {
+      map['category'] = Variable<String>(category.value);
+    }
+    if (pinnedAt.present) {
+      map['pinned_at'] = Variable<int>(pinnedAt.value);
     }
     if (deletedAt.present) {
       map['deleted_at'] = Variable<int>(deletedAt.value);
@@ -1288,7 +1579,13 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
           ..write('updatedAt: $updatedAt, ')
           ..write('lastOpenedAt: $lastOpenedAt, ')
           ..write('isFinished: $isFinished, ')
+          ..write('readStatus: $readStatus, ')
           ..write('isArchived: $isArchived, ')
+          ..write('rating: $rating, ')
+          ..write('review: $review, ')
+          ..write('tags: $tags, ')
+          ..write('category: $category, ')
+          ..write('pinnedAt: $pinnedAt, ')
           ..write('deletedAt: $deletedAt, ')
           ..write('metaJson: $metaJson, ')
           ..write('hlc: $hlc, ')
@@ -5339,7 +5636,13 @@ typedef $$BooksTableCreateCompanionBuilder =
       required int updatedAt,
       Value<int?> lastOpenedAt,
       Value<bool> isFinished,
+      Value<String> readStatus,
       Value<bool> isArchived,
+      Value<int?> rating,
+      Value<String?> review,
+      Value<String?> tags,
+      Value<String?> category,
+      Value<int?> pinnedAt,
       Value<int?> deletedAt,
       Value<String?> metaJson,
       required String hlc,
@@ -5366,7 +5669,13 @@ typedef $$BooksTableUpdateCompanionBuilder =
       Value<int> updatedAt,
       Value<int?> lastOpenedAt,
       Value<bool> isFinished,
+      Value<String> readStatus,
       Value<bool> isArchived,
+      Value<int?> rating,
+      Value<String?> review,
+      Value<String?> tags,
+      Value<String?> category,
+      Value<int?> pinnedAt,
       Value<int?> deletedAt,
       Value<String?> metaJson,
       Value<String> hlc,
@@ -5551,8 +5860,38 @@ class $$BooksTableFilterComposer extends Composer<_$AppDatabase, $BooksTable> {
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get readStatus => $composableBuilder(
+    column: $table.readStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<bool> get isArchived => $composableBuilder(
     column: $table.isArchived,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get rating => $composableBuilder(
+    column: $table.rating,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get review => $composableBuilder(
+    column: $table.review,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get tags => $composableBuilder(
+    column: $table.tags,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get pinnedAt => $composableBuilder(
+    column: $table.pinnedAt,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -5776,8 +6115,38 @@ class $$BooksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get readStatus => $composableBuilder(
+    column: $table.readStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<bool> get isArchived => $composableBuilder(
     column: $table.isArchived,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get rating => $composableBuilder(
+    column: $table.rating,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get review => $composableBuilder(
+    column: $table.review,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get tags => $composableBuilder(
+    column: $table.tags,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get pinnedAt => $composableBuilder(
+    column: $table.pinnedAt,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -5877,10 +6246,30 @@ class $$BooksTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get readStatus => $composableBuilder(
+    column: $table.readStatus,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<bool> get isArchived => $composableBuilder(
     column: $table.isArchived,
     builder: (column) => column,
   );
+
+  GeneratedColumn<int> get rating =>
+      $composableBuilder(column: $table.rating, builder: (column) => column);
+
+  GeneratedColumn<String> get review =>
+      $composableBuilder(column: $table.review, builder: (column) => column);
+
+  GeneratedColumn<String> get tags =>
+      $composableBuilder(column: $table.tags, builder: (column) => column);
+
+  GeneratedColumn<String> get category =>
+      $composableBuilder(column: $table.category, builder: (column) => column);
+
+  GeneratedColumn<int> get pinnedAt =>
+      $composableBuilder(column: $table.pinnedAt, builder: (column) => column);
 
   GeneratedColumn<int> get deletedAt =>
       $composableBuilder(column: $table.deletedAt, builder: (column) => column);
@@ -6046,7 +6435,13 @@ class $$BooksTableTableManager
                 Value<int> updatedAt = const Value.absent(),
                 Value<int?> lastOpenedAt = const Value.absent(),
                 Value<bool> isFinished = const Value.absent(),
+                Value<String> readStatus = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
+                Value<int?> rating = const Value.absent(),
+                Value<String?> review = const Value.absent(),
+                Value<String?> tags = const Value.absent(),
+                Value<String?> category = const Value.absent(),
+                Value<int?> pinnedAt = const Value.absent(),
                 Value<int?> deletedAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
                 Value<String> hlc = const Value.absent(),
@@ -6071,7 +6466,13 @@ class $$BooksTableTableManager
                 updatedAt: updatedAt,
                 lastOpenedAt: lastOpenedAt,
                 isFinished: isFinished,
+                readStatus: readStatus,
                 isArchived: isArchived,
+                rating: rating,
+                review: review,
+                tags: tags,
+                category: category,
+                pinnedAt: pinnedAt,
                 deletedAt: deletedAt,
                 metaJson: metaJson,
                 hlc: hlc,
@@ -6098,7 +6499,13 @@ class $$BooksTableTableManager
                 required int updatedAt,
                 Value<int?> lastOpenedAt = const Value.absent(),
                 Value<bool> isFinished = const Value.absent(),
+                Value<String> readStatus = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
+                Value<int?> rating = const Value.absent(),
+                Value<String?> review = const Value.absent(),
+                Value<String?> tags = const Value.absent(),
+                Value<String?> category = const Value.absent(),
+                Value<int?> pinnedAt = const Value.absent(),
                 Value<int?> deletedAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
                 required String hlc,
@@ -6123,7 +6530,13 @@ class $$BooksTableTableManager
                 updatedAt: updatedAt,
                 lastOpenedAt: lastOpenedAt,
                 isFinished: isFinished,
+                readStatus: readStatus,
                 isArchived: isArchived,
+                rating: rating,
+                review: review,
+                tags: tags,
+                category: category,
+                pinnedAt: pinnedAt,
                 deletedAt: deletedAt,
                 metaJson: metaJson,
                 hlc: hlc,

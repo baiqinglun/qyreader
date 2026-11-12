@@ -13,6 +13,7 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- 同 values/styles.xml：夜间模式用夜间阅读底色，避免回前台闪白 -->
+        <item name="android:windowBackground">@color/normal_window_background_night</item>
     </style>
 </resources>

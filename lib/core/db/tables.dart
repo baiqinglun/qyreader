@@ -66,8 +66,26 @@ class Books extends Table {
   /// 是否标记读完。
   BoolColumn get isFinished => boolean().withDefault(const Constant(false))();
 
+  /// 阅读状态：unread|reading|finished|dropped（v5）。
+  TextColumn get readStatus => text().withDefault(const Constant('unread'))();
+
   /// 是否归档。
   BoolColumn get isArchived => boolean().withDefault(const Constant(false))();
+
+  /// 个人评分 1..5；NULL = 未评分。
+  IntColumn? get rating => integer().nullable()();
+
+  /// 个人书评。
+  TextColumn? get review => text().nullable()();
+
+  /// 个人标签（JSON 字符串数组）。
+  TextColumn? get tags => text().nullable()();
+
+  /// 个人分类（单值，书架按它筛选）；NULL = 未分类。
+  TextColumn? get category => text().nullable()();
+
+  /// 书架置顶时间（epoch ms）；NULL = 未置顶。
+  IntColumn? get pinnedAt => integer().nullable()();
 
   /// 墓碑：删除时间（epoch ms），参与同步合并。
   IntColumn? get deletedAt => integer().nullable()();

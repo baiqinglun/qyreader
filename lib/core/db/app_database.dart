@@ -36,7 +36,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -51,6 +51,21 @@ class AppDatabase extends _$AppDatabase {
             // book_fts 是派生数据（可由书籍文件重建），直接重建安全。
             await customStatement('DROP TABLE IF EXISTS book_fts');
             await _createBookFts();
+          }
+          if (from < 3) {
+            // v3：书籍个人化信息（评分/书评/标签/书架置顶）。
+            await m.addColumn(books, books.rating);
+            await m.addColumn(books, books.review);
+            await m.addColumn(books, books.tags);
+            await m.addColumn(books, books.pinnedAt);
+          }
+          if (from < 4) {
+            // v4：书籍分类（单值，书架按分类筛选）。
+            await m.addColumn(books, books.category);
+          }
+          if (from < 5) {
+            // v5：阅读状态（未读 / 在读 / 已读 / 弃读）。
+            await m.addColumn(books, books.readStatus);
           }
         },
       );

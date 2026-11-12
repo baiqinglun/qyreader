@@ -1,4 +1,7 @@
-/// 同步后端设置：本地桶 / S3（端点、桶、前缀、区域、密钥、连接测试）。
+/// 同步后端设置：本地桶 / 阿里云 OSS（端点、桶、前缀、地域、密钥、连接测试）。
+///
+/// 只支持阿里云 OSS：走 S3 兼容接口，必须用虚拟主机风格（桶名拼在域名前），
+/// 所以界面上没有服务商选择、也没有「路径风格」开关。
 library;
 
 import 'package:flutter/material.dart';
@@ -8,6 +11,7 @@ import '../../../app/providers.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../../../data/sync/s3_object_store.dart';
 import '../../../data/sync/sync_backend_store.dart';
+
 
 /// 打开同步后端设置页。
 Future<void> showSyncBackendSettings(BuildContext context) {
@@ -37,7 +41,7 @@ class _SyncBackendSettingsPageState
   final _accessKey = TextEditingController();
   final _secretKey = TextEditingController();
 
-  SyncBackendType _type = SyncBackendType.local;
+  SyncBackendType _type = SyncBackendType.s3;
   bool _useSSL = true;
   bool _loading = true;
   bool _testing = false;
@@ -76,6 +80,8 @@ class _SyncBackendSettingsPageState
         region: _region.text.trim().isEmpty ? null : _region.text.trim(),
         useSSL: _useSSL,
         port: int.tryParse(_port.text.trim()),
+        // 只有阿里云 OSS：必须虚拟主机风格（桶名.端点）
+        pathStyle: false,
       );
 
   SyncCredentials _credsOf() => SyncCredentials(
@@ -111,6 +117,7 @@ class _SyncBackendSettingsPageState
       region: config.region,
       useSSL: config.useSSL,
       port: config.port,
+      pathStyle: config.pathStyle,
     );
     final error = await store.testConnection();
     if (!mounted) return;
@@ -163,39 +170,20 @@ class _SyncBackendSettingsPageState
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                SegmentedButton<SyncBackendType>(
-                  segments: const [
-                    ButtonSegment(
-                      value: SyncBackendType.local,
-                      label: Text('本地桶'),
-                      icon: Icon(Icons.folder_outlined),
-                    ),
-                    ButtonSegment(
-                      value: SyncBackendType.s3,
-                      label: Text('S3'),
-                      icon: Icon(Icons.cloud_outlined),
-                    ),
-                  ],
-                  selected: {_type},
-                  onSelectionChanged: (v) =>
-                      setState(() => _type = v.first),
-                ),
                 const SizedBox(height: 12),
                 Text(
-                  _type == SyncBackendType.local
-                      ? '书籍与标注存本机目录（离线可用，多设备需共享同一目录）'
-                      : '对象存 S3 兼容存储（AWS S3 / R2 / B2 / MinIO）',
+                  '对象存阿里云 OSS（S3 兼容接口，走「桶名.端点」）',
                   style: TextStyle(
                     color: fg.withValues(alpha: 0.6),
                     fontSize: 12,
                   ),
                 ),
-                if (_type == SyncBackendType.s3) ...[
+                ...[
                   const SizedBox(height: 16),
                   _Field(
                     controller: _endPoint,
-                    label: '端点（域名或 IP，不含协议）',
-                    hint: 's3.amazonaws.com / minio.example.com',
+                    label: 'OSS 端点（地域域名，不含协议）',
+                    hint: 'oss-cn-hangzhou.aliyuncs.com',
                     reading: reading,
                   ),
                   _Field(
@@ -212,27 +200,13 @@ class _SyncBackendSettingsPageState
                   ),
                   _Field(
                     controller: _region,
-                    label: '区域（AWS 必填）',
-                    hint: 'ap-east-1',
+                    label: '地域（签名用，如 oss-cn-hangzhou）',
+                    hint: 'oss-cn-hangzhou',
                     reading: reading,
-                  ),
-                  _Field(
-                    controller: _port,
-                    label: '端口（可空）',
-                    hint: '9000',
-                    keyboardType: TextInputType.number,
-                    reading: reading,
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    activeTrackColor: reading.accent,
-                    title: Text('使用 HTTPS', style: TextStyle(color: fg)),
-                    value: _useSSL,
-                    onChanged: (v) => setState(() => _useSSL = v),
                   ),
                   _Field(
                     controller: _accessKey,
-                    label: 'AccessKey',
+                    label: 'AccessKey ID（RAM 子账号）',
                     reading: reading,
                     secret: false,
                   ),
@@ -270,8 +244,9 @@ class _SyncBackendSettingsPageState
                 ],
                 const SizedBox(height: 20),
                 Text(
-                  '说明：更换后端后，「立即同步」会把本机未上传的操作推到新后端；'
-                  '同一空间的多台设备需配置相同的桶与前缀。',
+                  '说明：阿里云 OSS 的桶建议设为私有，用 RAM 子账号只授权该桶的'
+                  ' List / Get / Put / Delete；端点与 bucket 必须同地域。'
+                  '同一空间的多台设备填相同的桶与前缀。',
                   style: TextStyle(
                     color: fg.withValues(alpha: 0.5),
                     fontSize: 11,
@@ -290,7 +265,6 @@ class _Field extends StatelessWidget {
     required this.label,
     required this.reading,
     this.hint,
-    this.keyboardType,
     this.secret = false,
   });
 
@@ -298,7 +272,6 @@ class _Field extends StatelessWidget {
   final String label;
   final String? hint;
   final ReadingTheme reading;
-  final TextInputType? keyboardType;
   final bool secret;
 
   @override
@@ -308,7 +281,6 @@ class _Field extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 10),
       child: TextField(
         controller: controller,
-        keyboardType: keyboardType,
         obscureText: secret,
         style: TextStyle(color: fg, fontSize: 14),
         decoration: InputDecoration(

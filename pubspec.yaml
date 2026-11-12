@@ -2,7 +2,7 @@ name: qy_reader
 description: "QYReader：本地优先的跨平台阅读 App（书架 / 划线 / TTS / S3 同步）。"
 publish_to: 'none'
 
-version: 1.0.0+6
+version: 2.40.0+130
 
 environment:
   sdk: ^3.8.0
@@ -33,11 +33,15 @@ dependencies:
   webview_flutter_android: ^4.10.1
   flutter_tts: ^4.2.5
   fl_chart: 0.69.2
+  image: ^4.5.4
   minio: ^3.5.8
   flutter_secure_storage: ^10.3.4
+  audioplayers: ^6.6.0
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   flutter_lints: ^5.0.0
@@ -51,3 +55,4 @@ flutter:
 
   assets:
     - assets/reader/
+    - assets/sounds/

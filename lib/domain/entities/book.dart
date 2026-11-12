@@ -27,6 +27,29 @@ enum BookFormat {
 BookFormat bookFormatFromName(String? name) => BookFormat.values
     .firstWhere((f) => f.name == name, orElse: () => BookFormat.epub);
 
+/// 阅读状态：未读 / 在读 / 已读 / 弃读。
+enum BookReadStatus {
+  /// 未读。
+  unread('未读'),
+
+  /// 在读。
+  reading('在读'),
+
+  /// 已读。
+  finished('已读'),
+
+  /// 弃读。
+  dropped('弃读');
+
+  const BookReadStatus(this.label);
+
+  /// 中文展示名。
+  final String label;
+}
+
+/// 从名称解析阅读状态；未知值回退未读。
+BookReadStatus bookReadStatusFromName(String? name) => BookReadStatus.values
+    .firstWhere((s) => s.name == name, orElse: () => BookReadStatus.unread);
 /// 书籍。
 @freezed
 abstract class Book with _$Book {
@@ -82,11 +105,29 @@ abstract class Book with _$Book {
     /// 最近打开时间（epoch ms）。
     int? lastOpenedAt,
 
-    /// 是否读完。
+    /// 是否读完（旧字段，保留兼容）。
     @Default(false) bool isFinished,
+
+    /// 阅读状态（未读 / 在读 / 已读 / 弃读）。
+    @Default(BookReadStatus.unread) BookReadStatus readStatus,
 
     /// 是否归档。
     @Default(false) bool isArchived,
+
+    /// 个人评分 1..5；null = 未评分。
+    int? rating,
+
+    /// 个人书评。
+    String? review,
+
+    /// 个人标签。
+    @Default(<String>[]) List<String> tags,
+
+    /// 个人分类（单值；null = 未分类）。
+    String? category,
+
+    /// 书架置顶时间（epoch ms）；null = 未置顶。
+    int? pinnedAt,
 
     /// 墓碑（epoch ms），参与 LWW 合并。
     int? deletedAt,
@@ -122,7 +163,14 @@ Map<String, dynamic> bookToJson(Book b) => <String, dynamic>{
       'updatedAt': b.updatedAt,
       if (b.lastOpenedAt != null) 'lastOpenedAt': b.lastOpenedAt,
       if (b.isFinished) 'isFinished': b.isFinished,
+      if (b.readStatus != BookReadStatus.unread)
+        'readStatus': b.readStatus.name,
       if (b.isArchived) 'isArchived': b.isArchived,
+      if (b.rating != null) 'rating': b.rating,
+      if (b.review != null && b.review!.isNotEmpty) 'review': b.review,
+      if (b.tags.isNotEmpty) 'tags': b.tags,
+      if (b.category != null && b.category!.isNotEmpty) 'category': b.category,
+      if (b.pinnedAt != null) 'pinnedAt': b.pinnedAt,
       if (b.deletedAt != null) 'deletedAt': b.deletedAt,
       if (b.metaJson != null) 'metaJson': b.metaJson,
       'hlc': b.hlc,
@@ -149,12 +197,39 @@ Book bookFromJson(Map<String, dynamic> json) => Book(
       updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
       lastOpenedAt: (json['lastOpenedAt'] as num?)?.toInt(),
       isFinished: json['isFinished'] as bool? ?? false,
+      readStatus: bookReadStatusFromName(json['readStatus'] as String?),
       isArchived: json['isArchived'] as bool? ?? false,
+      rating: (json['rating'] as num?)?.toInt(),
+      review: json['review'] as String?,
+      tags: _parseTags(json['tags']),
+      category: json['category'] as String?,
+      pinnedAt: (json['pinnedAt'] as num?)?.toInt(),
       deletedAt: (json['deletedAt'] as num?)?.toInt(),
       metaJson: json['metaJson'] as String?,
       hlc: json['hlc'] as String? ?? '',
       deviceId: json['deviceId'] as String? ?? '',
     );
+
+/// 标签解析：JSON 数组；兼容逗号分隔字符串。
+List<String> _parseTags(dynamic raw) {
+  if (raw is List) {
+    return raw
+        .whereType<String>()
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+  }
+  if (raw is String && raw.isNotEmpty) {
+    return raw
+        .split(RegExp(r'[,，、;；\s]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+  }
+  return const <String>[];
+}
 
 /// 书架条目：书籍 + 展示用进度百分比。
 @freezed

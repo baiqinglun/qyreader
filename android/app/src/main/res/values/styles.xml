@@ -13,6 +13,8 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- 退出后台再回前台时，Flutter 表面会销毁重建，重建期透出的是这
+             个窗口背景；用应用纸色而不是默认白色，避免回前台闪白屏 -->
+        <item name="android:windowBackground">@color/normal_window_background</item>
     </style>
 </resources>

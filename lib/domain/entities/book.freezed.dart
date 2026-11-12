@@ -31,9 +31,15 @@ mixin _$Book {
  int get wordCount;/// 入库时间（epoch ms）。
  int get addedAt;/// 元数据更新时间（epoch ms）。
  int get updatedAt;/// 最近打开时间（epoch ms）。
- int? get lastOpenedAt;/// 是否读完。
- bool get isFinished;/// 是否归档。
- bool get isArchived;/// 墓碑（epoch ms），参与 LWW 合并。
+ int? get lastOpenedAt;/// 是否读完（旧字段，保留兼容）。
+ bool get isFinished;/// 阅读状态（未读 / 在读 / 已读 / 弃读）。
+ BookReadStatus get readStatus;/// 是否归档。
+ bool get isArchived;/// 个人评分 1..5；null = 未评分。
+ int? get rating;/// 个人书评。
+ String? get review;/// 个人标签。
+ List<String> get tags;/// 个人分类（单值；null = 未分类）。
+ String? get category;/// 书架置顶时间（epoch ms）；null = 未置顶。
+ int? get pinnedAt;/// 墓碑（epoch ms），参与 LWW 合并。
  int? get deletedAt;/// 解析器原始元数据（JSON 字符串）。
  String? get metaJson;/// 最后写入的 HLC。
  String get hlc;/// 写入设备标识。
@@ -48,16 +54,16 @@ $BookCopyWith<Book> get copyWith => _$BookCopyWithImpl<Book>(this as Book, _$ide
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is Book&&(identical(other.id, id) || other.id == id)&&(identical(other.title, title) || other.title == title)&&(identical(other.author, author) || other.author == author)&&(identical(other.series, series) || other.series == series)&&(identical(other.seriesIndex, seriesIndex) || other.seriesIndex == seriesIndex)&&(identical(other.language, language) || other.language == language)&&(identical(other.description, description) || other.description == description)&&(identical(other.format, format) || other.format == format)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.fileSha256, fileSha256) || other.fileSha256 == fileSha256)&&(identical(other.fileSize, fileSize) || other.fileSize == fileSize)&&(identical(other.coverPath, coverPath) || other.coverPath == coverPath)&&(identical(other.chapterCount, chapterCount) || other.chapterCount == chapterCount)&&(identical(other.wordCount, wordCount) || other.wordCount == wordCount)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt)&&(identical(other.lastOpenedAt, lastOpenedAt) || other.lastOpenedAt == lastOpenedAt)&&(identical(other.isFinished, isFinished) || other.isFinished == isFinished)&&(identical(other.isArchived, isArchived) || other.isArchived == isArchived)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt)&&(identical(other.metaJson, metaJson) || other.metaJson == metaJson)&&(identical(other.hlc, hlc) || other.hlc == hlc)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is Book&&(identical(other.id, id) || other.id == id)&&(identical(other.title, title) || other.title == title)&&(identical(other.author, author) || other.author == author)&&(identical(other.series, series) || other.series == series)&&(identical(other.seriesIndex, seriesIndex) || other.seriesIndex == seriesIndex)&&(identical(other.language, language) || other.language == language)&&(identical(other.description, description) || other.description == description)&&(identical(other.format, format) || other.format == format)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.fileSha256, fileSha256) || other.fileSha256 == fileSha256)&&(identical(other.fileSize, fileSize) || other.fileSize == fileSize)&&(identical(other.coverPath, coverPath) || other.coverPath == coverPath)&&(identical(other.chapterCount, chapterCount) || other.chapterCount == chapterCount)&&(identical(other.wordCount, wordCount) || other.wordCount == wordCount)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt)&&(identical(other.lastOpenedAt, lastOpenedAt) || other.lastOpenedAt == lastOpenedAt)&&(identical(other.isFinished, isFinished) || other.isFinished == isFinished)&&(identical(other.readStatus, readStatus) || other.readStatus == readStatus)&&(identical(other.isArchived, isArchived) || other.isArchived == isArchived)&&(identical(other.rating, rating) || other.rating == rating)&&(identical(other.review, review) || other.review == review)&&const DeepCollectionEquality().equals(other.tags, tags)&&(identical(other.category, category) || other.category == category)&&(identical(other.pinnedAt, pinnedAt) || other.pinnedAt == pinnedAt)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt)&&(identical(other.metaJson, metaJson) || other.metaJson == metaJson)&&(identical(other.hlc, hlc) || other.hlc == hlc)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId));
 }
 
 
 @override
-int get hashCode => Object.hashAll([runtimeType,id,title,author,series,seriesIndex,language,description,format,filePath,fileSha256,fileSize,coverPath,chapterCount,wordCount,addedAt,updatedAt,lastOpenedAt,isFinished,isArchived,deletedAt,metaJson,hlc,deviceId]);
+int get hashCode => Object.hashAll([runtimeType,id,title,author,series,seriesIndex,language,description,format,filePath,fileSha256,fileSize,coverPath,chapterCount,wordCount,addedAt,updatedAt,lastOpenedAt,isFinished,readStatus,isArchived,rating,review,const DeepCollectionEquality().hash(tags),category,pinnedAt,deletedAt,metaJson,hlc,deviceId]);
 
 @override
 String toString() {
-  return 'Book(id: $id, title: $title, author: $author, series: $series, seriesIndex: $seriesIndex, language: $language, description: $description, format: $format, filePath: $filePath, fileSha256: $fileSha256, fileSize: $fileSize, coverPath: $coverPath, chapterCount: $chapterCount, wordCount: $wordCount, addedAt: $addedAt, updatedAt: $updatedAt, lastOpenedAt: $lastOpenedAt, isFinished: $isFinished, isArchived: $isArchived, deletedAt: $deletedAt, metaJson: $metaJson, hlc: $hlc, deviceId: $deviceId)';
+  return 'Book(id: $id, title: $title, author: $author, series: $series, seriesIndex: $seriesIndex, language: $language, description: $description, format: $format, filePath: $filePath, fileSha256: $fileSha256, fileSize: $fileSize, coverPath: $coverPath, chapterCount: $chapterCount, wordCount: $wordCount, addedAt: $addedAt, updatedAt: $updatedAt, lastOpenedAt: $lastOpenedAt, isFinished: $isFinished, readStatus: $readStatus, isArchived: $isArchived, rating: $rating, review: $review, tags: $tags, category: $category, pinnedAt: $pinnedAt, deletedAt: $deletedAt, metaJson: $metaJson, hlc: $hlc, deviceId: $deviceId)';
 }
 
 
@@ -68,7 +74,7 @@ abstract mixin class $BookCopyWith<$Res>  {
   factory $BookCopyWith(Book value, $Res Function(Book) _then) = _$BookCopyWithImpl;
 @useResult
 $Res call({
- String id, String title, String? author, String? series, double seriesIndex, String? language, String? description, BookFormat format, String filePath, String fileSha256, int fileSize, String? coverPath, int chapterCount, int wordCount, int addedAt, int updatedAt, int? lastOpenedAt, bool isFinished, bool isArchived, int? deletedAt, String? metaJson, String hlc, String deviceId
+ String id, String title, String? author, String? series, double seriesIndex, String? language, String? description, BookFormat format, String filePath, String fileSha256, int fileSize, String? coverPath, int chapterCount, int wordCount, int addedAt, int updatedAt, int? lastOpenedAt, bool isFinished, BookReadStatus readStatus, bool isArchived, int? rating, String? review, List<String> tags, String? category, int? pinnedAt, int? deletedAt, String? metaJson, String hlc, String deviceId
 });
 
 
@@ -85,7 +91,7 @@ class _$BookCopyWithImpl<$Res>
 
 /// Create a copy of Book
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? title = null,Object? author = freezed,Object? series = freezed,Object? seriesIndex = null,Object? language = freezed,Object? description = freezed,Object? format = null,Object? filePath = null,Object? fileSha256 = null,Object? fileSize = null,Object? coverPath = freezed,Object? chapterCount = null,Object? wordCount = null,Object? addedAt = null,Object? updatedAt = null,Object? lastOpenedAt = freezed,Object? isFinished = null,Object? isArchived = null,Object? deletedAt = freezed,Object? metaJson = freezed,Object? hlc = null,Object? deviceId = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? title = null,Object? author = freezed,Object? series = freezed,Object? seriesIndex = null,Object? language = freezed,Object? description = freezed,Object? format = null,Object? filePath = null,Object? fileSha256 = null,Object? fileSize = null,Object? coverPath = freezed,Object? chapterCount = null,Object? wordCount = null,Object? addedAt = null,Object? updatedAt = null,Object? lastOpenedAt = freezed,Object? isFinished = null,Object? readStatus = null,Object? isArchived = null,Object? rating = freezed,Object? review = freezed,Object? tags = null,Object? category = freezed,Object? pinnedAt = freezed,Object? deletedAt = freezed,Object? metaJson = freezed,Object? hlc = null,Object? deviceId = null,}) {
   return _then(_self.copyWith(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
@@ -105,8 +111,14 @@ as int,addedAt: null == addedAt ? _self.addedAt : addedAt // ignore: cast_nullab
 as int,updatedAt: null == updatedAt ? _self.updatedAt : updatedAt // ignore: cast_nullable_to_non_nullable
 as int,lastOpenedAt: freezed == lastOpenedAt ? _self.lastOpenedAt : lastOpenedAt // ignore: cast_nullable_to_non_nullable
 as int?,isFinished: null == isFinished ? _self.isFinished : isFinished // ignore: cast_nullable_to_non_nullable
-as bool,isArchived: null == isArchived ? _self.isArchived : isArchived // ignore: cast_nullable_to_non_nullable
-as bool,deletedAt: freezed == deletedAt ? _self.deletedAt : deletedAt // ignore: cast_nullable_to_non_nullable
+as bool,readStatus: null == readStatus ? _self.readStatus : readStatus // ignore: cast_nullable_to_non_nullable
+as BookReadStatus,isArchived: null == isArchived ? _self.isArchived : isArchived // ignore: cast_nullable_to_non_nullable
+as bool,rating: freezed == rating ? _self.rating : rating // ignore: cast_nullable_to_non_nullable
+as int?,review: freezed == review ? _self.review : review // ignore: cast_nullable_to_non_nullable
+as String?,tags: null == tags ? _self.tags : tags // ignore: cast_nullable_to_non_nullable
+as List<String>,category: freezed == category ? _self.category : category // ignore: cast_nullable_to_non_nullable
+as String?,pinnedAt: freezed == pinnedAt ? _self.pinnedAt : pinnedAt // ignore: cast_nullable_to_non_nullable
+as int?,deletedAt: freezed == deletedAt ? _self.deletedAt : deletedAt // ignore: cast_nullable_to_non_nullable
 as int?,metaJson: freezed == metaJson ? _self.metaJson : metaJson // ignore: cast_nullable_to_non_nullable
 as String?,hlc: null == hlc ? _self.hlc : hlc // ignore: cast_nullable_to_non_nullable
 as String,deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
@@ -195,10 +207,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  bool isArchived,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  BookReadStatus readStatus,  bool isArchived,  int? rating,  String? review,  List<String> tags,  String? category,  int? pinnedAt,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _Book() when $default != null:
-return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.isArchived,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
+return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.readStatus,_that.isArchived,_that.rating,_that.review,_that.tags,_that.category,_that.pinnedAt,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
   return orElse();
 
 }
@@ -216,10 +228,10 @@ return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  bool isArchived,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  BookReadStatus readStatus,  bool isArchived,  int? rating,  String? review,  List<String> tags,  String? category,  int? pinnedAt,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)  $default,) {final _that = this;
 switch (_that) {
 case _Book():
-return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.isArchived,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
+return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.readStatus,_that.isArchived,_that.rating,_that.review,_that.tags,_that.category,_that.pinnedAt,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -236,10 +248,10 @@ return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  bool isArchived,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  String title,  String? author,  String? series,  double seriesIndex,  String? language,  String? description,  BookFormat format,  String filePath,  String fileSha256,  int fileSize,  String? coverPath,  int chapterCount,  int wordCount,  int addedAt,  int updatedAt,  int? lastOpenedAt,  bool isFinished,  BookReadStatus readStatus,  bool isArchived,  int? rating,  String? review,  List<String> tags,  String? category,  int? pinnedAt,  int? deletedAt,  String? metaJson,  String hlc,  String deviceId)?  $default,) {final _that = this;
 switch (_that) {
 case _Book() when $default != null:
-return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.isArchived,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
+return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex,_that.language,_that.description,_that.format,_that.filePath,_that.fileSha256,_that.fileSize,_that.coverPath,_that.chapterCount,_that.wordCount,_that.addedAt,_that.updatedAt,_that.lastOpenedAt,_that.isFinished,_that.readStatus,_that.isArchived,_that.rating,_that.review,_that.tags,_that.category,_that.pinnedAt,_that.deletedAt,_that.metaJson,_that.hlc,_that.deviceId);case _:
   return null;
 
 }
@@ -251,7 +263,7 @@ return $default(_that.id,_that.title,_that.author,_that.series,_that.seriesIndex
 
 
 class _Book implements Book {
-  const _Book({required this.id, required this.title, this.author, this.series, this.seriesIndex = 0, this.language, this.description, required this.format, required this.filePath, required this.fileSha256, required this.fileSize, this.coverPath, this.chapterCount = 0, this.wordCount = 0, required this.addedAt, required this.updatedAt, this.lastOpenedAt, this.isFinished = false, this.isArchived = false, this.deletedAt, this.metaJson, required this.hlc, required this.deviceId});
+  const _Book({required this.id, required this.title, this.author, this.series, this.seriesIndex = 0, this.language, this.description, required this.format, required this.filePath, required this.fileSha256, required this.fileSize, this.coverPath, this.chapterCount = 0, this.wordCount = 0, required this.addedAt, required this.updatedAt, this.lastOpenedAt, this.isFinished = false, this.readStatus = BookReadStatus.unread, this.isArchived = false, this.rating, this.review, final  List<String> tags = const <String>[], this.category, this.pinnedAt, this.deletedAt, this.metaJson, required this.hlc, required this.deviceId}): _tags = tags;
   
 
 /// uuid v4。
@@ -288,10 +300,29 @@ class _Book implements Book {
 @override final  int updatedAt;
 /// 最近打开时间（epoch ms）。
 @override final  int? lastOpenedAt;
-/// 是否读完。
+/// 是否读完（旧字段，保留兼容）。
 @override@JsonKey() final  bool isFinished;
+/// 阅读状态（未读 / 在读 / 已读 / 弃读）。
+@override@JsonKey() final  BookReadStatus readStatus;
 /// 是否归档。
 @override@JsonKey() final  bool isArchived;
+/// 个人评分 1..5；null = 未评分。
+@override final  int? rating;
+/// 个人书评。
+@override final  String? review;
+/// 个人标签。
+ final  List<String> _tags;
+/// 个人标签。
+@override@JsonKey() List<String> get tags {
+  if (_tags is EqualUnmodifiableListView) return _tags;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_tags);
+}
+
+/// 个人分类（单值；null = 未分类）。
+@override final  String? category;
+/// 书架置顶时间（epoch ms）；null = 未置顶。
+@override final  int? pinnedAt;
 /// 墓碑（epoch ms），参与 LWW 合并。
 @override final  int? deletedAt;
 /// 解析器原始元数据（JSON 字符串）。
@@ -311,16 +342,16 @@ _$BookCopyWith<_Book> get copyWith => __$BookCopyWithImpl<_Book>(this, _$identit
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _Book&&(identical(other.id, id) || other.id == id)&&(identical(other.title, title) || other.title == title)&&(identical(other.author, author) || other.author == author)&&(identical(other.series, series) || other.series == series)&&(identical(other.seriesIndex, seriesIndex) || other.seriesIndex == seriesIndex)&&(identical(other.language, language) || other.language == language)&&(identical(other.description, description) || other.description == description)&&(identical(other.format, format) || other.format == format)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.fileSha256, fileSha256) || other.fileSha256 == fileSha256)&&(identical(other.fileSize, fileSize) || other.fileSize == fileSize)&&(identical(other.coverPath, coverPath) || other.coverPath == coverPath)&&(identical(other.chapterCount, chapterCount) || other.chapterCount == chapterCount)&&(identical(other.wordCount, wordCount) || other.wordCount == wordCount)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt)&&(identical(other.lastOpenedAt, lastOpenedAt) || other.lastOpenedAt == lastOpenedAt)&&(identical(other.isFinished, isFinished) || other.isFinished == isFinished)&&(identical(other.isArchived, isArchived) || other.isArchived == isArchived)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt)&&(identical(other.metaJson, metaJson) || other.metaJson == metaJson)&&(identical(other.hlc, hlc) || other.hlc == hlc)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _Book&&(identical(other.id, id) || other.id == id)&&(identical(other.title, title) || other.title == title)&&(identical(other.author, author) || other.author == author)&&(identical(other.series, series) || other.series == series)&&(identical(other.seriesIndex, seriesIndex) || other.seriesIndex == seriesIndex)&&(identical(other.language, language) || other.language == language)&&(identical(other.description, description) || other.description == description)&&(identical(other.format, format) || other.format == format)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.fileSha256, fileSha256) || other.fileSha256 == fileSha256)&&(identical(other.fileSize, fileSize) || other.fileSize == fileSize)&&(identical(other.coverPath, coverPath) || other.coverPath == coverPath)&&(identical(other.chapterCount, chapterCount) || other.chapterCount == chapterCount)&&(identical(other.wordCount, wordCount) || other.wordCount == wordCount)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt)&&(identical(other.lastOpenedAt, lastOpenedAt) || other.lastOpenedAt == lastOpenedAt)&&(identical(other.isFinished, isFinished) || other.isFinished == isFinished)&&(identical(other.readStatus, readStatus) || other.readStatus == readStatus)&&(identical(other.isArchived, isArchived) || other.isArchived == isArchived)&&(identical(other.rating, rating) || other.rating == rating)&&(identical(other.review, review) || other.review == review)&&const DeepCollectionEquality().equals(other._tags, _tags)&&(identical(other.category, category) || other.category == category)&&(identical(other.pinnedAt, pinnedAt) || other.pinnedAt == pinnedAt)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt)&&(identical(other.metaJson, metaJson) || other.metaJson == metaJson)&&(identical(other.hlc, hlc) || other.hlc == hlc)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId));
 }
 
 
 @override
-int get hashCode => Object.hashAll([runtimeType,id,title,author,series,seriesIndex,language,description,format,filePath,fileSha256,fileSize,coverPath,chapterCount,wordCount,addedAt,updatedAt,lastOpenedAt,isFinished,isArchived,deletedAt,metaJson,hlc,deviceId]);
+int get hashCode => Object.hashAll([runtimeType,id,title,author,series,seriesIndex,language,description,format,filePath,fileSha256,fileSize,coverPath,chapterCount,wordCount,addedAt,updatedAt,lastOpenedAt,isFinished,readStatus,isArchived,rating,review,const DeepCollectionEquality().hash(_tags),category,pinnedAt,deletedAt,metaJson,hlc,deviceId]);
 
 @override
 String toString() {
-  return 'Book(id: $id, title: $title, author: $author, series: $series, seriesIndex: $seriesIndex, language: $language, description: $description, format: $format, filePath: $filePath, fileSha256: $fileSha256, fileSize: $fileSize, coverPath: $coverPath, chapterCount: $chapterCount, wordCount: $wordCount, addedAt: $addedAt, updatedAt: $updatedAt, lastOpenedAt: $lastOpenedAt, isFinished: $isFinished, isArchived: $isArchived, deletedAt: $deletedAt, metaJson: $metaJson, hlc: $hlc, deviceId: $deviceId)';
+  return 'Book(id: $id, title: $title, author: $author, series: $series, seriesIndex: $seriesIndex, language: $language, description: $description, format: $format, filePath: $filePath, fileSha256: $fileSha256, fileSize: $fileSize, coverPath: $coverPath, chapterCount: $chapterCount, wordCount: $wordCount, addedAt: $addedAt, updatedAt: $updatedAt, lastOpenedAt: $lastOpenedAt, isFinished: $isFinished, readStatus: $readStatus, isArchived: $isArchived, rating: $rating, review: $review, tags: $tags, category: $category, pinnedAt: $pinnedAt, deletedAt: $deletedAt, metaJson: $metaJson, hlc: $hlc, deviceId: $deviceId)';
 }
 
 
@@ -331,7 +362,7 @@ abstract mixin class _$BookCopyWith<$Res> implements $BookCopyWith<$Res> {
   factory _$BookCopyWith(_Book value, $Res Function(_Book) _then) = __$BookCopyWithImpl;
 @override @useResult
 $Res call({
- String id, String title, String? author, String? series, double seriesIndex, String? language, String? description, BookFormat format, String filePath, String fileSha256, int fileSize, String? coverPath, int chapterCount, int wordCount, int addedAt, int updatedAt, int? lastOpenedAt, bool isFinished, bool isArchived, int? deletedAt, String? metaJson, String hlc, String deviceId
+ String id, String title, String? author, String? series, double seriesIndex, String? language, String? description, BookFormat format, String filePath, String fileSha256, int fileSize, String? coverPath, int chapterCount, int wordCount, int addedAt, int updatedAt, int? lastOpenedAt, bool isFinished, BookReadStatus readStatus, bool isArchived, int? rating, String? review, List<String> tags, String? category, int? pinnedAt, int? deletedAt, String? metaJson, String hlc, String deviceId
 });
 
 
@@ -348,7 +379,7 @@ class __$BookCopyWithImpl<$Res>
 
 /// Create a copy of Book
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? title = null,Object? author = freezed,Object? series = freezed,Object? seriesIndex = null,Object? language = freezed,Object? description = freezed,Object? format = null,Object? filePath = null,Object? fileSha256 = null,Object? fileSize = null,Object? coverPath = freezed,Object? chapterCount = null,Object? wordCount = null,Object? addedAt = null,Object? updatedAt = null,Object? lastOpenedAt = freezed,Object? isFinished = null,Object? isArchived = null,Object? deletedAt = freezed,Object? metaJson = freezed,Object? hlc = null,Object? deviceId = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? title = null,Object? author = freezed,Object? series = freezed,Object? seriesIndex = null,Object? language = freezed,Object? description = freezed,Object? format = null,Object? filePath = null,Object? fileSha256 = null,Object? fileSize = null,Object? coverPath = freezed,Object? chapterCount = null,Object? wordCount = null,Object? addedAt = null,Object? updatedAt = null,Object? lastOpenedAt = freezed,Object? isFinished = null,Object? readStatus = null,Object? isArchived = null,Object? rating = freezed,Object? review = freezed,Object? tags = null,Object? category = freezed,Object? pinnedAt = freezed,Object? deletedAt = freezed,Object? metaJson = freezed,Object? hlc = null,Object? deviceId = null,}) {
   return _then(_Book(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
@@ -368,8 +399,14 @@ as int,addedAt: null == addedAt ? _self.addedAt : addedAt // ignore: cast_nullab
 as int,updatedAt: null == updatedAt ? _self.updatedAt : updatedAt // ignore: cast_nullable_to_non_nullable
 as int,lastOpenedAt: freezed == lastOpenedAt ? _self.lastOpenedAt : lastOpenedAt // ignore: cast_nullable_to_non_nullable
 as int?,isFinished: null == isFinished ? _self.isFinished : isFinished // ignore: cast_nullable_to_non_nullable
-as bool,isArchived: null == isArchived ? _self.isArchived : isArchived // ignore: cast_nullable_to_non_nullable
-as bool,deletedAt: freezed == deletedAt ? _self.deletedAt : deletedAt // ignore: cast_nullable_to_non_nullable
+as bool,readStatus: null == readStatus ? _self.readStatus : readStatus // ignore: cast_nullable_to_non_nullable
+as BookReadStatus,isArchived: null == isArchived ? _self.isArchived : isArchived // ignore: cast_nullable_to_non_nullable
+as bool,rating: freezed == rating ? _self.rating : rating // ignore: cast_nullable_to_non_nullable
+as int?,review: freezed == review ? _self.review : review // ignore: cast_nullable_to_non_nullable
+as String?,tags: null == tags ? _self._tags : tags // ignore: cast_nullable_to_non_nullable
+as List<String>,category: freezed == category ? _self.category : category // ignore: cast_nullable_to_non_nullable
+as String?,pinnedAt: freezed == pinnedAt ? _self.pinnedAt : pinnedAt // ignore: cast_nullable_to_non_nullable
+as int?,deletedAt: freezed == deletedAt ? _self.deletedAt : deletedAt // ignore: cast_nullable_to_non_nullable
 as int?,metaJson: freezed == metaJson ? _self.metaJson : metaJson // ignore: cast_nullable_to_non_nullable
 as String?,hlc: null == hlc ? _self.hlc : hlc // ignore: cast_nullable_to_non_nullable
 as String,deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable

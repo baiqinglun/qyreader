@@ -12,8 +12,17 @@ abstract interface class ObjectStore {
   /// 读取对象；不存在返回 null。
   Future<List<int>?> get(String key);
 
+  /// 对象是否存在（只查元数据，不下载内容）。
+  Future<bool> exists(String key);
+
   /// 列举某前缀下的全部 key（递归）。
   Future<List<String>> list(String prefix);
+
+  /// 列举某前缀下的 key 与对象最后修改时间（递归）。
+  ///
+  /// 用于增量拉取：只下载比上次拉取更新的对象，避免每次同步把
+  /// 全量 ops 重新下载一遍。实现不了时间的后端可以返回 0。
+  Future<List<({String key, int modifiedAtMs})>> listDetailed(String prefix);
 
   /// 删除对象（不存在视为成功）。
   Future<void> delete(String key);

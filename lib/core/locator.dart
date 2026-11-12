@@ -32,8 +32,11 @@ abstract class Locator with _$Locator {
     /// 兜底定位：章索引（0 基）。
     int? chapterIndex,
 
-    /// 兜底定位：章内字符偏移。
+    /// 兜底定位：章内字符偏移（原生渲染模式的页首/标注起点）。
     int? offset,
+
+    /// 章内字符偏移区间终点（标注/划线用；null = 单点位置）。
+    int? offsetEnd,
 
     /// 全书百分比 0..1，仅展示用，不参与定位。
     double? percent,
@@ -42,8 +45,11 @@ abstract class Locator with _$Locator {
     /// 分块量化（同一 location 内多页百分比相同），统计字数用这个。
     double? pos,
 
-    /// PDF 页码（1 基）。
+    /// PDF 页码（1 基）；EPUB 为章内页码（1 基）。
     int? page,
+
+    /// EPUB 本章总页数（判断下一页是否跨章用）。
+    int? pages,
 
     /// PDF 页内横向比例 0..1。
     double? x,
@@ -61,9 +67,11 @@ String locatorToJson(Locator l) =>
       if (l.cfi != null) 'cfi': l.cfi,
       if (l.chapterIndex != null) 'chapterIndex': l.chapterIndex,
       if (l.offset != null) 'offset': l.offset,
+      if (l.offsetEnd != null) 'offsetEnd': l.offsetEnd,
       if (l.percent != null) 'percent': l.percent,
       if (l.pos != null) 'pos': l.pos,
       if (l.page != null) 'page': l.page,
+      if (l.pages != null) 'pages': l.pages,
       if (l.x != null) 'x': l.x,
       if (l.y != null) 'y': l.y,
     });
@@ -79,9 +87,11 @@ Locator? locatorFromJson(String raw) {
       cfi: json['cfi'] as String?,
       chapterIndex: (json['chapterIndex'] as num?)?.toInt(),
       offset: (json['offset'] as num?)?.toInt(),
+      offsetEnd: (json['offsetEnd'] as num?)?.toInt(),
       percent: (json['percent'] as num?)?.toDouble(),
       pos: (json['pos'] as num?)?.toDouble(),
       page: (json['page'] as num?)?.toInt(),
+      pages: (json['pages'] as num?)?.toInt(),
       x: (json['x'] as num?)?.toDouble(),
       y: (json['y'] as num?)?.toDouble(),
     );

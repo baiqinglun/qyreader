@@ -11,11 +11,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// 同步后端类型。
 enum SyncBackendType {
-  /// 本地目录模拟桶（默认，离线可用）。
-  local('本地'),
-
-  /// S3 兼容对象存储。
-  s3('S3');
+  /// 阿里云 OSS（S3 兼容接口，虚拟主机风格）。
+  s3('阿里云 OSS');
 
   const SyncBackendType(this.label);
 
@@ -26,13 +23,14 @@ enum SyncBackendType {
 /// 同步后端配置（不含密钥）。
 class SyncBackendConfig {
   const SyncBackendConfig({
-    this.type = SyncBackendType.local,
+    this.type = SyncBackendType.s3,
     this.endPoint = '',
     this.bucket = '',
     this.prefix = 'qyreader/',
     this.region,
     this.useSSL = true,
     this.port,
+    this.pathStyle = true,
   });
 
   /// 后端类型。
@@ -56,6 +54,10 @@ class SyncBackendConfig {
   /// 端口（null = 按协议默认）。
   final int? port;
 
+  /// 路径风格：true = `端点/桶/对象`（MinIO），
+  /// false = `桶.端点/对象`（阿里云 OSS / R2 这类只支持虚拟主机风格的服务）。
+  final bool pathStyle;
+
   /// 是否已填齐 S3 必填项。
   bool get s3Complete =>
       endPoint.trim().isNotEmpty && bucket.trim().isNotEmpty;
@@ -69,6 +71,7 @@ class SyncBackendConfig {
         if (region != null) 'region': region,
         'useSSL': useSSL,
         if (port != null) 'port': port,
+        'pathStyle': pathStyle,
       };
 
   /// 反序列化。
@@ -76,7 +79,7 @@ class SyncBackendConfig {
       SyncBackendConfig(
         type: SyncBackendType.values.firstWhere(
           (t) => t.name == json['type'],
-          orElse: () => SyncBackendType.local,
+          orElse: () => SyncBackendType.s3,
         ),
         endPoint: json['endPoint'] as String? ?? '',
         bucket: json['bucket'] as String? ?? '',
@@ -84,6 +87,8 @@ class SyncBackendConfig {
         region: json['region'] as String?,
         useSSL: json['useSSL'] as bool? ?? true,
         port: (json['port'] as num?)?.toInt(),
+        // 旧配置没有这个字段：当年只有 MinIO 风格（路径风格）
+        pathStyle: json['pathStyle'] as bool? ?? true,
       );
 }
 

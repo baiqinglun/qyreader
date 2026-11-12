@@ -199,9 +199,9 @@ final syncBackendStoreProvider = Provider<SyncBackendStore>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef SyncBackendStoreRef = ProviderRef<SyncBackendStore>;
-String _$objectStoreHash() => r'78a7190aab6d0c8ba4658ae710c805008a7ead2b';
+String _$objectStoreHash() => r'abeeb2705298fa2d54deaa222dae78d09d898b71';
 
-/// 对象存储：按配置切本地桶 / S3（M6）；S3 配置不完整时回退本地桶。
+/// 对象存储：只用阿里云 OSS（已移除本地桶后端）；没配好时抛错让界面提示。
 ///
 /// Copied from [objectStore].
 @ProviderFor(objectStore)

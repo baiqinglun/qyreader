@@ -27,6 +27,9 @@ abstract interface class AnnotationRepository {
     required String quotedText,
     String? href,
     int? chapterIndex,
+    /// 原生文本模式的章内字符区间（null = 靠 CFI 定位）。
+    int? offset,
+    int? offsetEnd,
   });
 
   /// 修改划线颜色。
@@ -34,6 +37,9 @@ abstract interface class AnnotationRepository {
 
   /// 保存笔记正文（空串即清除）。
   Future<void> setNote(String id, String note);
+
+  /// 改写划线的锚点（原生文本模式把 CFI 迁移成章索引+字符偏移）。
+  Future<void> setAnchor(String id, String locatorJson);
 
   /// 删除标注（软删）。
   Future<void> remove(String id);

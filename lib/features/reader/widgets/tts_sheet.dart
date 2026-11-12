@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app/theme/motion.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../tts/tts_playback.dart';
 import '../tts/tts_settings.dart';
@@ -17,9 +18,10 @@ Future<bool?> showTtsSheet(
   return showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
+    sheetAnimationStyle: kSmoothSheetAnimation,
     backgroundColor: theme.chromeSurface,
     shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
     ),
     builder: (_) => TtsSheet(theme: theme, loadVoices: loadVoices),
   );

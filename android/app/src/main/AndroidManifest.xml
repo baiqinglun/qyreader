@@ -35,6 +35,29 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="reader" android:host="book"/>
             </intent-filter>
+            <!-- 文件管理器「用其他应用打开」：EPUB / TXT / Markdown -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" android:mimeType="application/epub+zip"/>
+                <data android:scheme="content" android:mimeType="text/plain"/>
+                <data android:scheme="content" android:mimeType="text/markdown"/>
+                <data android:scheme="content" android:mimeType="text/x-markdown"/>
+                <data android:scheme="file" android:mimeType="application/epub+zip"/>
+                <data android:scheme="file" android:mimeType="text/plain"/>
+                <data android:scheme="file" android:mimeType="text/markdown"/>
+                <data android:scheme="file" android:mimeType="text/x-markdown"/>
+            </intent-filter>
+            <!-- 分享文件到本应用 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/epub+zip"/>
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="text/markdown"/>
+                <data android:mimeType="text/x-markdown"/>
+            </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

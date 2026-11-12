@@ -61,6 +61,13 @@ class SyncResult {
     this.pulled = 0,
     this.applied = 0,
     this.skipped = 0,
+    this.dbBytes = 0,
+    this.dbError,
+    this.backedUpFiles = 0,
+    this.backedUpBytes = 0,
+    this.backupError,
+    this.fontsSynced = 0,
+    this.backgroundsSynced = 0,
     this.error,
   });
 
@@ -76,9 +83,47 @@ class SyncResult {
   /// 因已存在而跳过的操作数（幂等去重）。
   final int skipped;
 
+  /// 本次上传的 sqlite3 快照字节数（0 = 未备份）。
+  final int dbBytes;
+
+  /// 数据库备份失败原因（null = 成功或未尝试）。
+  final String? dbError;
+
+  /// 本次补齐上传的本地文件数（书源 + 封面）。
+  final int backedUpFiles;
+
+  /// 本次补齐上传的本地文件字节数。
+  final int backedUpBytes;
+
+  /// 本地文件补齐失败原因（null = 成功或未尝试）。
+  final String? backupError;
+
+  /// 本次同步的字体数（上传 + 下载）。
+  final int fontsSynced;
+
+  /// 本次同步的背景图数（上传 + 下载）。
+  final int backgroundsSynced;
+
   /// 失败原因；null = 成功。
   final String? error;
 
   /// 是否成功。
   bool get ok => error == null;
+}
+
+/// 同步进度（给界面画进度条用）。
+class SyncProgress {
+  const SyncProgress(this.label, this.done, this.total);
+
+  /// 当前阶段文案。
+  final String label;
+
+  /// 已完成步数。
+  final int done;
+
+  /// 总步数（0 = 未知）。
+  final int total;
+
+  /// 进度 0..1；总数未知时为 null。
+  double? get fraction => total <= 0 ? null : (done / total).clamp(0.0, 1.0);
 }

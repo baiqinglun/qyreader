@@ -18,12 +18,14 @@ mixin _$Locator {
  int get v;/// EPUB spine href / PDF 为 null / TXT 填 `txt`。
  String? get href;/// EPUB CFI 主定位，如 `epubcfi(/6/14!/4/2/2,/1:0,/1:120)`。
  String? get cfi;/// 兜底定位：章索引（0 基）。
- int? get chapterIndex;/// 兜底定位：章内字符偏移。
- int? get offset;/// 全书百分比 0..1，仅展示用，不参与定位。
+ int? get chapterIndex;/// 兜底定位：章内字符偏移（原生渲染模式的页首/标注起点）。
+ int? get offset;/// 章内字符偏移区间终点（标注/划线用；null = 单点位置）。
+ int? get offsetEnd;/// 全书百分比 0..1，仅展示用，不参与定位。
  double? get percent;/// 细粒度全书位置 0..1（章索引 + 章内页比例）。percent 受 locations
 /// 分块量化（同一 location 内多页百分比相同），统计字数用这个。
- double? get pos;/// PDF 页码（1 基）。
- int? get page;/// PDF 页内横向比例 0..1。
+ double? get pos;/// PDF 页码（1 基）；EPUB 为章内页码（1 基）。
+ int? get page;/// EPUB 本章总页数（判断下一页是否跨章用）。
+ int? get pages;/// PDF 页内横向比例 0..1。
  double? get x;/// PDF 页内纵向比例 0..1。
  double? get y;
 /// Create a copy of Locator
@@ -36,16 +38,16 @@ $LocatorCopyWith<Locator> get copyWith => _$LocatorCopyWithImpl<Locator>(this as
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is Locator&&(identical(other.v, v) || other.v == v)&&(identical(other.href, href) || other.href == href)&&(identical(other.cfi, cfi) || other.cfi == cfi)&&(identical(other.chapterIndex, chapterIndex) || other.chapterIndex == chapterIndex)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.percent, percent) || other.percent == percent)&&(identical(other.pos, pos) || other.pos == pos)&&(identical(other.page, page) || other.page == page)&&(identical(other.x, x) || other.x == x)&&(identical(other.y, y) || other.y == y));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is Locator&&(identical(other.v, v) || other.v == v)&&(identical(other.href, href) || other.href == href)&&(identical(other.cfi, cfi) || other.cfi == cfi)&&(identical(other.chapterIndex, chapterIndex) || other.chapterIndex == chapterIndex)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.offsetEnd, offsetEnd) || other.offsetEnd == offsetEnd)&&(identical(other.percent, percent) || other.percent == percent)&&(identical(other.pos, pos) || other.pos == pos)&&(identical(other.page, page) || other.page == page)&&(identical(other.pages, pages) || other.pages == pages)&&(identical(other.x, x) || other.x == x)&&(identical(other.y, y) || other.y == y));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,v,href,cfi,chapterIndex,offset,percent,pos,page,x,y);
+int get hashCode => Object.hash(runtimeType,v,href,cfi,chapterIndex,offset,offsetEnd,percent,pos,page,pages,x,y);
 
 @override
 String toString() {
-  return 'Locator(v: $v, href: $href, cfi: $cfi, chapterIndex: $chapterIndex, offset: $offset, percent: $percent, pos: $pos, page: $page, x: $x, y: $y)';
+  return 'Locator(v: $v, href: $href, cfi: $cfi, chapterIndex: $chapterIndex, offset: $offset, offsetEnd: $offsetEnd, percent: $percent, pos: $pos, page: $page, pages: $pages, x: $x, y: $y)';
 }
 
 
@@ -56,7 +58,7 @@ abstract mixin class $LocatorCopyWith<$Res>  {
   factory $LocatorCopyWith(Locator value, $Res Function(Locator) _then) = _$LocatorCopyWithImpl;
 @useResult
 $Res call({
- int v, String? href, String? cfi, int? chapterIndex, int? offset, double? percent, double? pos, int? page, double? x, double? y
+ int v, String? href, String? cfi, int? chapterIndex, int? offset, int? offsetEnd, double? percent, double? pos, int? page, int? pages, double? x, double? y
 });
 
 
@@ -73,16 +75,18 @@ class _$LocatorCopyWithImpl<$Res>
 
 /// Create a copy of Locator
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? v = null,Object? href = freezed,Object? cfi = freezed,Object? chapterIndex = freezed,Object? offset = freezed,Object? percent = freezed,Object? pos = freezed,Object? page = freezed,Object? x = freezed,Object? y = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? v = null,Object? href = freezed,Object? cfi = freezed,Object? chapterIndex = freezed,Object? offset = freezed,Object? offsetEnd = freezed,Object? percent = freezed,Object? pos = freezed,Object? page = freezed,Object? pages = freezed,Object? x = freezed,Object? y = freezed,}) {
   return _then(_self.copyWith(
 v: null == v ? _self.v : v // ignore: cast_nullable_to_non_nullable
 as int,href: freezed == href ? _self.href : href // ignore: cast_nullable_to_non_nullable
 as String?,cfi: freezed == cfi ? _self.cfi : cfi // ignore: cast_nullable_to_non_nullable
 as String?,chapterIndex: freezed == chapterIndex ? _self.chapterIndex : chapterIndex // ignore: cast_nullable_to_non_nullable
 as int?,offset: freezed == offset ? _self.offset : offset // ignore: cast_nullable_to_non_nullable
+as int?,offsetEnd: freezed == offsetEnd ? _self.offsetEnd : offsetEnd // ignore: cast_nullable_to_non_nullable
 as int?,percent: freezed == percent ? _self.percent : percent // ignore: cast_nullable_to_non_nullable
 as double?,pos: freezed == pos ? _self.pos : pos // ignore: cast_nullable_to_non_nullable
 as double?,page: freezed == page ? _self.page : page // ignore: cast_nullable_to_non_nullable
+as int?,pages: freezed == pages ? _self.pages : pages // ignore: cast_nullable_to_non_nullable
 as int?,x: freezed == x ? _self.x : x // ignore: cast_nullable_to_non_nullable
 as double?,y: freezed == y ? _self.y : y // ignore: cast_nullable_to_non_nullable
 as double?,
@@ -170,10 +174,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  double? percent,  double? pos,  int? page,  double? x,  double? y)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  int? offsetEnd,  double? percent,  double? pos,  int? page,  int? pages,  double? x,  double? y)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _Locator() when $default != null:
-return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.percent,_that.pos,_that.page,_that.x,_that.y);case _:
+return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.offsetEnd,_that.percent,_that.pos,_that.page,_that.pages,_that.x,_that.y);case _:
   return orElse();
 
 }
@@ -191,10 +195,10 @@ return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_th
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  double? percent,  double? pos,  int? page,  double? x,  double? y)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  int? offsetEnd,  double? percent,  double? pos,  int? page,  int? pages,  double? x,  double? y)  $default,) {final _that = this;
 switch (_that) {
 case _Locator():
-return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.percent,_that.pos,_that.page,_that.x,_that.y);case _:
+return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.offsetEnd,_that.percent,_that.pos,_that.page,_that.pages,_that.x,_that.y);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -211,10 +215,10 @@ return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_th
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  double? percent,  double? pos,  int? page,  double? x,  double? y)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int v,  String? href,  String? cfi,  int? chapterIndex,  int? offset,  int? offsetEnd,  double? percent,  double? pos,  int? page,  int? pages,  double? x,  double? y)?  $default,) {final _that = this;
 switch (_that) {
 case _Locator() when $default != null:
-return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.percent,_that.pos,_that.page,_that.x,_that.y);case _:
+return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_that.offsetEnd,_that.percent,_that.pos,_that.page,_that.pages,_that.x,_that.y);case _:
   return null;
 
 }
@@ -226,7 +230,7 @@ return $default(_that.v,_that.href,_that.cfi,_that.chapterIndex,_that.offset,_th
 
 
 class _Locator implements Locator {
-  const _Locator({this.v = 1, this.href, this.cfi, this.chapterIndex, this.offset, this.percent, this.pos, this.page, this.x, this.y});
+  const _Locator({this.v = 1, this.href, this.cfi, this.chapterIndex, this.offset, this.offsetEnd, this.percent, this.pos, this.page, this.pages, this.x, this.y});
   
 
 /// 格式版本，当前恒为 1。
@@ -237,15 +241,19 @@ class _Locator implements Locator {
 @override final  String? cfi;
 /// 兜底定位：章索引（0 基）。
 @override final  int? chapterIndex;
-/// 兜底定位：章内字符偏移。
+/// 兜底定位：章内字符偏移（原生渲染模式的页首/标注起点）。
 @override final  int? offset;
+/// 章内字符偏移区间终点（标注/划线用；null = 单点位置）。
+@override final  int? offsetEnd;
 /// 全书百分比 0..1，仅展示用，不参与定位。
 @override final  double? percent;
 /// 细粒度全书位置 0..1（章索引 + 章内页比例）。percent 受 locations
 /// 分块量化（同一 location 内多页百分比相同），统计字数用这个。
 @override final  double? pos;
-/// PDF 页码（1 基）。
+/// PDF 页码（1 基）；EPUB 为章内页码（1 基）。
 @override final  int? page;
+/// EPUB 本章总页数（判断下一页是否跨章用）。
+@override final  int? pages;
 /// PDF 页内横向比例 0..1。
 @override final  double? x;
 /// PDF 页内纵向比例 0..1。
@@ -261,16 +269,16 @@ _$LocatorCopyWith<_Locator> get copyWith => __$LocatorCopyWithImpl<_Locator>(thi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _Locator&&(identical(other.v, v) || other.v == v)&&(identical(other.href, href) || other.href == href)&&(identical(other.cfi, cfi) || other.cfi == cfi)&&(identical(other.chapterIndex, chapterIndex) || other.chapterIndex == chapterIndex)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.percent, percent) || other.percent == percent)&&(identical(other.pos, pos) || other.pos == pos)&&(identical(other.page, page) || other.page == page)&&(identical(other.x, x) || other.x == x)&&(identical(other.y, y) || other.y == y));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _Locator&&(identical(other.v, v) || other.v == v)&&(identical(other.href, href) || other.href == href)&&(identical(other.cfi, cfi) || other.cfi == cfi)&&(identical(other.chapterIndex, chapterIndex) || other.chapterIndex == chapterIndex)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.offsetEnd, offsetEnd) || other.offsetEnd == offsetEnd)&&(identical(other.percent, percent) || other.percent == percent)&&(identical(other.pos, pos) || other.pos == pos)&&(identical(other.page, page) || other.page == page)&&(identical(other.pages, pages) || other.pages == pages)&&(identical(other.x, x) || other.x == x)&&(identical(other.y, y) || other.y == y));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,v,href,cfi,chapterIndex,offset,percent,pos,page,x,y);
+int get hashCode => Object.hash(runtimeType,v,href,cfi,chapterIndex,offset,offsetEnd,percent,pos,page,pages,x,y);
 
 @override
 String toString() {
-  return 'Locator(v: $v, href: $href, cfi: $cfi, chapterIndex: $chapterIndex, offset: $offset, percent: $percent, pos: $pos, page: $page, x: $x, y: $y)';
+  return 'Locator(v: $v, href: $href, cfi: $cfi, chapterIndex: $chapterIndex, offset: $offset, offsetEnd: $offsetEnd, percent: $percent, pos: $pos, page: $page, pages: $pages, x: $x, y: $y)';
 }
 
 
@@ -281,7 +289,7 @@ abstract mixin class _$LocatorCopyWith<$Res> implements $LocatorCopyWith<$Res> {
   factory _$LocatorCopyWith(_Locator value, $Res Function(_Locator) _then) = __$LocatorCopyWithImpl;
 @override @useResult
 $Res call({
- int v, String? href, String? cfi, int? chapterIndex, int? offset, double? percent, double? pos, int? page, double? x, double? y
+ int v, String? href, String? cfi, int? chapterIndex, int? offset, int? offsetEnd, double? percent, double? pos, int? page, int? pages, double? x, double? y
 });
 
 
@@ -298,16 +306,18 @@ class __$LocatorCopyWithImpl<$Res>
 
 /// Create a copy of Locator
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? v = null,Object? href = freezed,Object? cfi = freezed,Object? chapterIndex = freezed,Object? offset = freezed,Object? percent = freezed,Object? pos = freezed,Object? page = freezed,Object? x = freezed,Object? y = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? v = null,Object? href = freezed,Object? cfi = freezed,Object? chapterIndex = freezed,Object? offset = freezed,Object? offsetEnd = freezed,Object? percent = freezed,Object? pos = freezed,Object? page = freezed,Object? pages = freezed,Object? x = freezed,Object? y = freezed,}) {
   return _then(_Locator(
 v: null == v ? _self.v : v // ignore: cast_nullable_to_non_nullable
 as int,href: freezed == href ? _self.href : href // ignore: cast_nullable_to_non_nullable
 as String?,cfi: freezed == cfi ? _self.cfi : cfi // ignore: cast_nullable_to_non_nullable
 as String?,chapterIndex: freezed == chapterIndex ? _self.chapterIndex : chapterIndex // ignore: cast_nullable_to_non_nullable
 as int?,offset: freezed == offset ? _self.offset : offset // ignore: cast_nullable_to_non_nullable
+as int?,offsetEnd: freezed == offsetEnd ? _self.offsetEnd : offsetEnd // ignore: cast_nullable_to_non_nullable
 as int?,percent: freezed == percent ? _self.percent : percent // ignore: cast_nullable_to_non_nullable
 as double?,pos: freezed == pos ? _self.pos : pos // ignore: cast_nullable_to_non_nullable
 as double?,page: freezed == page ? _self.page : page // ignore: cast_nullable_to_non_nullable
+as int?,pages: freezed == pages ? _self.pages : pages // ignore: cast_nullable_to_non_nullable
 as int?,x: freezed == x ? _self.x : x // ignore: cast_nullable_to_non_nullable
 as double?,y: freezed == y ? _self.y : y // ignore: cast_nullable_to_non_nullable
 as double?,

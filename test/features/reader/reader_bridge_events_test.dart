@@ -82,4 +82,69 @@ void main() {
     expect(m2.annotationId, isNull);
   });
 
+  test('拖拽事件：start / move / end / cancel', () {
+    final start = parseReaderEvent(
+      '{"type":"dragStart","dx":-12,"dy":2}',
+    )! as ReaderDragStart;
+    expect(start.dx, -12);
+    expect(start.dy, 2);
+
+    final move = parseReaderEvent(
+      '{"type":"dragMove","dx":-48.5,"dy":3}',
+    )! as ReaderDragMove;
+    expect(move.dx, -48.5);
+
+    final end = parseReaderEvent(
+      '{"type":"dragEnd","dx":-120,"dy":4,"dt":180,"vx":-0.667}',
+    )! as ReaderDragEnd;
+    expect(end.dx, -120);
+    expect(end.dt, 180);
+    expect(end.vx, closeTo(-0.667, 1e-9));
+
+    expect(parseReaderEvent('{"type":"dragCancel"}'),
+        isA<ReaderDragCancel>());
+  });
+
+  test('syncDone 解析 ok（缺省为 false）', () {
+    final ok = parseReaderEvent('{"type":"syncDone","ok":true}')!;
+    expect((ok as ReaderSyncDone).ok, isTrue);
+    final fail = parseReaderEvent('{"type":"syncDone"}')!;
+    expect((fail as ReaderSyncDone).ok, isFalse);
+  });
+
+  test('relocated 解析章内页码与全书估算页', () {
+    final e = parseReaderEvent(
+      '{"type":"relocated","locator":{"v":1,"cfi":"epubcfi(/6/4)"},'
+      '"page":12,"pages":34,"bookPage":120,"bookPages":860}',
+    )! as ReaderRelocated;
+    expect(e.page, 12);
+    expect(e.pages, 34);
+    expect(e.bookPage, 120);
+    expect(e.bookPages, 860);
+  });
+
+  test('syncDone 带 seq；边缘手势事件解析', () {
+    final sync = parseReaderEvent(
+      '{"type":"syncDone","ok":true,"seq":7}',
+    )! as ReaderSyncDone;
+    expect(sync.seq, 7);
+
+    final start = parseReaderEvent(
+      '{"type":"edgeStart","edge":"left"}',
+    )! as ReaderEdgeStart;
+    expect(start.edge, 'left');
+
+    final move = parseReaderEvent(
+      '{"type":"edgeMove","edge":"right","dy":-42.5}',
+    )! as ReaderEdgeMove;
+    expect(move.edge, 'right');
+    expect(move.dy, -42.5);
+
+    final end = parseReaderEvent(
+      '{"type":"edgeEnd","edge":"right","dy":-60,"dt":300}',
+    )! as ReaderEdgeEnd;
+    expect(end.dt, 300);
+    expect(parseReaderEvent('{"type":"edgeCancel"}'),
+        isA<ReaderEdgeCancel>());
+  });
 }

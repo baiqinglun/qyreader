@@ -48,6 +48,8 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     required String quotedText,
     String? href,
     int? chapterIndex,
+    int? offset,
+    int? offsetEnd,
   }) async {
     final id = _uuid.v4();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -57,8 +59,10 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     final locatorJson = jsonEncode(<String, dynamic>{
       'v': 1,
       if (href != null) 'href': href,
-      'cfi': cfiRange,
+      if (cfiRange.isNotEmpty) 'cfi': cfiRange,
       if (chapterIndex != null) 'chapterIndex': chapterIndex,
+      if (offset != null) 'offset': offset,
+      if (offsetEnd != null) 'offsetEnd': offsetEnd,
     });
     await _db.transaction(() async {
       await _db.annotationDao.upsert(AnnotationRow(
@@ -123,6 +127,12 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
               ? AnnotationType.highlight.token
               : AnnotationType.note.token,
         ),
+      );
+
+  @override
+  Future<void> setAnchor(String id, String locatorJson) => _updateAnnotation(
+        id,
+        (row) => row.copyWith(locatorStart: locatorJson),
       );
 
   @override

@@ -7,7 +7,14 @@
     Dart → JS（evaluateJavascript 全局函数）:
       loadBook(base64) → initReader(styleJson, locatorJson|null)
         → applyStyle(styleJson) / gotoLocator(locatorJson) / gotoHref(href)
-        → gotoPercent(p) / nextPage() / prevPage() / syncNext(locatorJson)
+        → gotoPos(pos) / setTotalChars(n) / currentLocatorJson()
+        → nextPage() / prevPage() / syncNext(locatorJson)
+
+  位置口径（2026-11-10 起）：
+  - 不生成整本书的 locations（book.locations.generate 会把全书渲染一遍）：
+    位置一律用页级 pos =（章索引 + 章内页/总页）/ spine 长度，percent 同源。
+  - gotoPos 按页级位置跳转（percent 就是 pos，两者口径必须一致）。
+  - currentLocatorJson 供退出阅读时取当前真实页位（同步返回，落库用）。
 
   注意：
   - 文本选择在 M2 标注功能接入前禁用（user-select none）。
@@ -31,6 +38,10 @@
     /* 尺寸由 JS 以像素显式设置（Android WebView 对百分比容器
        在初次布局时可能解析为 0，导致分页渲染到 0x0） */
     #viewer { width: 100%; height: 100%; overflow: hidden; }
+    /* 外层文档也不留滚动条：Android WebView 会画滚动条并占掉 4~5px 宽度，
+       正文可视宽度因此比容器窄一截（右边距比左边距宽）。 */
+    html::-webkit-scrollbar, body::-webkit-scrollbar,
+    #viewer::-webkit-scrollbar { width: 0; height: 0; display: none; }
   </style>
 </head>
 <body>
@@ -40,7 +51,53 @@
   var book = null;
   var rendition = null;
   var currentStyle = null;
+  // 整本书的 locations（epub.js 的字符级位置表）**不生成**：
+  // locations.generate() 会把全书渲染一遍，在手机上要几十秒，且与首屏
+  // 渲染抢 WebView 主线程（表现为打开书籍卡顿、打开后长时间掉帧）。
+  // 位置改用页级 pos（章索引 + 章内页比例），精度更高且零渲染成本。
+  // locationsTotal 只在有人显式请求生成时才会 >0（兼容旧路径）。
   var locationsTotal = 0;
+  // 全书字数（导入时解析得到，由 Dart 通过 setTotalChars 下发）：
+  // 用于「全书页数估算」（原来靠 locations.length * 1600 反推）。
+  var totalChars = 0;
+  // 隐藏层对齐/多页恢复期间抑制中间 relocated：display 与 next 会各报一次，
+  // 中间的旧页位会让 Dart 误判可视页（表现为页码回退）。最终页位在
+  // syncDone / 恢复完成时单独上报。用计数支持嵌套。
+  var syncDepth = 0;
+  // 同步链序号与串行尾：新同步会取消旧链剩余步骤，并等旧链在途操作结束后
+  // 再读当前页位，避免“旧链多走一页 + 新链按旧页位计算”造成过冲。
+  // 同步链序号与串行尾：新同步会取消旧链剩余步骤，并等旧链在途操作结束后
+  // 再读当前页位，避免“旧链多走一页 + 新链按旧页位计算”造成过冲。
+  var syncGen = 0;
+  var syncTail = Promise.resolve();
+  // 最近一次 epub.js relocated 的原始 Location。翻页后 currentLocation()
+  // 有时仍读到上一页（读数滞后），校验最终页要用它而不是 currentLocation。
+  var lastLocation = null;
+  // 待完成的 syncDone 序号：链结束后，下一次 relocated（最终页位落定）
+  // 才上报 syncDone，避免在滚动动画中途读到中间页位。
+  var pendingSyncSeq = 0;
+  // syncDone 去抖定时器：等位置稳定后再上报（见 relocated 处理器注释）。
+  var syncDoneTimer = null;
+  // 渲染完成等待者：跨章同步必须等正文真的排版完成再翻页，否则容器还
+  // 没横向滚动能力，next() 会跳到下一节（页码错乱 → 隐藏层对不齐）。
+  // 必须在**顶层**声明——syncNext 是顶层函数，定义在 loadBook 里会
+  // ReferenceError（跨章同步直接失败）。
+  var renderedWaiters = [];
+  function waitRendered() {
+    return new Promise(function (resolve) {
+      var done = false;
+      renderedWaiters.push(function () {
+        if (done) return;
+        done = true;
+        resolve();
+      });
+      setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve();
+      }, 5000);
+    });
+  }
 
   // ---- 事件通道（三路并发 + 序号去重）：
   // ---- 实测 Windows WebView2 只送 console.error 不送 console.log；
@@ -60,6 +117,20 @@
         window.readerEvent.postMessage(j);
       }
     } catch (e) {}
+  }
+
+  /// 高频事件（拖拽进度）：只走 JavaScriptChannel，避免 console 通道
+  /// 每帧刷日志拖慢 WebView；通道不可用时退回 console。
+  function postFast(msg) {
+    msg.__n = ++__seq;
+    var j = JSON.stringify(msg);
+    try {
+      if (window.readerEvent && window.readerEvent.postMessage) {
+        window.readerEvent.postMessage(j);
+        return;
+      }
+    } catch (e) {}
+    try { console.log('QYEVT:' + j); } catch (e) {}
   }
 
   // 未捕获 JS 错误：既上报也留存在 __errs 供 __diagDump 拉取
@@ -87,11 +158,55 @@
         }
       });
     } catch (e) { hl = -2; }
+    var viewer = document.getElementById('viewer');
+    var vr = viewer ? viewer.getBoundingClientRect() : null;
+    // 分栏几何：gap 必须为 0，且 columnWidth == pageWidth == delta，
+    // 否则列边界与滚动步长不同步（右侧会露出半列 / 章内页数少一页）。
+    var layout = null;
+    try {
+      if (rendition && rendition.manager && rendition.manager.layout) {
+        var l = rendition.manager.layout;
+        layout = {
+          width: l.width,
+          height: l.height,
+          columnWidth: l.columnWidth,
+          gap: l.gap,
+          pageWidth: l.pageWidth,
+          delta: l.delta,
+          divisor: l.divisor
+        };
+      }
+    } catch (e) {}
     return JSON.stringify({
       errs: __errs.slice(0, 5),
       hasBook: !!window.book,
       hasRendition: !!window.rendition,
-      highlights: hl
+      highlights: hl,
+      layout: layout,
+      geom: (function () {
+        var g = scrollGeom();
+        if (!g) return null;
+        var c = null;
+        try { c = rendition.currentLocation(); } catch (e) {}
+        var disp = c && c.start && c.start.displayed;
+        return {
+          page: g.page, total: g.total,
+          scrollLeft: Math.round(g.scrollLeft),
+          scrollWidth: g.scrollWidth,
+          clientWidth: g.clientWidth,
+          delta: g.delta,
+          displayed: disp ? { page: disp.page, total: disp.total } : null,
+          href: c && c.start ? c.start.href : null
+        };
+      })(),
+      viewport: vr ? {
+        left: Math.round(vr.left),
+        top: Math.round(vr.top),
+        width: Math.round(vr.width),
+        height: Math.round(vr.height),
+        winW: window.innerWidth,
+        winH: window.innerHeight
+      } : null
     });
   };
 
@@ -114,44 +229,501 @@
       // 细粒度位置：章索引 + 章内页比例（percent 被 locations 分块量化，
       // 同块内多页 percent 相同，统计字数需要页级精度）
       var disp = location.start.displayed;
-      var spineItems = book.spine.spineItems || [];
-      if (disp && disp.total > 0 && spineItems.length > 0) {
-        var si = spineItem ? spineItem.index : 0;
-        loc.pos = (si + disp.page / disp.total) / spineItems.length;
+      if (disp && disp.page) loc.page = disp.page; // 章内页码（1 基）
+      if (disp && disp.total) {
+        loc.pages = disp.total;
+        // 分栏 gap 会把尾部间隙算成一列，总页数虚多一页；用真实列宽修正
+        try {
+          var pi = pageInfo(location, loc);
+          if (pi && pi.pages > 0) loc.pages = pi.pages;
+        } catch (e) {}
       }
+      var spineItems = book.spine.spineItems || [];
+      var pageTotal = loc.pages || (disp ? disp.total : 0);
+      if (disp && pageTotal > 0 && spineItems.length > 0) {
+        var si = spineItem ? spineItem.index : 0;
+        loc.pos = (si + disp.page / pageTotal) / spineItems.length;
+      }
+      // 没有 locations 时（常态）用页级 pos 当百分比：进度条、进度落库、
+      // 统计都只依赖 percent，不需要渲染整本书。
+      if (loc.percent == null && loc.pos != null) loc.percent = loc.pos;
     } catch (e) {
       postError('locator.build', e);
     }
     return loc;
   }
 
+  /// 真实章内页数：按正文矩形实际占用的列数统计（缓存）。
+  /// epub.js 的 totalPages 用 delta=整页宽 计算，gap 会多算一列；
+  /// 这里用「版面里真实有内容的最后一列」作为总页数。
+  var pageCountCache = {};
+  var pageCountEpoch = 0;
+
+  function truePageCount(location) {
+    try {
+      var sectionIndex = location.start.index;
+      var layout = rendition.manager.layout;
+      // 列步长（pitch）= columnWidth：浏览器把列宽压回内容框后，
+      // 「列宽 + 列距」正好等于 columnWidth（gap=0 时就是它本身）。
+      // 用 columnWidth+gap 当分母会把最后一列算丢（实测 8 页算成 7 页）。
+      var denom = layout.columnWidth || 0;
+      if (!(denom > 0)) return 0;
+      var key = pageCountEpoch + '|' + sectionIndex + '|' +
+        layout.width + 'x' + layout.height + '|' + denom;
+      if (pageCountCache[key] !== undefined) return pageCountCache[key];
+
+      var views = rendition.views().all();
+      var body = null;
+      var view = null;
+      for (var i = 0; i < views.length; i++) {
+        var v = views[i];
+        if (v && v.index === sectionIndex && v.document && v.document.body) {
+          view = v;
+          body = v.document.body;
+          break;
+        }
+      }
+      // 找不到本节的正文 → 页数未知，返回 0 且**不缓存**。
+      // 绝不能拿别的章节的正文凑数：凑出来的页数会被缓存下来一直错
+      // （实测 7 页的章被算成 1 页 → 「本章读完」误判 + 隐藏层就绪判定
+      // 失败 → 翻页出白屏）。
+      if (!body) return 0;
+      // 本节还在加载（多栏布局只排出了当前可见的一栏）时量出来的页数也不准，
+      // 同样不缓存，等 'rendered' 后重算。
+      if (view && view.rendered === false) return 0;
+
+      var range = body.ownerDocument.createRange();
+      range.selectNodeContents(body);
+      var rects = range.getClientRects();
+      var maxLeft = 0;
+      for (var r = 0; r < rects.length; r++) {
+        var rect = rects[r];
+        if (rect.width > 1 && rect.height > 1 && rect.left > maxLeft) {
+          maxLeft = rect.left;
+        }
+      }
+      // 本章（当前正在显示的那一节）直接用容器几何算总页数——它是唯一
+      // 和「能不能滚到」一致的算法。正文矩形法会因列尾空隙虚多一页，
+      // 一旦最后一页判错，next() 会在末页切 section 并清空视图 → 白屏卡死。
+      try {
+        var g = scrollGeom();
+        var isCurrent = false;
+        var cur = null;
+        try { cur = rendition.currentLocation(); } catch (e3) {}
+        if (cur && cur.start && cur.start.href &&
+            view && view.section && view.section.href) {
+          isCurrent = sameHrefLoose(cur.start.href, view.section.href);
+        }
+        if (g && isCurrent) {
+          pageCountCache[key] = g.total;
+          return g.total;
+        }
+      } catch (e2) {}
+
+      var count = Math.floor(Math.max(0, maxLeft) / denom) + 1;
+      pageCountCache[key] = count;
+      return count;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /// 页码信息：章内 page/total（精确）+ 全书估算页（约，字号一变就会变）。
+  function pageInfo(location, loc) {
+    var out = { page: 0, pages: 0, bookPage: 0, bookPages: 0 };
+    try {
+      var disp = location.start.displayed;
+      if (disp && disp.total > 0) {
+        out.page = disp.page || 1;
+        out.pages = disp.total;
+        var real = truePageCount(location);
+        if (real > 0) out.pages = real;
+      }
+      if (out.pages > 0 && loc.pos != null) {
+        var charsPerPage = charsPerPageOf(location, out.pages);
+        // 全书字数：优先用 Dart 下发的 totalChars（导入时解析得到）；
+        // 没有时退回 locations 的长度估算。
+        var bookChars = totalChars > 0
+          ? totalChars
+          : (locationsTotal > 0 ? locationsTotal * 1600 : 0);
+        if (charsPerPage > 0 && bookChars > 0) {
+          out.bookPages = Math.max(1, Math.round(bookChars / charsPerPage));
+          out.bookPage = Math.min(out.bookPages,
+            Math.max(1, Math.round(loc.pos * out.bookPages)));
+        }
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  /// 每页字数（按章缓存）。
+  ///
+  /// 这里原本每次 relocated / syncDone 都读一遍整章的 innerText——innerText
+  /// 会触发整章同步布局，一次翻页（可视层 + 隐藏层各报一次）要算 4 遍，
+  /// 长章节直接把 WebView 主线程占满，表现为翻页卡顿。
+  /// 改用 textContent（不触发布局）+ 按章缓存，一次翻页只算一次。
+  var charsPerPageCache = {};
+
+  function charsPerPageOf(location, pages) {
+    if (!(pages > 0)) return 0;
+    try {
+      var sectionIndex = location.start.index;
+      var key = pageCountEpoch + '|' + sectionIndex;
+      if (charsPerPageCache[key] !== undefined) {
+        return charsPerPageCache[key];
+      }
+      var views = rendition.views().all();
+      var body = null;
+      for (var i = 0; i < views.length; i++) {
+        var v = views[i];
+        if (v && v.index === sectionIndex && v.document && v.document.body) {
+          body = v.document.body;
+          break;
+        }
+      }
+      if (!body) return 0;
+      var len = (body.textContent || '').length;
+      if (!len) return 0;
+      var value = len / pages;
+      charsPerPageCache[key] = value;
+      return value;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /// 统一的 relocated 上报（relocated 事件与 reportLocation 共用）。
+  /// 按容器真实滚动位置算出的章内页码（0 = 未知）。
+  /// epub.js 的 displayed.page 在滚动/同步过程中会滞后，滚动位置才是真值。
+  /// href 宽松比较（只看文件名，忽略目录前缀）。
+  function sameHrefLoose(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return a.split('/').pop() === b.split('/').pop();
+  }
+
+  /// 分栏容器的真实几何（页码/总页数的真值）。
+  /// 页码 = floor(scrollLeft / delta) + 1；总页数 = round(scrollWidth / delta)。
+  /// 其它算法（正文矩形、epub.js displayed.total）都会虚多一页 —— 一旦
+  /// 「最后一页」判错，next() 会在末页切 section → clear() 清空所有视图 →
+  /// **整页空白、点击事件也没了**（实测卡死）。
+  function scrollGeom() {
+    try {
+      var mg = rendition && rendition.manager;
+      var c = mg && mg.container;
+      var d = mg && mg.layout && mg.layout.delta;
+      if (!c || !(d > 0)) return null;
+      // 页码/总页数都用 round：delta 一般是小数（实测 379.04），
+      // scrollLeft 只能取整像素，floor 会把 sl=2274（= 6*379.04 的取整）
+      // 算成第 6 页而不是第 7 页 → 「末页判定」差一页 → 在末页继续
+      // next() → 切 section → 清空视图 → 白屏卡死。
+      // 分栏模式下 scrollLeft 永远停在页边界，round 是精确的。
+      var maxSl = Math.max(0, c.scrollWidth - c.clientWidth);
+      return {
+        page: Math.round(c.scrollLeft / d) + 1,
+        total: Math.max(1, Math.round(maxSl / d) + 1),
+        scrollLeft: c.scrollLeft,
+        scrollWidth: c.scrollWidth,
+        clientWidth: c.clientWidth,
+        delta: d
+      };
+    } catch (e) {}
+    return null;
+  }
+
+  function scrollPageNow() {
+    var g = scrollGeom();
+    return g ? g.page : 0;
+  }
+
+  function postRelocated(location) {
+    if (syncDepth > 0) return; // 对齐中的中间页位不上报
+    if (!location || !location.start) return;
+    var loc = makeLocator(location);
+    var info = pageInfo(location, loc);
+    var sp = scrollPageNow();
+    // 页码以容器真实滚动位置为准：epub.js 的 displayed.page 在滚动/同步
+    // 过程中会滞后，用它判断「隐藏层是不是下一页」会判错 → 翻页白屏。
+    if (sp > 0 && loc.page !== sp) loc.page = sp;
+    // 页码变了，位置百分比也要跟着重算：否则「章内页比例」停在旧页上
+    // （翻页/跳页后进度条差一页，退出时存的也是差一页的位置）。
+    if (sp > 0 && loc.pages > 0 && loc.chapterIndex != null) {
+      var items = (book.spine && book.spine.spineItems) || [];
+      if (items.length > 0) {
+        loc.pos = (loc.chapterIndex + sp / loc.pages) / items.length;
+        if (locationsTotal <= 0) loc.percent = loc.pos;
+      }
+    }
+    // 高频事件走快通道：只发 JavaScriptChannel，不刷 console。
+    // Android 上 console.log 要跨进程写日志，一次翻页好几次 relocated，
+    // 足以把 WebView 主线程拖慢（表现为翻页卡顿）。
+    postFast({
+      type: 'relocated',
+      locator: loc,
+      page: info.page,
+      pages: info.pages,
+      bookPage: info.bookPage,
+      bookPages: info.bookPages,
+      atStart: location.atStart === true,
+      atEnd: location.atEnd === true
+    });
+  }
+
+  /// syncNext 完成：带上最终页位与页码（Dart 以此更新槽位/可视页）。
+  function postSyncDone(seq, ok) {
+    var loc = null;
+    var info = { page: 0, pages: 0, bookPage: 0, bookPages: 0 };
+    var atStart = false, atEnd = false;
+    if (ok) {
+      try {
+        var cl = lastLocation ||
+          (rendition ? rendition.currentLocation() : null);
+        if (cl && cl.start) {
+          loc = makeLocator(cl);
+          info = pageInfo(cl, loc);
+          atStart = cl.atStart === true;
+          atEnd = cl.atEnd === true;
+        }
+      } catch (e) {}
+    }
+    // 页码的**真值**：容器实际滚动位置（epub.js 的 displayed.page 在
+    // 同步过程中可能还是旧值 → Dart 侧据此判断「隐藏层是不是下一页」
+    // 会判错 → 翻页出白屏）。
+    var scrollPage = scrollPageNow();
+    postFast({
+      type: 'syncDone',
+      ok: ok,
+      seq: seq,
+      locator: loc,
+      scrollPage: scrollPage,
+      page: info.page,
+      pages: info.pages,
+      bookPage: info.bookPage,
+      bookPages: info.bookPages,
+      atStart: atStart,
+      atEnd: atEnd
+    });
+  }
+
   function themeCss(style) {
     var t = style.theme;
+    var precise = style.precise === true;
+    if (precise) {
+      // 精排：保留书籍自带 CSS。只接管「底色」和「选区色」——
+      // 字号/行距/字色/段落缩进/标题样式全部交给书里的样式表，
+      // 排版讲究的书才能维持它原本的样子。
+      // 注意 body 也要铺底色：多数书的 CSS 没设 background，
+      // 不铺就会露出 WebView 的透明底（浅色主题下看不出，深色主题下刺眼）。
+      return {
+        'html': {
+          'background': t.background,
+          'margin-left': '0 !important',
+          'margin-right': '0 !important',
+          'padding-left': '0 !important',
+          'padding-right': '0 !important'
+        },
+        'body': {
+          'background': t.background,
+          // 精排也**必须**把盒子宽度对齐分栏步长：否则 body 比列宽窄时，
+          // 每页右侧会留一条空白带、列边界与翻页步长错位。只改宽度，
+          // 字号/行距/缩进/对齐仍然交给书籍自己的 CSS。
+          'width': 'auto !important',
+          'max-width': 'none !important'
+        },
+        '::selection': { background: t.accent },
+        '::-webkit-scrollbar': { width: '0', height: '0', display: 'none' }
+      };
+    }
     return {
-      'html': { 'background': t.background },
+      'html': {
+        'background': t.background,
+        // 书的 CSS 常在 html 上留左右内边距（calibre 转的常见 `padding:0 20px`），
+        // 那会把 body 挤窄到「列宽 - 40」，每页右边缘就多一条空白带。
+        // 阅读器的页边距一律由 Flutter 外层 padding 提供，这里必须归零。
+        'margin-left': '0 !important',
+        'margin-right': '0 !important',
+        'padding-left': '0 !important',
+        'padding-right': '0 !important'
+      },
       'body': {
         'background': t.background,
         'color': t.foreground,
-        'padding': '0 ' + style.margin + 'px !important',
         'line-height': String(style.lineHeight) + ' !important',
-        'font-size': style.fontSize + 'px !important'
+        'font-size': style.fontSize + 'px !important',
+        // 中文排版要两端对齐：单靠左对齐时，行尾会因字宽/标点不同而参差
+        // （实测真机右侧每行平均空 12px，看着像"右边留白比左边多"）。
+        // 英文/数字混排用 inter-ideograph 才不会被拉出奇怪的字间距。
+        // 精排模式（保留书籍原样式）不覆盖 alignment，见上面的分支。
+        'text-align': 'justify !important',
+        'text-justify': 'inter-ideograph',
+        // 正文盒子必须等于分栏步长。
+        // 有些书（calibre 转的）自带 `body { width: ... }` 之类的窄宽设定，
+        // 于是 body 盒宽 < epub.js 的列宽 → **每页右边缘多出一条空白带**
+        // （实测某书 body=287、列宽=327，右侧恒定多 40px，看着像"右边
+        // 留白特别大"），而且列边界与滚动步长错位。
+        // 统一排版模式下连页边距一起归零，空白完全由 Flutter 外层 padding 提供。
+        'width': 'auto !important',
+        'max-width': 'none !important',
+        'margin-left': '0 !important',
+        'margin-right': '0 !important',
+        'padding-left': '0 !important',
+        'padding-right': '0 !important',
       },
       'p': {
-        'line-height': String(style.lineHeight) + ' !important'
+        'line-height': String(style.lineHeight) + ' !important',
+        'text-align': 'justify !important'
       },
-      'a': { 'color': t.accent },
-      '::selection': { 'background': t.accent }
+      'a': { color: t.accent },
+      '::selection': { background: t.accent },
+      // 隐藏 iframe 内的滚动条（**必须隐藏，不能改成 overflow:hidden**）：
+      // epub.js 的分栏把整章内容横向铺在 iframe 里（iframe 宽 = 全部列宽，
+      // 文档视口 = 一列宽），iframe 文档必然横向溢出。桌面浏览器用
+      // scrolling="no" 不显示滚动条，但 Android WebView 会画出来 →
+      // 横向滚动条吃掉 4~5px 高度 → html 纵向也溢出 → 再冒出纵向滚动条
+      // → 纵向滚动条再吃掉 4~5px 宽度 → 正文可视宽度比容器窄一截，
+      // 右边距比左边距宽，阅读界面看着不居中。
+      // 只藏滚动条、不动 overflow：横向滚动能力必须保留（epub.js 靠它翻列）。
+      '::-webkit-scrollbar': { width: '0', height: '0', display: 'none' }
     };
+  }
+
+  /// 内容区（#viewer）在父页面视口内的偏移。边距由 Flutter 外层 padding
+  /// 实现（WebView 自身坐标从 0 开始），这里保留以兼容划线覆盖层。
+  function contentOffset() {
+    var viewer = document.getElementById('viewer');
+    if (!viewer) return { left: 0, top: 0 };
+    var r = viewer.getBoundingClientRect();
+    return { left: r.left, top: r.top };
+  }
+
+  /// iframe 内「整章宽画布」坐标 → 父页面视口坐标。
+  /// iframe 在父页面里的 rect 已包含分栏滚动偏移（第 2 列时 left≈-列宽），
+  /// 与 'selected' 事件的换算保持一致；划线矩形与点击命中共用。
+  function iframeToViewport(view, clientX, clientY) {
+    var x = clientX;
+    var y = clientY;
+    try {
+      var frame = view && (view.iframe || (view.contents && view.contents.frame));
+      if (frame) {
+        var fr = frame.getBoundingClientRect();
+        x += fr.left;
+        y += fr.top;
+      }
+    } catch (e) {}
+    return { x: x, y: y };
+  }
+
+  /// 规则对象 → CSS 文本。
+  ///
+  /// 必须走「整体替换」而不是 epub.js 的 themes.register(rules)：
+  /// registerRules 的内部实现是 `styleEl.sheet.insertRule(...)`，**追加**到
+  /// 同一个 `epubjs-inserted-css-reader` 样式节点上。于是切换主题/精排时
+  /// 旧的 `!important` 声明会一直留着、继续压住新规则 —— 实测精排开关
+  /// 打开后页面毫无变化，就是这个原因。
+  /// themes.registerCss 走 addStylesheetCss → `styleEl.innerHTML = css`，
+  /// 是整体替换，旧规则会被彻底清掉。
+  function rulesToCss(rules) {
+    var out = '';
+    for (var sel in rules) {
+      if (!rules.hasOwnProperty(sel)) continue;
+      var decl = rules[sel];
+      var body = '';
+      for (var prop in decl) {
+        if (!decl.hasOwnProperty(prop)) continue;
+        body += prop + ':' + decl[prop] + ';';
+      }
+      if (body) out += sel + '{' + body + '}';
+    }
+    return out;
+  }
+
+  function applyThemeToRendition(style) {
+    if (!rendition) return;
+    try {
+      var css = rulesToCss(themeCss(style));
+      if (rendition.themes.registerCss) {
+        rendition.themes.registerCss('reader', css);
+      } else {
+        rendition.themes.register('reader', themeCss(style));
+      }
+      rendition.themes.select('reader');
+    } catch (e) {
+      postError('style.apply', e);
+    }
   }
 
   function applyStyleToRendition(style) {
     currentStyle = style;
+    pageCountEpoch++;
+    pageCountCache = {};
+    charsPerPageCache = {};
+    applyThemeToRendition(style);
+  }
+
+  /// 让 epub 容器跟随 WebView 的真实尺寸，并按该尺寸重排。
+  ///
+  /// epub.js 的 renderTo 会把分栏容器钉成固定 px 宽（如 '359px'）。而
+  /// Stage.size() 无参调用时执行的是 `container.style.width = undefined`
+  /// ——CSSOM 忽略非法值，容器宽度保持不变，于是 stage.size() 永远读到
+  /// 那个旧宽度。后果：WebView 尺寸变化后（Flutter 外层 padding 生效、
+  /// 旋转、系统栏变化）epub.js 仍按旧宽分栏，正文按旧宽排版、被新宽度
+  /// 裁掉右边一截（实测右侧被裁 32px = 左右边距之和）。
+  ///
+  /// 办法：renderTo 用 '100%' 让容器跟随 WebView，重排时用
+  /// manager.updateLayout() 按真实 clientWidth 重算（它没有「尺寸相同就
+  /// 忽略」的判断，可作为强制重排用）。
+  function syncLayoutToViewport() {
     if (!rendition) return;
+    var mgr = rendition.manager;
+    if (!mgr) return;
     try {
-      rendition.themes.register('reader', themeCss(style));
-      rendition.themes.select('reader');
+      var container = mgr.container;
+      if (container) {
+        container.style.width = '100%';
+        container.style.height = '100%';
+      }
+      mgr.updateLayout();
     } catch (e) {
-      postError('style.apply', e);
+      postError('layout.sync', e);
+    }
+  }
+
+  /// 边距松手后统一重排：WebView 已被 Flutter 外层 padding 改变尺寸，
+  /// 这里按新尺寸重新分页并回到原 CFI（拖动期间不调用，避免逐帧重排跳页）。
+  function flushViewport(locatorJson) {
+    if (!rendition) return;
+    pageCountEpoch++;
+    pageCountCache = {};
+    charsPerPageCache = {};
+    syncLayoutToViewport();
+    var loc = null;
+    try { loc = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { loc = null; }
+    if (loc) {
+      setTimeout(function () { displayLocator(loc); }, 60);
+    }
+  }
+
+  /// 字号/行距变化后强制重新分页，再按原 CFI 回到原句。
+  function relayout(locatorJson) {
+    if (!rendition) return;
+    pageCountEpoch++;
+    pageCountCache = {};
+    charsPerPageCache = {};
+    // updateLayout() 没有「尺寸相同就忽略」的判断，可强制重排；
+    // 字号变化后视图需要重新分栏，故额外让视图按新布局重算一次。
+    syncLayoutToViewport();
+    try {
+      var views = rendition.views().all();
+      for (var i = 0; i < views.length; i++) {
+        if (views[i] && views[i].expand) views[i].expand();
+      }
+    } catch (e) {
+      postError('relayout.expand', e);
+    }
+    var loc = null;
+    try { loc = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { loc = null; }
+    if (loc) {
+      setTimeout(function () { displayLocator(loc); }, 80);
     }
   }
 
@@ -159,29 +731,70 @@
   /// bookUrl 为本地资源服务（127.0.0.1）上的书籍地址，epub.js 同源拉取；
   /// locatorJson 可空；非空时首次 display 直接定位（JS 自主首渲，
   /// 不依赖 Dart 二次指令，规避桥时序问题）。
-  async function loadBook(bookUrl, locatorJson) {
+  /// styleJson 非空时在首帧前注入主题/字号。
+  async function loadBook(bookUrl, locatorJson, styleJson) {
     try {
-      book = ePub(bookUrl);
+      var style = null;
+      try { style = styleJson ? JSON.parse(styleJson) : null; } catch (e) { style = null; }
+      if (style) currentStyle = style;
+      pageCountEpoch++;
+      pageCountCache = {};
+      charsPerPageCache = {};
       // 用窗口像素尺寸显式渲染（百分比容器在 Android WebView 上
-      // 初次布局可能解析为 0，导致分页区域 0x0、内容不可见）
+      // 初次布局可能解析为 0，导致分页区域 0x0、内容不可见）。
+      // 边距由 Flutter 外层 padding 决定：窗口尺寸已是正文区尺寸。
+      book = ePub(bookUrl);
       rendition = book.renderTo('viewer', {
-        width: window.innerWidth + 'px',
-        height: window.innerHeight + 'px',
+        // 宽高用 '100%'：容器跟随 WebView 实际尺寸。
+        // 用固定 px（window.innerWidth）会被 epub.js 钉死在容器 style 上，
+        // WebView 尺寸变化后 stage.size() 再也读不到真实宽度 → 正文按旧宽
+        // 排版、被新宽度裁掉右边一截（实测右侧被裁 32px）。
+        width: '100%',
+        height: '100%',
         flow: 'paginated',
         spread: 'none',
         // FIXME: 需核对文档——minSpreadWidth 大值强制单页排版，窄屏本就单页。
         minSpreadWidth: 100000,
+        // gap 必须显式给 0：epub.js 默认按 floor(宽度/12)（取偶数）算列距
+        // （正文区 361px → 30px），于是：
+        //   1) iframe 的 html 被塞 padding-left/right = gap/2，正文左右各
+        //      缩进 15px，页面右侧留下一条与正文等宽的空白带；
+        //   2) 浏览器把列宽压回内容框，真实列步长 = columnWidth，而
+        //      epub.js 自己的 mapping 按 columnWidth+gap 算页号，两者
+        //      打架 → 章内页数少一页（实测 8 页算成 7 页）；
+        //   3) 列边界与滚动步长 delta 不再重合，翻页时页边界会漂。
+        // gap=0 时 columnWidth == pageWidth == delta，列边界与滚动位置
+        // 严格对齐，下一列起点正好落在视口右边界（永不半列可见）。
+        gap: 0,
         // epub.js 需要在渲染 iframe 内注入脚本完成分页；false 会使 iframe
         // 被 sandbox 拦截脚本（Android 上直接白屏）。
         allowScriptedContent: true
       });
+      if (style) applyThemeToRendition(style);
       rendition.on('relocated', function (location) {
-        post({
-          type: 'relocated',
-          locator: makeLocator(location),
-          atStart: location.atStart === true,
-          atEnd: location.atEnd === true
-        });
+        lastLocation = location;
+        // 同步链等待最终页位：链完成后设置 pendingSyncSeq，
+        // 下一次 relocated（scroll 落定）直接上报 syncDone
+        //
+        // ⚠️ 但不能「第一次 relocated 就报」：同步链里 display() + next()×N
+        // 每一步都会产生一次 relocated，链刚结束时到达的第一个 relocated
+        // 往往还是**中间页**（实测跨章同步后报 page=6，实际已经到 page=7）。
+        // 报出中间页 → 隐藏层被误判为「不是下一页」→ ready=false →
+        // 翻页盖骨架 → 白屏。
+        // 改成「位置稳定 120ms 后再报」，拿到的一定是最终页。
+        if (pendingSyncSeq > 0 && location && location.start) {
+          if (syncDoneTimer) clearTimeout(syncDoneTimer);
+          syncDoneTimer = setTimeout(function () {
+            syncDoneTimer = null;
+            if (pendingSyncSeq > 0) {
+              var doneSeq = pendingSyncSeq;
+              pendingSyncSeq = 0;
+              postSyncDone(doneSeq, true);
+            }
+          }, 120);
+          return;
+        }
+        postRelocated(location);
       });
       rendition.on('displayError', function (e) {
         postError('render.display', e);
@@ -212,6 +825,49 @@
         var doc = view && view.document;
         var iframe = view && view.iframe;
         if (!doc || !iframe) return;
+
+        // 隐藏 iframe 内的滚动条（与 themeCss 里的同一条规则，双保险：
+        // 主题机制若因故没套上，滚动条仍会被藏掉）。
+        // 只藏滚动条，不改 overflow —— 横向滚动能力必须保留（epub.js 靠它翻列）。
+        try {
+          if (!doc.__qyNoScrollbar) {
+            doc.__qyNoScrollbar = true;
+            var st = doc.createElement('style');
+            st.textContent =
+              '::-webkit-scrollbar{width:0;height:0;display:none}';
+            (doc.head || doc.documentElement).appendChild(st);
+          }
+        } catch (e) {}
+
+        // 新视图渲染完成 → 强制按「先分栏后铺宽」的顺序重排（否则 iframe
+        // 只有一页宽，外层容器滚不动，next() 会跳到下一章）。
+        forcePaginate(view);
+
+        // 唤醒等待「本章渲染完成」的同步链
+        try {
+          var ws = renderedWaiters;
+          renderedWaiters = [];
+          for (var w = 0; w < ws.length; w++) {
+            try { ws[w](); } catch (e) {}
+          }
+        } catch (e) {}
+
+        // 本节渲染完成 → 该节的页数缓存作废重算（渲染前量的页数只排出了
+        // 当前可见的一栏，会偏小）。只清本节，别的章节的缓存仍有效。
+        try {
+          var idx = view && view.index;
+          if (idx !== undefined && idx !== null) {
+            Object.keys(pageCountCache).forEach(function (k) {
+              if (k.indexOf('|' + idx + '|') >= 0) delete pageCountCache[k];
+            });
+            Object.keys(charsPerPageCache).forEach(function (k) {
+              if (k.indexOf('|' + idx) === k.length - String(idx).length) {
+                delete charsPerPageCache[k];
+              }
+            });
+          }
+        } catch (e) {}
+
         // rendered 可能对同一文档多次触发（重排/重渲染），防重复挂监听
         if (doc.__qyTapHooked) return;
         doc.__qyTapHooked = true;
@@ -221,10 +877,24 @@
         var win = doc.defaultView;
         win.addEventListener('click', function (e) {
           try {
-            // 命中划线（几何判定）：上报 markClicked 并抑制普通 tap
+            // 拖拽/滑动后的合成 click 丢弃（避免翻页又触发 chrome 翻转）
+            if (Date.now() < dragSuppressUntil) return;
+            // iframe 内坐标 → 父页面视口坐标（边距内缩后两者存在偏移）
+            var r = iframe.getBoundingClientRect();
+            var px = e.clientX + r.left;
+            var py = e.clientY + r.top;
+            // 命中划线（几何判定，iframe 内坐标）：上报 markClicked 并抑制普通 tap
             var hit = null;
             try {
               hit = hitTestMark(e.clientX, e.clientY);
+              if (!hit && markRectsIframe.length) {
+                console.error('QYERR:hit.miss px=' + e.clientX.toFixed(0) +
+                  ' py=' + e.clientY.toFixed(0) + ' rects=' +
+                  JSON.stringify(markRectsIframe.map(function (m) {
+                    return [m.left.toFixed(0), m.top.toFixed(0),
+                      m.width.toFixed(0), m.height.toFixed(0)];
+                  })));
+              }
             } catch (inner) {
               postError('click.hittest', inner);
             }
@@ -234,8 +904,7 @@
               return;
             }
             if (Date.now() - markClickedAt < 500) return;
-            var r = iframe.getBoundingClientRect();
-            reportTap(e.clientX + r.left, e.clientY + r.top);
+            reportTap(px, py);
           } catch (err) {
             postError('click.handler', err);
           }
@@ -245,33 +914,163 @@
         // 统一触发（见下方 relocated 处理器里的 replayHighlights）
         scheduleRenderMarks();
 
-        // ---- 滑动翻页检测（HC 模式触摸由 WebView 原生消费，Flutter 层
-        // 收不到拖拽；横向滑动在这里判定后上报 Dart 触发翻页）----
-        // 长按（>600ms，选字）与非横向主导的移动不算滑动；选区存在时也不翻。
-        var touchStart = null;
+        // ---- 跟手滑动翻页 + 左右边缘手势 ----
+        // HC 模式触摸由 WebView 原生消费，Flutter 层收不到拖拽，因此：
+        // 判定为横向拖拽后逐帧上报 dx，Dart 实时平移页面（跟手）；
+        // 抬手上报 dragEnd 决定提交/回弹。长按（>600ms，选字）与纵向
+        // 主导的移动不参与翻页。touchmove 稀疏的轻扫在抬手兜底为 swipe。
+        // 左侧/右侧边缘的纵向拖动上报 edge* 事件（亮度/字号）。
+        var drag = null;
+        var edge = null;
+        // 触摸监听挂在 iframe 上，但闭包里的 rendition / window 是父文档的：
+        // iframe 的 clientX 是「整章宽画布」坐标，减去父容器分栏滚动偏移
+        // 才是屏幕内坐标；window.innerWidth 是父文档视口宽（正文区宽）。
         win.addEventListener('touchstart', function (e) {
           if (e.touches.length === 1) {
-            touchStart = {
-              x: e.touches[0].clientX,
-              y: e.touches[0].clientY,
-              t: Date.now()
+            // 已有进行中的手势：忽略重复 touchstart（HC 视图/文档重挂载时
+            // 系统会重发 start，重置起点会把剩余位移算丢，touchend 也判不成滑动）
+            if (drag && Date.now() - drag.lastMoveAt < 800) return;
+            var p = e.touches[0];
+            var scrollLeft = 0;
+            try {
+              scrollLeft = rendition.manager.container.scrollLeft || 0;
+            } catch (err) {}
+            var sx = p.clientX - scrollLeft;
+            drag = {
+              x: p.clientX,
+              y: p.clientY,
+              t: Date.now(),
+              decided: false,
+              cancelled: false,
+              lastDx: 0,
+              lastMoveAt: Date.now()
             };
+            if (sx < 30) {
+              edge = { side: 'left', t: Date.now(), decided: false };
+            } else if (sx > window.innerWidth - 30) {
+              edge = { side: 'right', t: Date.now(), decided: false };
+            } else {
+              edge = null;
+            }
           } else {
-            touchStart = null;
+            drag = null;
+            edge = null;
           }
         }, { passive: true, capture: true });
+
+        win.addEventListener('touchmove', function (e) {
+          if (!drag || e.touches.length !== 1) return;
+          drag.lastMoveAt = Date.now();
+          var p = e.touches[0];
+          var dx = p.clientX - drag.x;
+          var dy = p.clientY - drag.y;
+          var dt = Date.now() - drag.t;
+
+          if (edge && !edge.decided && !drag.cancelled) {
+            if (dt > 600) {
+              edge = null;
+              drag.cancelled = true;
+              return;
+            }
+            if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+              edge.decided = true;
+              drag.cancelled = true;
+              dragSuppressUntil = Date.now() + 500;
+              postFast({ type: 'edgeStart', edge: edge.side });
+              postFast({ type: 'edgeMove', edge: edge.side, dy: dy });
+              if (e.cancelable) e.preventDefault();
+              return;
+            }
+            if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+              edge = null; // 横向手势优先翻页
+            }
+          }
+          if (edge && edge.decided) {
+            dragSuppressUntil = Date.now() + 500;
+            postFast({ type: 'edgeMove', edge: edge.side, dy: dy });
+            if (e.cancelable) e.preventDefault();
+            return;
+          }
+
+          if (drag.cancelled) return;
+          if (dt > 600) {
+            // 长按已进入选字流程，不再当作翻页
+            drag.cancelled = true;
+            edge = null;
+            return;
+          }
+          if (!drag.decided) {
+            if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+            if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+              var sel = doc.defaultView.getSelection();
+              if (sel && !sel.isCollapsed) {
+                drag.cancelled = true;
+                edge = null;
+                return;
+              }
+              drag.decided = true;
+              edge = null;
+              postFast({ type: 'dragStart', dx: dx, dy: dy });
+            } else if (Math.abs(dy) > Math.abs(dx)) {
+              drag.cancelled = true; // 纵向手势不翻页
+              edge = null;
+              return;
+            }
+          }
+          if (drag.decided) {
+            drag.lastDx = dx;
+            dragSuppressUntil = Date.now() + 500;
+            postFast({ type: 'dragMove', dx: dx, dy: dy });
+            // 阻止 WebView 自身的横向拖拽合成（长按选字已排除）
+            if (e.cancelable) e.preventDefault();
+          }
+        }, { passive: false, capture: true });
+
         win.addEventListener('touchend', function (e) {
-          if (!touchStart) return;
+          if (!drag) return;
           var t = e.changedTouches[0];
-          var dx = t.clientX - touchStart.x;
-          var dy = t.clientY - touchStart.y;
-          var dt = Date.now() - touchStart.t;
-          touchStart = null;
+          var dx = t.clientX - drag.x;
+          var dy = t.clientY - drag.y;
+          var dt = Date.now() - drag.t;
+          var decided = drag.decided;
+          var cancelled = drag.cancelled;
+          var edgeDecided = edge && edge.decided;
+          var edgeSide = edge ? edge.side : null;
+          drag = null;
+          edge = null;
+          if (edgeDecided) {
+            dragSuppressUntil = Date.now() + 500;
+            post({ type: 'edgeEnd', edge: edgeSide, dy: dy, dt: dt });
+            return;
+          }
+          if (cancelled) return;
+          if (decided) {
+            dragSuppressUntil = Date.now() + 500;
+            var vx = dt > 0 ? dx / dt : 0;
+            post({ type: 'dragEnd', dx: dx, dy: dy, dt: dt, vx: vx });
+            return;
+          }
+          // 轻扫兜底（touchmove 稀疏或未达判定阈值）
           if (dt > 600) return;
           if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
           var sel = doc.defaultView.getSelection();
           if (sel && !sel.isCollapsed) return;
+          dragSuppressUntil = Date.now() + 500;
           post({ type: 'swipe', dx: dx, dt: dt });
+        }, { passive: true, capture: true });
+
+        win.addEventListener('touchcancel', function () {
+          if (!drag && !edge) return;
+          var decided = drag && drag.decided && !drag.cancelled;
+          var edgeDecided = edge && edge.decided;
+          drag = null;
+          edge = null;
+          dragSuppressUntil = Date.now() + 500;
+          if (edgeDecided) {
+            post({ type: 'edgeCancel' });
+          } else if (decided) {
+            post({ type: 'dragCancel' });
+          }
         }, { passive: true, capture: true });
       });
 
@@ -281,6 +1080,8 @@
       // （实测画到屏幕外）；也不包 span（会改变元素索引破坏 epubcfi）。
       // 点击命中按矩形几何判定（hitTestMark）。
       var markClickedAt = 0;
+      // 拖拽/滑动结束后短暂抑制 click（合成事件会误触发 tap）
+      var dragSuppressUntil = 0;
       var HIGHLIGHT_FILLS = {
         yellow: 'rgba(247, 215, 116, 0.45)',
         green: 'rgba(169, 217, 139, 0.45)',
@@ -311,25 +1112,42 @@
         return found;
       }
 
-      // 划线几何矩形表（命中检测与覆盖层绘制共用；不改 DOM——包裹 span
-      // 会改变元素索引，破坏 epubcfi 的稳定性）
+      // 划线几何矩形表：markRects=父页面坐标（绘制层用），
+      // markRectsIframe=iframe 内坐标（点击命中用）。不改 DOM——包裹 span
+      // 会改变元素索引，破坏 epubcfi 的稳定性
       var markRects = [];
+      var markRectsIframe = [];
 
       function collectRects(item) {
         var view = findViewForCfi(item.cfiRange);
-        if (!view || !view.contents) return;
+        if (!view || !view.contents) {
+          console.error('QYERR:annotation.noView id=' + item.id +
+            ' cfi=' + item.cfiRange);
+          return;
+        }
         try {
           var range = view.contents.range(item.cfiRange);
           var rects = range.getClientRects();
           for (var i = 0; i < rects.length; i++) {
             var r = rects[i];
             if (r.width < 1 || r.height < 1) continue;
+            // iframe 内坐标（命中检测用）与父页面坐标（绘制用）各存一份：
+            // 点击事件在 iframe 里，矩形绘制在父文档层，两套坐标系并存
+            markRectsIframe.push({
+              cfi: item.cfiRange,
+              id: item.id,
+              left: r.left,
+              top: r.top,
+              width: r.width,
+              height: r.height
+            });
+            var p = iframeToViewport(view, r.left, r.top);
             markRects.push({
               cfi: item.cfiRange,
               id: item.id,
               color: item.color,
-              left: r.left,
-              top: r.top,
+              left: p.x,
+              top: p.y,
               width: r.width,
               height: r.height
             });
@@ -343,6 +1161,7 @@
       function renderMarks() {
         if (!rendition) return;
         markRects = [];
+        markRectsIframe = [];
         highlightRegistry.forEach(collectRects);
         var layer = ensureMarksLayer();
         layer.innerHTML = '';
@@ -358,6 +1177,11 @@
           });
         }
         markRects.forEach(function (m) {
+          // 只画屏幕内的矩形（其它列的划线由翻页后的 relocated 重算）
+          if (m.left > window.innerWidth || m.top > window.innerHeight ||
+              m.left + m.width < 0 || m.top + m.height < 0) {
+            return;
+          }
           var box = document.createElement('div');
           box.style.cssText =
             'position:absolute;border-radius:2px;background:' +
@@ -374,8 +1198,9 @@
 
       // 点击点落在某条划线上 → 返回该条（用于 markClicked 上报）
       function hitTestMark(x, y) {
-        for (var i = 0; i < markRects.length; i++) {
-          var m = markRects[i];
+        // x/y 为 iframe 内坐标（click 事件的 clientX/clientY）
+        for (var i = 0; i < markRectsIframe.length; i++) {
+          var m = markRectsIframe[i];
           if (x >= m.left && x <= m.left + m.width &&
               y >= m.top && y <= m.top + m.height) {
             return m;
@@ -470,15 +1295,25 @@
 
       function currentView() {
         if (!rendition) return null;
-        // views() 是 epub.js 自定义集合：用 all()，不支持下标
+        // views() 是 epub.js 自定义集合：用 all()，不支持下标。
+        // 优先取「当前所在章节」的视图：滚动排版（scrolled-doc）所有章节
+        // 视图共存，取第一个会永远拿到第一章。
         var views = rendition.views().all();
+        var idx = -1;
+        try {
+          if (lastLocation && lastLocation.start) idx = lastLocation.start.index;
+        } catch (e) { idx = -1; }
+        var fallback = null;
         for (var i = 0; i < views.length; i++) {
-          if (views[i] && views[i].contents && views[i].contents.document &&
-              views[i].contents.document.body) {
-            return views[i];
+          var v = views[i];
+          if (!v || !v.contents || !v.contents.document ||
+              !v.contents.document.body) {
+            continue;
           }
+          if (idx >= 0 && v.index === idx) return v;
+          if (!fallback) fallback = v;
         }
-        return null;
+        return fallback;
       }
 
       function segmentSentences(view) {
@@ -551,8 +1386,9 @@
             for (var i = 0; i < rects.length; i++) {
               var r = rects[i];
               if (r.width < 1 || r.height < 1) continue;
-              ttsRects.push({ left: r.left, top: r.top, width: r.width,
-                height: r.height });
+              var p = iframeToViewport(view, r.left, r.top);
+              ttsRects.push({ left: p.x, top: p.y,
+                width: r.width, height: r.height });
             }
           } catch (e) { postError('tts.rect', e); }
           renderMarks();
@@ -609,16 +1445,10 @@
       var initial = null;
       try { initial = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { initial = null; }
       book.ready.then(function () {
-        // locations 用于百分比与进度条，异步生成不阻塞阅读
-        book.locations.generate(1600).then(function (locations) {
-          // generate() 返回 location CFI 数组
-          locationsTotal = locations.length;
-          post({ type: 'locationsReady', total: locations.length });
-          // percent 在首屏 relocated 时（locations 未就绪）为空，这里重报一次
-          reportLocation();
-        }).catch(function (e) { postError('locations.generate', e); });
+        // 不生成整本书的 locations：那是「把全书渲染一遍」的活（手机上几十秒），
+        // 会和首屏渲染抢 WebView 主线程。百分比/进度改用页级 pos。
         return initial
-          ? rendition.display(initial.cfi || initial.href || initial.percent || undefined)
+          ? displayLocator(initial)
           : rendition.display();
       }).then(function () {
         post({ type: 'ready' });
@@ -637,32 +1467,134 @@
     applyStyleToRendition(JSON.parse(styleJson));
   }
 
-  function gotoLocator(locatorJson) {
+  /// 按 Locator 定位：章内页码优先（同一章各页 CFI 可能都是章首）。
+  /// 打开书籍时的恢复定位可能要走多次 next()（旧进度按页差逐页翻），
+  /// 过程肉眼可见（页面从头滚过来）。定位期间把视图 visibility:hidden
+  /// （布局尺寸保留，翻页步进不受影响），落定后显示。
+  var restoringViews = false;
+
+  function viewsVisible(visible) {
     if (!rendition) return;
     try {
-      var loc = JSON.parse(locatorJson);
-      if (loc.cfi) {
-        rendition.display(loc.cfi).catch(function () {
-          if (loc.percent != null) {
-            rendition.display(loc.percent).catch(function (e2) {
-              postError('goto.fallback', e2);
-            });
-          } else if (loc.href) {
-            rendition.display(loc.href).catch(function (e3) {
-              postError('goto.fallback', e3);
-            });
-          }
-        });
-      } else if (loc.percent != null) {
-        rendition.display(loc.percent);
-      } else if (loc.href) {
-        rendition.display(loc.href);
-      } else {
-        rendition.display();
+      var views = rendition.views().all();
+      for (var i = 0; i < views.length; i++) {
+        var v = views[i];
+        if (!v || !v.displayed) continue;
+        if (visible) {
+          if (v.show) v.show();
+        } else {
+          if (v.hide) v.hide();
+        }
       }
-    } catch (e) {
-      postError('goto.parse', e);
+      restoringViews = !visible;
+    } catch (e) {}
+  }
+
+  /// 返回 Promise，供首渲 / 重排后的恢复链等待。
+  function displayLocator(loc) {
+    if (!rendition) return Promise.resolve();
+    if (!loc) {
+      try { return rendition.display(); } catch (e) {
+        postError('goto.empty', e);
+        return Promise.resolve();
+      }
     }
+    // 多页恢复：先隐藏视图（用户看不到翻页过程），落定后显示
+    var needsRestore = (loc.page > 1) || (loc.page < 1 && loc.pos != null && loc.href);
+    if (needsRestore) viewsVisible(false);
+    var reveal = function () {
+      if (needsRestore) viewsVisible(true);
+    };
+    var page = loc.page || 0;
+    if (loc.href && page < 1 && loc.pos != null) {
+      // 兼容旧进度（没有 page）：用 pos 反推章内页。
+      // pos = (章索引 + 章内页/总页) / spine 长度
+      syncDepth++;
+      var finishPos = function () {
+        syncDepth = Math.max(0, syncDepth - 1);
+        reveal();
+        try {
+          var cl = rendition.currentLocation();
+          if (cl && cl.start) postRelocated(cl);
+        } catch (e) {}
+      };
+      return rendition.display(loc.href).then(function () {
+        return waitRendered();
+      }).then(function () {
+        forcePaginate();
+        // 总页数用容器几何（唯一和"能否滚到"一致的口径）
+        var g = scrollGeom();
+        var total = g ? g.total : 0;
+        var spineLen = (book.spine.spineItems || []).length;
+        var frac = loc.pos;
+        if (spineLen > 0 && loc.chapterIndex != null) {
+          frac = loc.pos * spineLen - loc.chapterIndex;
+        }
+        frac = Math.max(0, Math.min(1, frac));
+        var target = total > 0
+          ? Math.max(1, Math.min(total, Math.round(frac * total)))
+          : 1;
+        var chain = Promise.resolve();
+        for (var i = 0; i < target - 1; i++) {
+          chain = chain.then(function () { stepScrollPages(1); });
+        }
+        return chain;
+      }).then(finishPos, function (e) {
+        postError('goto.pos', e);
+        finishPos();
+      });
+    }
+    if (loc.href && page > 1) {
+      // 多页恢复：中间的 display/next 不上报，完成后只报最终页位
+      syncDepth++;
+      var finish = function () {
+        syncDepth = Math.max(0, syncDepth - 1);
+        reveal();
+        try {
+          var cl = rendition.currentLocation();
+          if (cl && cl.start) postRelocated(cl);
+        } catch (e) {}
+      };
+      return rendition.display(loc.href).then(function () {
+        return waitRendered();
+      }).then(function () {
+        forcePaginate();
+        // 保存的 page 可能来自旧的字号/边距（当时章尾页数更多）。不夹紧
+        // 就会多走几页 → 恢复位置落到**下一章**（实测存 4/4、实际只有
+        // 3 页 → 打开后直接跑到下一章第 1 页）。
+        var g = scrollGeom();
+        var want = page;
+        if (g && g.total > 0 && want > g.total) want = g.total;
+        if (g && want < 1) want = 1;
+        var chain = Promise.resolve();
+        for (var i = 0; i < want - 1; i++) {
+          chain = chain.then(function () { stepScrollPages(1); });
+        }
+        return chain;
+      }).then(finish, function (e) {
+        postError('goto.page', e);
+        finish();
+      });
+    }
+    reveal();
+    var target = loc.cfi || loc.href || (loc.percent != null ? loc.percent : undefined);
+    try {
+      var p = target === undefined ? rendition.display() : rendition.display(target);
+      if (p && p.then) {
+        return p.catch(function (e) { postError('goto.cfi', e); });
+      }
+      return Promise.resolve();
+    } catch (e) {
+      postError('goto.cfi', e);
+      return Promise.resolve();
+    }
+  }
+
+  function gotoLocator(locatorJson) {
+    if (!rendition) return;
+    var loc = null;
+    try { loc = JSON.parse(locatorJson); } catch (e) { loc = null; }
+    displayLocator(loc);
   }
 
   function gotoHref(href) {
@@ -675,21 +1607,147 @@
     rendition.display(p);
   }
 
+  /// 下发全书字数（导入时 Dart 解析得到）。
+  ///
+  /// 原来「全书页数估算」靠 epub.js 的 locations.length * 1600 反推全书字数，
+  /// 而生成 locations 要把整本书渲染一遍（手机几十秒）。导入时已经解析过
+  /// 正文，直接下发字数即可，估算精度不变、渲染成本归零。
+  function setTotalChars(n) {
+    totalChars = Math.max(0, Math.floor(Number(n) || 0));
+  }
+
+  /// 打开指定章；该章是空占位章时往后找有正文的章。
+  ///
+  /// spine 里常有 0 字的占位章（版权页、目录等），停上去就是一片空白。
+  /// gotoAdjacentChapter 是「当前章空了 → 往后找」，这里要的是「打开目标章，
+  /// 顺手判断它是不是空的」。
+  function displayChapterWithText(href, guard) {
+    guard = guard || 0;
+    if (guard > 8) return Promise.resolve(false);
+    return Promise.resolve(rendition.display(href)).then(function () {
+      return waitRendered();
+    }).then(function () {
+      try { rendition.manager.updateLayout(); } catch (e) {}
+      forcePaginate();
+      var hasText = false;
+      try {
+        var vs = rendition.views().all();
+        for (var i = 0; i < vs.length; i++) {
+          var b = vs[i] && vs[i].document && vs[i].document.body;
+          if (!b) continue;
+          if ((b.textContent || '').trim().length > 10) { hasText = true; break; }
+        }
+      } catch (e) {}
+      if (hasText) return true;
+      var next = adjacentHref(href, 1);
+      if (!next) return false;
+      return displayChapterWithText(next, guard + 1);
+    }, function (e) {
+      postError('chapter.skip', e);
+      var next = adjacentHref(href, 1);
+      if (!next) return false;
+      return displayChapterWithText(next, guard + 1);
+    });
+  }
+
+  /// 按页级位置跳转（pos = (章索引 + 章内页/总页) / spine 长度）。
+  ///
+  /// 不用 gotoPercent：那走的是 epub.js 的 locations 百分比（字符级），
+  /// 而现在的 percent 就是页级 pos，两者口径必须一致，否则滑杆落点会错位。
+  /// 目标章 display 之后量出该章总页数，再步进到目标页；步进是同步的
+  /// scrollLeft 赋值（微任务里连做），中间位置不会被绘制出来。
+  function gotoPos(p) {
+    if (!rendition || !book) return;
+    var items = (book.spine && book.spine.spineItems) || [];
+    if (!items.length) return;
+    var pos = Math.max(0, Math.min(1, Number(p) || 0));
+    var x = pos * items.length;
+    var idx = Math.min(items.length - 1, Math.floor(x));
+    var item = items[idx];
+    if (!item) return;
+    var frac = x - idx; // 章内比例
+    syncDepth++;
+    var finish = function () {
+      syncDepth = Math.max(0, syncDepth - 1);
+      try {
+        var cl = rendition.currentLocation();
+        if (cl && cl.start) postRelocated(cl);
+      } catch (e) {}
+    };
+    try {
+      displayChapterWithText(item.href).then(function () {
+        forcePaginate();
+        var g = scrollGeom();
+        var total = g ? g.total : 0;
+        var target = total > 0
+          ? Math.max(1, Math.min(total, Math.round(frac * total)))
+          : 1;
+        var chain = Promise.resolve();
+        for (var i = 0; i < target - 1; i++) {
+          chain = chain.then(function () { stepScrollPages(1); });
+        }
+        return chain;
+      }).then(finish, function (e) {
+        postError('goto.pos', e);
+        finish();
+      });
+    } catch (e) {
+      postError('goto.pos', e);
+      finish();
+    }
+  }
+
+  /// 取当前阅读位置（Locator JSON）——退出阅读时用来落库最终进度。
+  ///
+  /// 退出时不能只信最后一次 relocated：改字号、跳页、翻章之后事件可能还没
+  /// 送达 Dart。这里同步问一次页面，拿当前真实位置落库。
+  function currentLocatorJson() {
+    if (!rendition) return null;
+    var loc = (lastLocation && lastLocation.start) ? lastLocation : null;
+    if (!loc) {
+      try { loc = rendition.currentLocation(); } catch (e) { loc = null; }
+    }
+    if (!loc || !loc.start) return null;
+    try {
+      var out = makeLocator(loc);
+      var info = pageInfo(loc, out);
+      out.page = info.page;
+      out.pages = info.pages;
+      out.bookPage = info.bookPage;
+      out.bookPages = info.bookPages;
+      // 页码以容器真实滚动位置为准（同 postRelocated），位置百分比跟着重算
+      var sp = scrollPageNow();
+      if (sp > 0 && out.pages > 0 && out.chapterIndex != null) {
+        out.page = sp;
+        var items = (book.spine && book.spine.spineItems) || [];
+        if (items.length > 0) {
+          out.pos = (out.chapterIndex + sp / out.pages) / items.length;
+          if (locationsTotal <= 0) out.percent = out.pos;
+        }
+      }
+      return JSON.stringify(out);
+    } catch (e) {
+      postError('locator.current', e);
+      return null;
+    }
+  }
+
   /// 重报当前位置（locations 就绪后补 percent 用）。
   /// currentLocation() 同步返回 location 对象（部分版本可能包 Promise，兼容处理）。
   function reportLocation() {
     if (!rendition) return;
     var handle = function (loc) {
-      if (loc && loc.start) {
-        post({
-          type: 'relocated',
-          locator: makeLocator(loc),
-          atStart: loc.atStart === true,
-          atEnd: loc.atEnd === true
-        });
-      }
+      if (loc && loc.start) postRelocated(loc);
     };
     try {
+      // ⚠️ currentLocation() 在翻页后会**滞后一页**（实测报出章首页）。
+      // 交换双池后立刻调它，会把可视层的真实页位覆盖成旧页 → 隐藏层对齐
+      // 的目标页就错了 → 同步链往回走 → 翻页白屏。
+      // 优先用最近一次 relocated 拿到的真实位置。
+      if (lastLocation && lastLocation.start) {
+        handle(lastLocation);
+        return;
+      }
       var loc = rendition.currentLocation();
       if (loc && typeof loc.then === 'function') {
         loc.then(handle).catch(function (e) { postError('report.location', e); });
@@ -701,27 +1759,409 @@
     }
   }
 
-  function nextPage() {
-    if (!rendition) return;
-    rendition.next();
+  /// 章内翻一页：直接改分栏容器的 scrollLeft。
+  ///
+  /// **不要用 rendition.next()/prev()**：它们在「已经是最后一页」或容器
+  /// 暂时不可滚时，会走 section 切换分支 → manager.clear() 清空所有视图 →
+  /// 屏幕整片空白，而且新文档的点击监听还没挂上 → 整页点不动（实测卡死）。
+  /// 直接滚 scrollLeft 永远安全：最多滚不动，绝不会清空视图。
+  function stepScrollPages(deltaPages) {
+    try {
+      var mg = rendition && rendition.manager;
+      var c = mg && mg.container;
+      var d = mg && mg.layout && mg.layout.delta;
+      if (!c || !(d > 0)) return false;
+      var max = Math.max(0, c.scrollWidth - c.clientWidth);
+      var target = Math.round(c.scrollLeft + deltaPages * d);
+      if (target < 0) target = 0;
+      if (target > max) target = max;
+      if (Math.abs(target - c.scrollLeft) < 1) {
+        reportLocation();
+        return false;
+      }
+      c.scrollLeft = target;
+      if (mg.scrolled !== undefined) mg.scrolled = true;
+      // WebView 上 scroll 事件偶尔不派发，主动补一次位置上报
+      setTimeout(reportLocation, 80);
+      return true;
+    } catch (e) {
+      postError('step.scroll', e);
+      return false;
+    }
   }
 
+  /// 本章第 1 页 / 最后一页（epub.js 的 displayed 信息；未知返回 null）。
+  function chapterPageState() {
+    try {
+      var cl = rendition.currentLocation();
+      var d = cl && cl.start && cl.start.displayed;
+      if (!d || !d.page || !d.total) return null;
+      return { page: d.page, total: d.total, href: cl.start.href };
+    } catch (e) {}
+    return null;
+  }
+
+  /// 同 spine 里的相邻章 href（delta=+1 下一章 / -1 上一章）。
+  function adjacentHref(href, delta) {
+    try {
+      var items = (book.spine && book.spine.spineItems) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].href === href) {
+          var t = i + delta;
+          return t >= 0 && t < items.length ? items[t].href : null;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /// 前翻一页。
+  ///
+  /// 章末不能用 rendition.next()：它内部切 section 时不等待新章节内容渲染，
+  /// WebView 会停在一张**空白页**上，而且新文档的点击监听还没挂上 →
+  /// 整页点不动（实测卡死，只能退出重进）。
+  /// 章末改为显式 display(下一章) + 等渲染完成，落定后补报位置。
+  /// 跳到 fromHref 之后的第一个「有内容」的章节。
+  ///
+  /// 有些 EPUB 的 spine 里混着空占位文件（实测某章下一项是
+  /// `text/82eebc37-....html`，正文为空）：display() 到它只会得到一片
+  /// 空白、容器也不可滚（sw==cw），用户看到的就是白屏。
+  /// 这里逐项往后找，直到正文文本长度足够为止。
+  function gotoAdjacentChapter(fromHref, delta, guard) {
+    guard = guard || 0;
+    if (guard > 8) return Promise.resolve(false);
+    var href = adjacentHref(fromHref, delta);
+    if (!href) return Promise.resolve(false);
+    return Promise.resolve(rendition.display(href)).then(function () {
+      return waitRendered();
+    }).then(function () {
+      try { rendition.manager.updateLayout(); } catch (e) {}
+      forcePaginate();
+      var hasText = false;
+      var len = 0;
+      try {
+        var vs = rendition.views().all();
+        for (var i = 0; i < vs.length; i++) {
+          var b = vs[i] && vs[i].document && vs[i].document.body;
+          if (!b) continue;
+          var t = (b.textContent || '').trim();
+          if (t.length > len) len = t.length;
+          if (t.length > 10) { hasText = true; break; }
+        }
+      } catch (e) {}
+      if (hasText) return true;
+      return gotoAdjacentChapter(href, delta, guard + 1);
+    }, function (e) {
+      postError('chapter.skip', e);
+      return gotoAdjacentChapter(href, delta, guard + 1);
+    });
+  }
+
+  function nextPage() {
+    if (!rendition) return;
+    var g = scrollGeom();
+    var st = g
+      ? { page: g.page, total: g.total,
+          href: chapterPageState() ? chapterPageState().href : null }
+      : chapterPageState();
+    // 章内：直接滚一页（绝不会清空视图）
+    if (g && g.page < g.total && stepScrollPages(1)) return;
+    if (st && st.page >= st.total) {
+      syncDepth++;
+      gotoAdjacentChapter(st.href, 1, 0).then(function (ok) {
+        syncDepth = Math.max(0, syncDepth - 1);
+        reportLocation();
+      }, function (e) {
+        syncDepth = Math.max(0, syncDepth - 1);
+        postError('next.chapter', e);
+        reportLocation();
+      });
+      return;
+    }
+    stepScrollPages(1);
+  }
+
+  /// 后翻一页（章首同理：显式 display 上一章并定位到末页）。
   function prevPage() {
     if (!rendition) return;
-    rendition.prev();
+    var g = scrollGeom();
+    var st = g
+      ? { page: g.page, total: g.total,
+          href: chapterPageState() ? chapterPageState().href : null }
+      : chapterPageState();
+    if (g && g.page > 1 && stepScrollPages(-1)) return;
+    if (st && st.page <= 1) {
+      syncDepth++;
+      gotoAdjacentChapter(st.href, -1, 0).then(function (ok) {
+        // 上一章的末页：滚到最右
+        try {
+          var g2 = scrollGeom();
+          var mg2 = rendition.manager;
+          if (g2 && mg2 && mg2.container && mg2.layout && mg2.layout.delta > 0) {
+            var max2 = Math.max(0, g2.scrollWidth - g2.clientWidth);
+            mg2.container.scrollLeft = max2;
+          }
+        } catch (e3) {}
+        syncDepth = Math.max(0, syncDepth - 1);
+        reportLocation();
+      }, function (e) {
+        syncDepth = Math.max(0, syncDepth - 1);
+        postError('prev.chapter', e);
+        reportLocation();
+      });
+      return;
+    }
+    stepScrollPages(-1);
+  }
+
+  /// 强制视图重新分栏，并把 iframe 铺成整章宽度。
+  ///
+  /// epub.js 自己的顺序是 expand() → format()：expand() 在「套用
+  /// column-width 之前」量正文宽度，这时正文还是单列 → 量到一页宽 →
+  /// iframe 被设成一页宽 → 正文分成多列后溢出 iframe，改成 iframe 文档
+  /// 内部横向滚动；而 epub 的分栏容器（外层）宽度没变、
+  /// scrollWidth == clientWidth → manager.scrollBy() 滚不动 →
+  /// next() 判定「没地方可滚」→ **跳到下一节（下一章）**。
+  /// 后果：页码错乱（实测 6/1）、翻页变成跳章、隐藏层永远对不齐
+  /// （ready=false → 盖骨架 → 白屏）。桌面浏览器不触发，Android WebView 必现。
+  ///
+  /// 修法：先 format()（正文真的分成多列）再 expand()（此时量到整章宽度，
+  /// iframe 铺满整章，外层容器就能横向滚动）。
+  function forcePaginate(view) {
+    try {
+      var mgr = rendition && rendition.manager;
+      // 重排会改变 iframe 尺寸 → 浏览器可能把滚动位置重置/钳位，
+      // 页面会「跳回空白处」（实测翻页后整页空白、点不动）。
+      // 所以先记住滚动位置，重排完再摆回去。
+      var keepScroll = mgr && mgr.container ? mgr.container.scrollLeft : 0;
+      var views = view ? [view] : (rendition ? rendition.views().all() : []);
+      var mgrLay = mgr && mgr.layout;
+      for (var i = 0; i < views.length; i++) {
+        var v = views[i];
+        if (!v || !v.contents || !v.document) continue;
+        // 新章节的视图可能带着 0×0 的 iframe 就完成 display()（实测
+        // views=[9:0]）。epub.js 的 expand() 在 lockedWidth 未初始化时
+        // 不会 reframe，于是 iframe 永远是 0 宽 → 整章空白、点不动。
+        // 这里先按一页尺寸把它撑开，再走分栏与铺宽。
+        if (v.iframe && !v.iframe.offsetWidth && mgrLay &&
+            mgrLay.width > 0 && mgrLay.height > 0) {
+          v.iframe.style.width = mgrLay.width + 'px';
+          v.iframe.style.height = mgrLay.height + 'px';
+          v.element.style.width = mgrLay.width + 'px';
+          v.element.style.height = mgrLay.height + 'px';
+          v._width = mgrLay.width;
+          v._height = mgrLay.height;
+        }
+        if (v.layout && v.layout.format) v.layout.format(v.contents);
+        // 必须**显式**把视图铺成整章宽度。不能只靠 expand()：
+        // 它内部有「尺寸没变就不 reframe」的判断，而隐藏层常常刚好判成
+        // 「没变」→ iframe 仍是一页宽 → 正文分栏后溢出到 iframe 外面 →
+        // 外层容器 scrollWidth == clientWidth → next() 一步都滚不动，
+        // 同步链永远差几页（实测每 5s 重试一次、翻页出空白）。
+        try {
+          var cdoc = v.contents.document;
+          var totalW = cdoc.documentElement.scrollWidth || cdoc.body.scrollWidth;
+          var layH = (v.layout && v.layout.height) ||
+            (v.iframe && v.iframe.offsetHeight) || 0;
+          if (totalW > 0 && v.iframe) {
+            v.element.style.width = totalW + 'px';
+            v.iframe.style.width = totalW + 'px';
+            if (layH > 0) {
+              v.element.style.height = layH + 'px';
+              v.iframe.style.height = layH + 'px';
+            }
+            v._width = totalW;
+            v._height = layH;
+          }
+        } catch (e2) {}
+      }
+      if (mgr && mgr.container && keepScroll) {
+        try { mgr.container.scrollLeft = keepScroll; } catch (e) {}
+      }
+    } catch (e) {
+      postError('paginate.force', e);
+    }
+  }
+
+  /// 等新章节正文排版完成（内容分成多列、容器能横向滚动）。
+  ///
+  /// epub.js 的 display() 在 iframe 文档还没排版完时就 resolve：此时正文
+  /// 只有一列宽，容器 scrollWidth == clientWidth → manager.next() 发现
+  /// 「没地方可滚」→ 改成跳到**下一节**（下一章）→ 页码整个错位。
+  /// 实测隐藏层因此永远对不齐（ready=false → 翻页盖骨架 → 白屏）。
+  ///
+  /// 判据：视图 iframe 的宽度稳定（连续两次采样不变且 > 0），
+  /// 说明 expand()/format() 已经把正文铺成多列。
+  function waitForPaginated() {
+    return new Promise(function (resolve) {
+      var tries = 0;
+      var lastW = -1;
+      var stable = 0;
+      function check() {
+        tries++;
+        var w = 0;
+        try {
+          var views = rendition && rendition.views().all();
+          var vv = views && views[views.length - 1];
+          if (vv && vv.iframe) w = vv.iframe.offsetWidth;
+        } catch (e) {}
+        if (w > 0 && w === lastW) {
+          stable++;
+          if (stable >= 2) { resolve(); return; }
+        } else {
+          stable = 0;
+        }
+        lastW = w;
+        if (tries < 80) setTimeout(check, 50);
+        else resolve();
+      }
+      setTimeout(check, 30);
+    });
   }
 
   /// 与目标位置对齐后前进一页（reserve 池同步用）。
-  function syncNext(locatorJson) {
-    if (!rendition) return;
+  /// CFI 在同一章各页可能相同（epub.js 的 mapping.start 常是章首），
+  /// 因此用 `page`（章内页码）驱动：目标页 = 可视页的下一页。
+  /// 完成后上报 syncDone（带 seq 与最终页位）。
+  function syncNext(locatorJson, seq) {
+    if (!rendition) {
+      postSyncDone(seq, false);
+      return;
+    }
     var loc = null;
     try { loc = locatorJson ? JSON.parse(locatorJson) : null; } catch (e) { loc = null; }
-    var aligned = (loc && (loc.cfi || loc.href || loc.percent != null))
-      ? rendition.display(loc.cfi || loc.href || loc.percent)
-      : rendition.display();
-    aligned.then(function () { rendition.next(); }).catch(function () {
-      rendition.display();
+    var hasTarget = loc && (loc.cfi || loc.href || loc.percent != null);
+    var targetHref = loc ? loc.href : null;
+    var targetPage = loc && loc.page ? loc.page : 0;
+    var targetPages = loc && loc.pages ? loc.pages : 0;
+    var gen = ++syncGen;
+    pendingSyncSeq = 0; // 新同步作废旧链等待中的 syncDone
+    syncDepth++;
+
+    // 等本章真的分成多列并且容器可以横向滚动（否则 next() 一步都走不动，
+    // 步数会被吞掉 → 隐藏层少走一页 → 永远对不齐）。
+    function waitScrollable() {
+      return new Promise(function (resolve) {
+        var tries = 0;
+        function check() {
+          tries++;
+          var ok = false;
+          try {
+            var c = rendition.manager && rendition.manager.container;
+            if (c && c.scrollWidth > c.clientWidth + 1) ok = true;
+          } catch (e) {}
+          if (ok || tries >= 120) { resolve(); return; }
+          setTimeout(check, 25);
+        }
+        setTimeout(check, 0);
+      });
+    }
+
+    // 驱动到「绝对页码」而不是「走 N 步」：每一步之后都用容器真实滚动
+    // 位置校验并自我纠正。步数法一旦被吞掉一步就永远差一页（实测）。
+    function settleToPage(want, genRef) {
+      return new Promise(function (resolve) {
+        var g0 = scrollGeom();
+        if (g0 && want > g0.total) want = g0.total; // 不能超过真实总页数
+        if (want < 1) want = 1;
+        var guard = 0;
+        function step() {
+          if (gen !== genRef) { resolve(); return; }
+          if (guard++ > 60) { resolve(); return; }
+          var cur = scrollPageNow();
+          if (cur === 0) { setTimeout(step, 40); return; }
+          if (cur === want) { resolve(); return; }
+          if (!stepScrollPages(cur < want ? 1 : -1)) { resolve(); return; }
+          setTimeout(step, 30);
+        }
+        step();
+      });
+    }
+
+    var run = function () {
+      if (gen !== syncGen) return Promise.resolve();
+      var sameSection = false;
+      var curPage = 0;
+      var curHref = null;
+      try {
+        var cl = rendition.currentLocation();
+        if (cl && cl.start) {
+          curHref = cl.start.href;
+          sameSection = sameHrefLoose(curHref, targetHref);
+          curPage = cl.start.displayed ? (cl.start.displayed.page || 0) : 0;
+        }
+      } catch (e) {}
+      logSyncTiming(seq, 'plan same=' + sameSection + ' cur=' + curPage +
+        ' tgt=' + targetPage + '/' + targetPages +
+        ' href=' + (targetHref || '-'), 0);
+
+      if (!hasTarget) {
+        return Promise.resolve(rendition.display()).then(function () {
+          return waitScrollable();
+        }).then(function () { forcePaginate(); });
+      }
+
+      var atChapterEnd = targetPage >= 1 && targetPages >= 1 &&
+        targetPage >= targetPages;
+      var nextHref = atChapterEnd ? adjacentHref(targetHref, 1) : null;
+
+      // 目标章：章末 → 下一章第 1 页；否则 → 同章第 targetPage+1 页
+      var wantHref = atChapterEnd ? nextHref : targetHref;
+      var wantPage = atChapterEnd ? 1 : (targetPage ? targetPage + 1 : 0);
+
+      var chain;
+      if (atChapterEnd && !nextHref) {
+        // 已经是全书最后一章末页：没有下一页，停在原处即可
+        return Promise.resolve();
+      }
+      if (sameSection && !atChapterEnd) {
+        chain = Promise.resolve();
+      } else {
+        chain = Promise.resolve(rendition.display(wantHref))
+          .then(function () { return waitScrollable(); })
+          .then(function () { forcePaginate(); });
+      }
+      return chain.then(function () {
+        if (gen !== syncGen) return;
+        if (wantPage > 0) return settleToPage(wantPage, gen);
+        return settleToPage(scrollPageNow() + 1, gen);
+      });
+    };
+
+    var tail = syncTail.catch(function () {}).then(run);
+    syncTail = tail;
+    tail.then(function () {
+      syncDepth = Math.max(0, syncDepth - 1);
+      if (gen !== syncGen) return; // 已被更新的同步取代
+      // 等最终页位的 relocated 上报 syncDone；600ms 兜底（目标页
+      // 与当前位置相同时没有新的 relocated）
+      pendingSyncSeq = seq;
+      setTimeout(function () {
+        if (pendingSyncSeq === seq) {
+          pendingSyncSeq = 0;
+          postSyncDone(seq, gen === syncGen);
+        }
+      }, 600);
+    }).catch(function (e) {
+      syncDepth = Math.max(0, syncDepth - 1);
+      // 不覆盖更新链的等待状态（新同步已把 pendingSyncSeq 换成新 seq）
+      if (pendingSyncSeq === 0 || pendingSyncSeq === seq) pendingSyncSeq = 0;
+      postError('sync.next', e);
+      postSyncDone(seq, false);
     });
+  }
+
+  /// 同步耗时诊断：只在「慢」时记一条（正常路径不打日志，避免刷屏）。
+  /// 定位「隐藏层对齐要好几秒」到底慢在哪一步。
+  var _lastSyncLogAt = 0;
+  function logSyncTiming(seq, label, ms) {
+    try {
+      var now = Date.now();
+      if (ms < 300 && now - _lastSyncLogAt < 3000) return;
+      _lastSyncLogAt = now;
+      console.error('QYERR:sync.timing seq=' + seq + ' ' + label + ' ' +
+        Math.round(ms) + 'ms');
+    } catch (e) {}
   }
 
   post({ type: 'bridgeReady' });

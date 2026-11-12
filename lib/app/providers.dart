@@ -21,7 +21,6 @@ import '../data/repositories/progress_repository_impl.dart';
 import '../data/repositories/search_repository_impl.dart';
 import '../data/repositories/stats_repository_impl.dart';
 import '../data/repositories/sync_repository_impl.dart';
-import '../data/sync/local_object_store.dart';
 import '../data/sync/s3_object_store.dart';
 import '../data/sync/sync_backend_store.dart';
 import '../domain/repositories/annotation_repository.dart';
@@ -124,32 +123,32 @@ Future<String> syncSpaceId(Ref ref) async {
 @Riverpod(keepAlive: true)
 SyncBackendStore syncBackendStore(Ref ref) => SyncBackendStore();
 
-/// 对象存储：按配置切本地桶 / S3（M6）；S3 配置不完整时回退本地桶。
+/// 对象存储：只用阿里云 OSS（已移除本地桶后端）；没配好时抛错让界面提示。
 @Riverpod(keepAlive: true)
 Future<ObjectStore> objectStore(Ref ref) async {
   final store = ref.watch(syncBackendStoreProvider);
   final config = await store.loadConfig();
-  final spaceId = await ref.watch(syncSpaceIdProvider.future);
-  if (config.type == SyncBackendType.s3 && config.s3Complete) {
-    final creds = await store.loadCredentials();
-    if (creds.configured) {
-      return S3ObjectStore(
-        endPoint: config.endPoint,
-        bucket: config.bucket,
-        prefix: config.prefix,
-        accessKey: creds.accessKey,
-        secretKey: creds.secretKey,
-        region: config.region,
-        useSSL: config.useSSL,
-        port: config.port,
-      );
-    }
+  if (!config.s3Complete) {
+    throw StateError('请先在「同步设置 → 存储」里填好 OSS 端点与桶名');
   }
-  final dir = await getApplicationSupportDirectory();
-  return LocalObjectStore(
-    Directory(p.join(dir.path, 'sync_store', spaceId)),
+  final creds = await store.loadCredentials();
+  if (!creds.configured) {
+    throw StateError('请先填 AccessKey / SecretKey');
+  }
+  return S3ObjectStore(
+    endPoint: config.endPoint,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    accessKey: creds.accessKey,
+    secretKey: creds.secretKey,
+    region: config.region,
+    useSSL: config.useSSL,
+    port: config.port,
+    pathStyle: false,
   );
 }
+
+
 
 /// 同步仓储单例。
 @Riverpod(keepAlive: true)

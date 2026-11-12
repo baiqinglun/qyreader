@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../app/theme/motion.dart';
 import '../../../app/theme/reading_theme.dart';
 
 /// 弹出笔记编辑；[initial] 为既有内容（编辑态），返回 null 表示取消。
@@ -14,9 +15,10 @@ Future<String?> showNoteEditorSheet(
   return showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
+    sheetAnimationStyle: kSmoothSheetAnimation,
     backgroundColor: theme.chromeSurface,
     shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
     ),
     builder: (sheetContext) => _NoteEditor(theme: theme, initial: initial),
   );

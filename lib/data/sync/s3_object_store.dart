@@ -1,4 +1,4 @@
-/// S3 兼容对象存储（minio SDK；兼容 AWS S3 / R2 / B2 / MinIO）。
+/// S3 兼容对象存储（minio SDK；兼容阿里云 OSS / AWS S3 / R2 / B2 / MinIO）。
 ///
 /// 桶内所有 key 都在构造时给定的前缀下（推荐给应用分配独立前缀/桶）。
 /// 凭据由上层从 flutter_secure_storage 读取后注入，本类不落盘。
@@ -21,6 +21,7 @@ class S3ObjectStore implements ObjectStore {
     this.prefix = '',
     this.region,
     this.useSSL = true,
+    this.pathStyle = true,
     int? port,
   }) : _minio = Minio(
           endPoint: endPoint,
@@ -29,6 +30,9 @@ class S3ObjectStore implements ObjectStore {
           port: port,
           useSSL: useSSL,
           region: region,
+          // 阿里云 OSS / Cloudflare R2 只认虚拟主机风格（bucket 拼在域名前），
+          // MinIO 默认路径风格；由配置决定。
+          pathStyle: pathStyle,
         );
 
   /// 服务端点（域名或 IP，不含协议）。
@@ -51,6 +55,9 @@ class S3ObjectStore implements ObjectStore {
 
   /// 是否 HTTPS。
   final bool useSSL;
+
+  /// 是否路径风格（`端点/桶/对象`）；false = 虚拟主机风格。
+  final bool pathStyle;
 
   final Minio _minio;
 
@@ -86,6 +93,17 @@ class S3ObjectStore implements ObjectStore {
   }
 
   @override
+  Future<bool> exists(String key) async {
+    try {
+      // statObject 只取元数据，不像 getObject 会把整本书读进内存。
+      await _minio.statObject(bucket, _full(key));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
   Future<List<String>> list(String prefixFilter) async {
     final result = await _minio.listAllObjects(
       bucket,
@@ -96,6 +114,26 @@ class S3ObjectStore implements ObjectStore {
       for (final obj in result.objects)
         if (obj.key != null) _strip(obj.key!),
     ]..sort();
+  }
+
+  @override
+  Future<List<({String key, int modifiedAtMs})>> listDetailed(
+    String prefixFilter,
+  ) async {
+    final result = await _minio.listAllObjects(
+      bucket,
+      prefix: _full(prefixFilter),
+      recursive: true,
+    );
+    return [
+      for (final obj in result.objects)
+        if (obj.key != null)
+          (
+            key: _strip(obj.key!),
+            // 服务端 lastModified；取不到给 0（调用方按「不过滤」处理）。
+            modifiedAtMs: obj.lastModified?.millisecondsSinceEpoch ?? 0,
+          ),
+    ]..sort((a, b) => a.key.compareTo(b.key));
   }
 
   @override

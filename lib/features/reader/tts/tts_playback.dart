@@ -91,12 +91,12 @@ class TtsPlaybackState {
 class TtsPlaybackController extends ValueNotifier<TtsPlaybackState> {
   /// 构造：注入桥访问器（返回当前可视层桥，可能为 null）。
   TtsPlaybackController({
-    required ReaderBridge? Function() bridge,
+    required TtsSurface? Function() bridge,
     required this.onFinishedChapter,
   })  : _bridge = bridge,
         super(const TtsPlaybackState());
 
-  final ReaderBridge? Function() _bridge;
+  final TtsSurface? Function() _bridge;
 
   /// 章末无下一章时的回调（页面可提示「全书读完」）。
   final void Function() onFinishedChapter;
@@ -345,7 +345,7 @@ class TtsPlaybackController extends ValueNotifier<TtsPlaybackState> {
     final nextHref = await b.ttsNextHref();
     if (epoch != _epoch) return false;
     if (nextHref == null || nextHref.isEmpty) return false;
-    await b.gotoHref(nextHref);
+    await b.gotoChapter(nextHref);
     // 等视图渲染出新章节（epub.js display 异步）
     await Future<void>.delayed(const Duration(milliseconds: 700));
     if (epoch != _epoch) return false;
