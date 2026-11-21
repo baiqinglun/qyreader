@@ -1,9 +1,12 @@
 /// 阅读主题库：JSON 往返、内置主题、应用 / 新增 / 删除。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qy_reader/app/theme/reading_theme.dart';
+import 'package:qy_reader/data/sync/theme_sync.dart';
 import 'package:qy_reader/features/reader/reader_settings.dart';
 import 'package:qy_reader/features/reader/reader_themes.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -39,8 +42,9 @@ void main() {
 
   test('内置主题包含纯白，且不可编辑', () {
     expect(builtInReaderThemes.length, 5);
-    final white =
-        builtInReaderThemes.firstWhere((t) => t.background == ReadingTheme.white);
+    final white = builtInReaderThemes.firstWhere(
+      (t) => t.background == ReadingTheme.white,
+    );
     expect(white.name, '纯白');
     expect(white.builtIn, isTrue);
   });
@@ -50,19 +54,21 @@ void main() {
     addTearDown(container.dispose);
     final controller = container.read(readerThemesControllerProvider.notifier);
 
-    await controller.apply(const ReaderThemePreset(
-      id: 'custom:apply',
-      name: '大字号',
-      background: ReadingTheme.white,
-      backgroundImage: '/tmp/none.png',
-      fontSize: 24,
-      lineHeight: 2.1,
-      paragraphSpacing: 1.2,
-      marginLeft: 30,
-      marginRight: 28,
-      marginTop: 20,
-      marginBottom: 18,
-    ));
+    await controller.apply(
+      const ReaderThemePreset(
+        id: 'custom:apply',
+        name: '大字号',
+        background: ReadingTheme.white,
+        backgroundImage: '/tmp/none.png',
+        fontSize: 24,
+        lineHeight: 2.1,
+        paragraphSpacing: 1.2,
+        marginLeft: 30,
+        marginRight: 28,
+        marginTop: 20,
+        marginBottom: 18,
+      ),
+    );
 
     final settings = container.read(readingSettingsControllerProvider);
     expect(settings.theme, ReadingTheme.white);
@@ -74,7 +80,10 @@ void main() {
     expect(settings.marginRight, 28);
     expect(settings.marginTop, 20);
     expect(settings.marginBottom, 18);
-    expect(container.read(readerThemesControllerProvider).activeId, 'custom:apply');
+    expect(
+      container.read(readerThemesControllerProvider).activeId,
+      'custom:apply',
+    );
   });
 
   test('新增 / 删除自定义主题并落 prefs', () async {
@@ -123,10 +132,7 @@ void main() {
     expect(preset.builtIn, isFalse);
     expect(preset.name, contains('副本'));
     expect(preset.snapshot, isNotNull);
-    expect(
-      container.read(readerThemesControllerProvider).activeId,
-      preset.id,
-    );
+    expect(container.read(readerThemesControllerProvider).activeId, preset.id);
 
     // 副本里带着刚才的排版：换回内置纸色后再应用，正文/标题/页眉页脚一起回来。
     await settings.patch(theme: ReadingTheme.white, fontSize: 16);
@@ -193,5 +199,45 @@ void main() {
     final id = container.read(readerThemesControllerProvider).activeId;
     await controller.rename(id, '夜间加大');
     expect(controller.state.active.name, '夜间加大');
+  });
+
+  test('主题快照包含背景缩放方式，应用后一起还原', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final settings = container.read(readingSettingsControllerProvider.notifier);
+    await settings.waitRestored();
+    await settings.patch(backgroundFit: BackgroundImageFit.contain);
+
+    final controller = container.read(readerThemesControllerProvider.notifier);
+    final preset = await controller.duplicateCurrent();
+    expect(preset.snapshot?['backgroundFit'], 'contain');
+
+    await settings.patch(backgroundFit: BackgroundImageFit.fill);
+    await controller.apply(preset);
+    expect(
+      container.read(readingSettingsControllerProvider).backgroundFit,
+      BackgroundImageFit.contain,
+    );
+  });
+
+  test('reload：同步拉回的主题立即出现，丢失的当前主题回退纸', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      ThemeSync.themesKey: jsonEncode([
+        <String, dynamic>{
+          'id': 'custom:synced',
+          'name': '同步来的主题',
+          'background': 'white',
+        },
+      ]),
+      'reader.activeThemeId': 'custom:gone',
+    });
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(readerThemesControllerProvider.notifier);
+    await controller.reload();
+
+    final state = container.read(readerThemesControllerProvider);
+    expect(state.custom.any((t) => t.id == 'custom:synced'), isTrue);
+    expect(state.activeId, 'builtin:paper');
   });
 }

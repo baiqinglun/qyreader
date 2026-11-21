@@ -13,7 +13,11 @@ import 'package:webview_flutter/webview_flutter.dart';
 /// 朗读所需的最小接口（WebView 与原生文本两种实现共用）。
 abstract class TtsSurface {
   /// 当前章节的句子列表。
-  Future<List<TtsSegment>?> ttsSegments();
+  ///
+  /// [startOffset] 指定起始字符偏移（章内）：从包含该偏移的句子开始读，
+  /// 用于「从选中的句子开始听」；null 时各实现按自己的默认起点
+  /// （原生 = 当前页首，WebView = 当前章首）。
+  Future<List<TtsSegment>?> ttsSegments({int? startOffset});
 
   /// 高亮句子；返回 'visible' | 'turning' | 错误码。
   Future<String?> ttsShow(String cfiRange);
@@ -42,10 +46,11 @@ class ReaderBridge implements TtsSurface {
     String bookUrl, {
     String? locatorJson,
     String? styleJson,
-  }) =>
-      _eval('loadBook(${_jsStr(bookUrl)}, '
-          '${locatorJson == null ? 'null' : _jsStr(locatorJson)}, '
-          '${styleJson == null ? 'null' : _jsStr(styleJson)})');
+  }) => _eval(
+    'loadBook(${_jsStr(bookUrl)}, '
+    '${locatorJson == null ? 'null' : _jsStr(locatorJson)}, '
+    '${styleJson == null ? 'null' : _jsStr(styleJson)})',
+  );
 
   /// 注入排版样式（含主题色）。
   Future<void> applyStyle(String styleJson) =>
@@ -78,8 +83,8 @@ class ReaderBridge implements TtsSurface {
   /// 退出阅读时用：最后一条 relocated 可能还没送达 Dart，这里同步问一次
   /// 页面拿真实位置落库。
   Future<String?> currentLocatorJson() => _evalReturning(
-        'window.currentLocatorJson ? window.currentLocatorJson() : null',
-      );
+    'window.currentLocatorJson ? window.currentLocatorJson() : null',
+  );
 
   /// 前进一页。
   Future<void> nextPage() => _eval('nextPage()');
@@ -94,13 +99,12 @@ class ReaderBridge implements TtsSurface {
 
   /// 边距松手后按 WebView 新尺寸重排并回到原 CFI。
   Future<void> flushViewport(String? locatorJson) => _eval(
-        'flushViewport(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
-      );
+    'flushViewport(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
+  );
 
   /// 字号/行距变化后强制重新分页并回到原 CFI。
-  Future<void> relayout(String? locatorJson) => _eval(
-        'relayout(${locatorJson == null ? 'null' : _jsStr(locatorJson)})',
-      );
+  Future<void> relayout(String? locatorJson) =>
+      _eval('relayout(${locatorJson == null ? 'null' : _jsStr(locatorJson)})');
 
   /// 重报当前位置（locations 就绪后补 percent）。
   Future<void> reportLocation() => _eval('reportLocation()');
@@ -116,9 +120,10 @@ class ReaderBridge implements TtsSurface {
     required String id,
     required String cfiRange,
     required String colorToken,
-  }) =>
-      _eval('__qyAddHighlight && __qyAddHighlight('
-          '${_jsStr(id)}, ${_jsStr(cfiRange)}, ${_jsStr(colorToken)})');
+  }) => _eval(
+    '__qyAddHighlight && __qyAddHighlight('
+    '${_jsStr(id)}, ${_jsStr(cfiRange)}, ${_jsStr(colorToken)})',
+  );
 
   /// 移除一条划线（按选区 CFI，epub.js 的注销键）。
   Future<void> removeHighlight(String cfiRange) =>
@@ -131,8 +136,10 @@ class ReaderBridge implements TtsSurface {
   // ---- M3 TTS ----
 
   /// 当前章节的句子列表（JSON：[{cfi, text}]）；失败返回 null。
+  ///
+  /// [startOffset] 在 WebView 链路上未实现（旧渲染链已旁路），忽略。
   @override
-  Future<List<TtsSegment>?> ttsSegments() async {
+  Future<List<TtsSegment>?> ttsSegments({int? startOffset}) async {
     final raw = await _evalReturning(
       'window.__qyTtsSegments ? window.__qyTtsSegments() : null',
     );
@@ -157,8 +164,8 @@ class ReaderBridge implements TtsSurface {
   /// 高亮第 cfi 句；返回 'visible' | 'turning' | 错误码。
   @override
   Future<String?> ttsShow(String cfiRange) => _evalReturning(
-        'window.__qyTtsShow ? window.__qyTtsShow(${_jsStr(cfiRange)}) : null',
-      );
+    'window.__qyTtsShow ? window.__qyTtsShow(${_jsStr(cfiRange)}) : null',
+  );
 
   /// 清除 TTS 跟读高亮。
   @override
@@ -170,14 +177,13 @@ class ReaderBridge implements TtsSurface {
   /// 下一章 href；已是最后一章返回 null。
   @override
   Future<String?> ttsNextHref() => _evalReturning(
-        'window.__qyTtsNextHref ? window.__qyTtsNextHref() : null',
-      );
+    'window.__qyTtsNextHref ? window.__qyTtsNextHref() : null',
+  );
 
   /// 求值并取回字符串结果（页面未就绪/已销毁返回 null）。
   Future<String?> _evalReturning(String source) async {
     try {
-      final result =
-          await _controller.runJavaScriptReturningResult(source);
+      final result = await _controller.runJavaScriptReturningResult(source);
       final text = result.toString();
       // Android 返回 JSON 编码字面量（带引号），null 返回 "null"
       if (text == 'null' || text.isEmpty) return null;
@@ -220,7 +226,6 @@ class ReaderBridge implements TtsSurface {
     }
   }
 }
-
 
 /// TTS 句子片段。
 class TtsSegment {

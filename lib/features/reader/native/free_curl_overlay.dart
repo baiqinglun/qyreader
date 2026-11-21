@@ -133,14 +133,10 @@ class _FreeCurlShadowPainter extends CustomPainter {
     canvas.drawRect(
       Offset.zero & size,
       Paint()
-        ..shader = ui.Gradient.linear(
-          geo.foldMid,
-          shadowEnd,
-          [
-            const Color(0x33000000),
-            const Color(0x00000000),
-          ],
-        ),
+        ..shader = ui.Gradient.linear(geo.foldMid, shadowEnd, [
+          const Color(0x33000000),
+          const Color(0x00000000),
+        ]),
     );
     canvas.restore();
 
@@ -153,10 +149,7 @@ class _FreeCurlShadowPainter extends CustomPainter {
         ..shader = ui.Gradient.linear(
           geo.foldMid,
           geo.foldMid - toCorner / len * 36,
-          [
-            const Color(0x14000000),
-            const Color(0x00000000),
-          ],
+          [const Color(0x14000000), const Color(0x00000000)],
         ),
     );
     canvas.restore();

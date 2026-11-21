@@ -23,6 +23,12 @@ abstract interface class BookRepository {
     bool returnExistingOnDuplicate = false,
   });
 
+  /// 用新的书源文件覆盖已有书籍的正文（书架长按 →「覆盖导入」）。
+  ///
+  /// 保留书籍 id、书名/作者/封面、阅读进度、笔记与统计，只替换书源文件、
+  /// 章节目录与全文索引。重复内容（已在本机其他书上）仍按重复导入拒绝。
+  Future<Result<Book>> replaceBookContent(String bookId, String sourcePath);
+
   /// 按 id 查书；不存在返回 null。
   Future<Book?> getById(String bookId);
 
@@ -51,6 +57,17 @@ abstract interface class BookRepository {
     BookReadStatus? readStatus,
   });
 
+  /// 写入外部阅读器（微信读书）带来的阅读状态与最近阅读时间。
+  ///
+  /// 与 [setPersonalization] 分开放：后者只管个人化字段，这里要让
+  /// 「最近在读」直接按微信读书的 `readUpdateTime` 排序；参数 null = 不改。
+  Future<void> applyReadingState(
+    String bookId, {
+    BookReadStatus? readStatus,
+    int? lastOpenedAt,
+    int? finishedAt,
+  });
+
   /// 把所有书的标签 [from] 重命名为 [to]；返回受影响的书数。
   ///
   /// 目标标签已存在时直接合并去重；只改未删除的书籍，并追加同步日志。
@@ -62,6 +79,9 @@ abstract interface class BookRepository {
   Future<int> deleteTag(String tag);
 
   /// 书架置顶开关（置顶时间用于多本置顶时的排序）。
+  /// 设置收藏状态。
+  Future<void> setFavorite(String bookId, bool favorite);
+
   Future<void> setPinned(String bookId, bool pinned);
 
   /// 编辑书籍元数据（书籍详情页：书名 / 作者）。

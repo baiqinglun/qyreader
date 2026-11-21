@@ -16,6 +16,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/reading_theme.dart';
+import '../../../data/parsers/epub/epub_block_style.dart';
 import '../reader_settings.dart';
 import 'native_chapter_source.dart';
 
@@ -31,16 +32,15 @@ class ReaderTypeSpec {
     required this.headingMarginTop,
     required this.headingMarginBottom,
     required this.headingStyleKind,
+    this.preciseTypesetting = false,
   });
 
   /// 从阅读设置生成。
-  factory ReaderTypeSpec.fromSettings(
-    ReadingSettings s,
-    ReadingTheme theme,
-  ) {
+  factory ReaderTypeSpec.fromSettings(ReadingSettings s, ReadingTheme theme) {
     final family = s.fontFamily.isEmpty ? null : s.fontFamily;
-    final weight =
-        s.bodyBold ? math.max(700, s.bodyWeight.value) : s.bodyWeight.value;
+    final weight = s.bodyBold
+        ? math.max(700, s.bodyWeight.value)
+        : s.bodyWeight.value;
     final body = TextStyle(
       color: theme.foreground,
       fontSize: s.fontSize,
@@ -49,9 +49,11 @@ class ReaderTypeSpec {
       fontWeight: FontWeight.values[(weight ~/ 100) - 1],
       fontFamily: family,
     );
-    final underline = s.headingStyle == HeadingStyle.underline ||
+    final underline =
+        s.headingStyle == HeadingStyle.underline ||
         s.headingStyle == HeadingStyle.underlineShade;
-    final shade = s.headingStyle == HeadingStyle.shade ||
+    final shade =
+        s.headingStyle == HeadingStyle.shade ||
         s.headingStyle == HeadingStyle.underlineShade;
     final heading = TextStyle(
       color: theme.foreground,
@@ -75,6 +77,7 @@ class ReaderTypeSpec {
       headingMarginTop: s.headingMarginTop,
       headingMarginBottom: s.headingMarginBottom,
       headingStyleKind: s.headingStyle,
+      preciseTypesetting: s.preciseTypesetting,
     );
   }
 
@@ -104,6 +107,9 @@ class ReaderTypeSpec {
 
   /// 标题装饰（渲染层用）。
   final HeadingStyle headingStyleKind;
+
+  /// 精排：优先采用原书段落的字号 / 行高 / 对齐 / 缩进 / 段距。
+  final bool preciseTypesetting;
 
   static final Map<int, double> _indentAdvanceCache = {};
 
@@ -151,13 +157,54 @@ class ReaderTypeSpec {
   /// - 系统字号缩放 [textScale] 下字形步进随 fontSize 一起缩放，而
   ///   letterSpacing 是绝对值不缩放，所以补偿量要乘 textScale，渲染步进
   ///   才恒等于 fontSize × textScale。
-  TextStyle indentStyleFor(double textScale) {
-    final fontSize = bodyStyle.fontSize ?? 16;
-    final bare = bodyStyle.copyWith(letterSpacing: 0);
+  TextStyle indentStyleFor(double textScale) =>
+      indentStyleForStyle(bodyStyle, textScale);
+
+  /// 任意段落样式下的首行缩进补宽样式（精排时每段字号可能不同）。
+  static TextStyle indentStyleForStyle(TextStyle style, double textScale) {
+    final fontSize = style.fontSize ?? 16;
+    final bare = style.copyWith(letterSpacing: 0);
     final advance = _indentCharAdvance(bare);
-    return bodyStyle.copyWith(
-      letterSpacing: (fontSize - advance) * textScale,
+    return style.copyWith(letterSpacing: (fontSize - advance) * textScale);
+  }
+
+  /// 计算一段的最终文字样式（精排时套用原书字号 / 行高 / 粗细 / 斜体）。
+  TextStyle paragraphStyle(NativeParagraph p) {
+    final base = p.isHeading ? headingStyle : bodyStyle;
+    final original = preciseTypesetting ? p.style : null;
+    if (original == null) return base;
+    final size = (original.fontSize ?? base.fontSize ?? 16).clamp(8, 48);
+    return base.copyWith(
+      fontSize: size.toDouble(),
+      height: original.lineHeight ?? base.height,
+      fontWeight: original.bold ? FontWeight.w700 : base.fontWeight,
+      fontStyle: original.italic ? FontStyle.italic : base.fontStyle,
     );
+  }
+
+  /// 一段的对齐（精排时优先用原书 text-align）。
+  TextAlign paragraphAlign(NativeParagraph p) {
+    final original = preciseTypesetting ? p.style?.textAlign : null;
+    if (original == null) {
+      return p.isHeading ? headingAlign : bodyAlign;
+    }
+    return switch (original) {
+      EpubTextAlign.left => TextAlign.left,
+      EpubTextAlign.center => TextAlign.center,
+      EpubTextAlign.right => TextAlign.right,
+      EpubTextAlign.justify => TextAlign.justify,
+    };
+  }
+
+  /// 一段的首行缩进字数（精排时用原书 text-indent）。
+  int paragraphIndentChars(NativeParagraph p, TextStyle style) {
+    if (p.isHeading) return 0;
+    final original = preciseTypesetting ? p.style : null;
+    if (original == null) return indentChars;
+    final px = original.indentPx;
+    if (px == null) return 0;
+    final size = style.fontSize ?? 16;
+    return (px / size).round().clamp(0, 6);
   }
 
   /// 缩进锚字符（零宽 U+FEFF）的样式：letterSpacing 必须为 0。
@@ -180,16 +227,17 @@ class ReaderTypeSpec {
 
   /// 版式签名（任何影响排版的字段变化都会让排版缓存失效）。
   int get signature => Object.hash(
-        bodyStyle,
-        headingStyle,
-        bodyAlign,
-        headingAlign,
-        indentChars,
-        paragraphSpacing,
-        headingMarginTop,
-        headingMarginBottom,
-        headingStyleKind,
-      );
+    bodyStyle,
+    headingStyle,
+    bodyAlign,
+    headingAlign,
+    indentChars,
+    paragraphSpacing,
+    headingMarginTop,
+    headingMarginBottom,
+    headingStyleKind,
+    preciseTypesetting,
+  );
 
   /// 只包含「影响行数/行高」的签名，用作分页缓存键。
   ///
@@ -197,43 +245,45 @@ class ReaderTypeSpec {
   /// 排版。换主题时 [signature] 会变（排版结果里的样式要换成新颜色），
   /// 但分页结果完全可复用——长章节不必因为换个主题再重排一遍。
   int get metricsSignature => Object.hash(
-        bodyStyle.fontSize,
-        bodyStyle.height,
-        bodyStyle.letterSpacing,
-        bodyStyle.fontWeight,
-        bodyStyle.fontFamily,
-        headingStyle.fontSize,
-        headingStyle.height,
-        headingStyle.letterSpacing,
-        headingStyle.fontWeight,
-        headingStyle.fontFamily,
-        bodyAlign,
-        headingAlign,
-        indentChars,
-        paragraphSpacing,
-        headingMarginTop,
-        headingMarginBottom,
-      );
+    bodyStyle.fontSize,
+    bodyStyle.height,
+    bodyStyle.letterSpacing,
+    bodyStyle.fontWeight,
+    bodyStyle.fontFamily,
+    headingStyle.fontSize,
+    headingStyle.height,
+    headingStyle.letterSpacing,
+    headingStyle.fontWeight,
+    headingStyle.fontFamily,
+    bodyAlign,
+    headingAlign,
+    indentChars,
+    paragraphSpacing,
+    headingMarginTop,
+    headingMarginBottom,
+    preciseTypesetting,
+  );
 
   /// 只影响「文字本身怎么断行/行多高」的签名（测量缓存键）。
   ///
   /// 段距与标题上下边距只改变段与段之间的距离，不影响每段的断行与行高；
   /// 改段距时可以复用测量结果，只重新装箱。
   int get textMetricsSignature => Object.hash(
-        bodyStyle.fontSize,
-        bodyStyle.height,
-        bodyStyle.letterSpacing,
-        bodyStyle.fontWeight,
-        bodyStyle.fontFamily,
-        headingStyle.fontSize,
-        headingStyle.height,
-        headingStyle.letterSpacing,
-        headingStyle.fontWeight,
-        headingStyle.fontFamily,
-        bodyAlign,
-        headingAlign,
-        indentChars,
-      );
+    bodyStyle.fontSize,
+    bodyStyle.height,
+    bodyStyle.letterSpacing,
+    bodyStyle.fontWeight,
+    bodyStyle.fontFamily,
+    headingStyle.fontSize,
+    headingStyle.height,
+    headingStyle.letterSpacing,
+    headingStyle.fontWeight,
+    headingStyle.fontFamily,
+    bodyAlign,
+    headingAlign,
+    indentChars,
+    preciseTypesetting,
+  );
 
   static TextAlign _bodyAlign(ReadingSettings s) {
     if (s.bodyAlign == TextAlignMode.center) return TextAlign.center;
@@ -242,11 +292,11 @@ class ReaderTypeSpec {
   }
 
   static TextAlign _headingAlign(ReadingSettings s) => switch (s.headingAlign) {
-        TextAlignMode.auto => TextAlign.center,
-        TextAlignMode.left => TextAlign.left,
-        TextAlignMode.center => TextAlign.center,
-        TextAlignMode.right => TextAlign.right,
-      };
+    TextAlignMode.auto => TextAlign.center,
+    TextAlignMode.left => TextAlign.left,
+    TextAlignMode.center => TextAlign.center,
+    TextAlignMode.right => TextAlign.right,
+  };
 }
 
 /// 排版后的段落（显示坐标）。
@@ -283,6 +333,13 @@ class LayoutParagraph {
 
   /// 是否标题。
   bool get isHeading => source.isHeading;
+
+  /// 段首缩进锚字符的样式（字距必须为 0）。
+  TextStyle get indentPrefixStyle => style.copyWith(letterSpacing: 0);
+
+  /// 段首缩进补宽样式（按本段字号精确补到一个汉字宽）。
+  TextStyle indentStyleFor(double textScale) =>
+      ReaderTypeSpec.indentStyleForStyle(style, textScale);
 }
 
 /// 一章的排版结果：显示文本 + 每段样式区间 + 坐标映射。
@@ -311,7 +368,12 @@ class ChapterLayout {
 
     for (var i = 0; i < chapter.paragraphs.length; i++) {
       final p = chapter.paragraphs[i];
-      final style = p.isHeading ? spec.headingStyle : spec.bodyStyle;
+      final style = spec.preciseTypesetting
+          ? spec.paragraphStyle(p)
+          : (p.isHeading ? spec.headingStyle : spec.bodyStyle);
+      final align = spec.preciseTypesetting
+          ? spec.paragraphAlign(p)
+          : (p.isHeading ? spec.headingAlign : spec.bodyAlign);
       if (i > 0) {
         final prev = chapter.paragraphs[i - 1];
         final gap = _gapBetween(prev, p, spec);
@@ -324,7 +386,7 @@ class ChapterLayout {
         }
         separators.add((start: start, end: buffer.length, gap: gap));
       }
-      final indent = p.isHeading ? 0 : spec.indentChars;
+      final indent = spec.paragraphIndentChars(p, style);
       final indentStart = buffer.length;
       // 缩进字符用 NBSP（U+00A0）而不是全角空格 U+3000：两端对齐
       // （TextAlign.justify）会把行首的 U+3000 空白压缩成 0 宽——首行
@@ -339,14 +401,16 @@ class ChapterLayout {
       }
       final start = buffer.length;
       write(p.text);
-      paragraphs.add(LayoutParagraph(
-        source: p,
-        indentStart: indentStart,
-        displayStart: start,
-        displayEnd: buffer.length,
-        style: style,
-        align: p.isHeading ? spec.headingAlign : spec.bodyAlign,
-      ));
+      paragraphs.add(
+        LayoutParagraph(
+          source: p,
+          indentStart: indentStart,
+          displayStart: start,
+          displayEnd: buffer.length,
+          style: style,
+          align: align,
+        ),
+      );
     }
 
     return ChapterLayout._(
@@ -429,8 +493,7 @@ class ChapterLayout {
     double width,
     double textScale,
   ) {
-    final start =
-        from < paragraph.indentStart ? paragraph.indentStart : from;
+    final start = from < paragraph.indentStart ? paragraph.indentStart : from;
     final end = paragraph.displayEnd;
     if (end <= start) return 0;
     return _measureRun(start, end, paragraph.align, width, textScale);
@@ -459,7 +522,11 @@ class ChapterLayout {
       text: TextSpan(
         style: spec.bodyStyle,
         children: [
-          for (final (a, b, style) in segmentsOf(start, end, textScale: textScale))
+          for (final (a, b, style) in segmentsOf(
+            start,
+            end,
+            textScale: textScale,
+          ))
             TextSpan(text: displayText.substring(a, b), style: style),
         ],
       ),
@@ -506,14 +573,16 @@ class ChapterLayout {
         if (runs.isNotEmpty && prev != null && runs.last.align == p.align) {
           runs.last.end = to;
         } else {
-          runs.add(_MeasureRun(
-            start: from,
-            end: to,
-            align: p.align,
-            gap: runs.isEmpty || prev == null
-                ? 0
-                : spacerHeight(_gapBetween(prev.source, p.source, spec)),
-          ));
+          runs.add(
+            _MeasureRun(
+              start: from,
+              end: to,
+              align: p.align,
+              gap: runs.isEmpty || prev == null
+                  ? 0
+                  : spacerHeight(_gapBetween(prev.source, p.source, spec)),
+            ),
+          );
         }
       }
       prev = p;
@@ -530,7 +599,11 @@ class ChapterLayout {
   /// 第 [index] 段之前的间距（含标题上下边距；首段为 0）。
   double paragraphGapBefore(int index) {
     if (index <= 0 || index >= paragraphs.length) return 0;
-    return _gapBetween(paragraphs[index - 1].source, paragraphs[index].source, spec);
+    return _gapBetween(
+      paragraphs[index - 1].source,
+      paragraphs[index].source,
+      spec,
+    );
   }
 
   /// 取 [start, end) 的样式分段（段距占位行保留自己的行高样式）。
@@ -538,8 +611,11 @@ class ChapterLayout {
   /// 渲染端必须用这一个方法切分：页首/页尾的占位与正文样式的差异会直接
   /// 影响行高，用错样式会让「量出来的页」和「画出来的页」对不上。
   /// [textScale] 用于缩进补宽样式的补偿量（见 [ReaderTypeSpec.indentStyleFor]）。
-  List<(int, int, TextStyle)> segmentsOf(int start, int end,
-      {double textScale = 1}) {
+  List<(int, int, TextStyle)> segmentsOf(
+    int start,
+    int end, {
+    double textScale = 1,
+  }) {
     final out = <(int, int, TextStyle)>[];
     var cursor = start;
     final first = _paragraphIndexAfter(start);
@@ -551,7 +627,8 @@ class ChapterLayout {
       if (cursor < from) {
         // 区间里带上了这一段的缩进字符时，用补宽样式渲染。页首 run 从
         // 缩进起点开始（cursor == indentStart），同样算「带上缩进」。
-        final withIndent = from == p.displayStart &&
+        final withIndent =
+            from == p.displayStart &&
             p.indentStart >= cursor &&
             p.indentStart < from;
         _appendGapSegments(
@@ -569,7 +646,9 @@ class ChapterLayout {
         cursor = to;
       }
     }
-    if (cursor < end) _appendGapSegments(out, cursor, end, textScale: textScale);
+    if (cursor < end) {
+      _appendGapSegments(out, cursor, end, textScale: textScale);
+    }
     return out;
   }
 
@@ -588,7 +667,9 @@ class ChapterLayout {
         // 零宽空格与它后面的换行都必须用占位样式：
         // 换行若带正文字号，这一行会被撑成全高行（段距失效且页底裁字）。
         var next = pos + 1;
-        if (next < end && next < displayText.length && displayText[next] == lf) {
+        if (next < end &&
+            next < displayText.length &&
+            displayText[next] == lf) {
           next++;
         }
         out.add((
@@ -607,15 +688,16 @@ class ChapterLayout {
         // 这样）时整段就是缩进字符，同样要用补宽样式。缩进区首个字符是
         // 零宽锚（U+FEFF），必须单列且字距为 0（行首 span 带字距会让
         // 整行右移 L/2，见 [ReaderTypeSpec.indentPrefixStyle]）。
-        final cut = indentOf?.indentStart;
-        if (cut != null && cut >= pos && cut < next) {
-          if (cut > pos) out.add((pos, cut, spec.bodyStyle));
-          out.add((cut, cut + 1, spec.indentPrefixStyle));
+        final indent = indentOf;
+        final cut = indent?.indentStart;
+        if (indent != null && cut != null && cut >= pos && cut < next) {
+          if (cut > pos) out.add((pos, cut, indent.style));
+          out.add((cut, cut + 1, indent.indentPrefixStyle));
           if (cut + 1 < next) {
-            out.add((cut + 1, next, spec.indentStyleFor(textScale)));
+            out.add((cut + 1, next, indent.indentStyleFor(textScale)));
           }
         } else {
-          out.add((pos, next, spec.bodyStyle));
+          out.add((pos, next, indent?.style ?? spec.bodyStyle));
         }
         pos = next;
       }
@@ -722,6 +804,17 @@ class ChapterLayout {
     NativeParagraph next,
     ReaderTypeSpec spec,
   ) {
+    if (spec.preciseTypesetting) {
+      final n = next.style;
+      final p = prev.style;
+      final before = n != null
+          ? (n.marginTop ?? 0)
+          : (next.isHeading ? spec.headingMarginTop : spec.paragraphSpacing);
+      final after = p != null
+          ? (p.marginBottom ?? 0)
+          : (prev.isHeading ? spec.headingMarginBottom : 0.0);
+      return math.max(before, after);
+    }
     final before = next.isHeading
         ? spec.headingMarginTop
         : spec.paragraphSpacing;
@@ -769,7 +862,11 @@ PageFragment buildPageFragment(
     }
   }
   final children = <InlineSpan>[
-    for (final (a, b, style) in layout.segmentsOf(start, realEnd, textScale: textScale))
+    for (final (a, b, style) in layout.segmentsOf(
+      start,
+      realEnd,
+      textScale: textScale,
+    ))
       TextSpan(text: layout.displayText.substring(a, b), style: style),
   ];
   return PageFragment(
@@ -1117,21 +1214,21 @@ class ChapterMeasurement {
         end = chosen;
       } else {
         // 本页一行都放不下：强制放一行，交给自检兜底。
-        final paragraph = layout.paragraphs[startIndex.clamp(
-          0,
-          layout.paragraphs.length - 1,
-        )];
-        final measurement = ensure(layout, startIndex.clamp(
-          0,
-          layout.paragraphs.length - 1,
-        ));
+        final paragraph = layout
+            .paragraphs[startIndex.clamp(0, layout.paragraphs.length - 1)];
+        final measurement = ensure(
+          layout,
+          startIndex.clamp(0, layout.paragraphs.length - 1),
+        );
         final line = measurement.lineIndexOf(
           math.max(0, startDisplay - paragraph.indentStart),
         );
         final next = line + 1 < measurement.lineStarts.length
             ? paragraph.indentStart + measurement.lineStarts[line + 1]
             : paragraph.displayEnd;
-        end = next > startDisplay ? next : math.min(startDisplay + 1, textLength);
+        end = next > startDisplay
+            ? next
+            : math.min(startDisplay + 1, textLength);
       }
     } else if (height < maxHeight - 0.01) {
       // 算术低估了页高（少见）：试着多吃一行。
@@ -1165,7 +1262,11 @@ class ChapterMeasurement {
       }
     }
 
-    return (end: end, nextIndex: _paragraphIndexFor(layout, end), height: height);
+    return (
+      end: end,
+      nextIndex: _paragraphIndexFor(layout, end),
+      height: height,
+    );
   }
 
   /// 全章装箱（逐页精确）。长章节可分帧调用 [packPageExact] 增量完成。
@@ -1270,8 +1371,7 @@ class ChapterMeasurement {
     var previous = 0;
     for (final m in metrics) {
       final top = m.baseline - m.ascent;
-      var start =
-          painter.getPositionForOffset(Offset(0, top + 0.5)).offset;
+      var start = painter.getPositionForOffset(Offset(0, top + 0.5)).offset;
       if (start < previous) start = previous;
       if (start > text.length) start = text.length;
       starts.add(start);
@@ -1333,9 +1433,13 @@ class MeasurementKey {
       other.textScale == textScale;
 
   @override
-  int get hashCode =>
-      Object.hash(identityHashCode(chapter), chapterIdx, textMetrics, width,
-          textScale);
+  int get hashCode => Object.hash(
+    identityHashCode(chapter),
+    chapterIdx,
+    textMetrics,
+    width,
+    textScale,
+  );
 }
 
 /// 分页自检：字符守恒、页间连续、页高不溢出。
@@ -1473,7 +1577,6 @@ class NativePaginator {
 
   /// 性能基准用：整章 `_compute` 次数（每次 = 一次全章分页）。
   static int debugComputeCount = 0;
-
 
   final Map<PaginationKey, Pagination> _cache = {};
   final Map<MeasurementKey, ChapterMeasurement> _measurements = {};
@@ -1623,9 +1726,7 @@ class NativePaginator {
       if (fitEnd > pageStart &&
           layout.renderedHeight(pageStart, fitEnd, key.width, key.textScale) >
               maxHeight) {
-        if (applyExact(
-          _exactPageEnd(layout, key, pageStart, i, maxHeight),
-        )) {
+        if (applyExact(_exactPageEnd(layout, key, pageStart, i, maxHeight))) {
           break;
         }
         continue;
@@ -1677,8 +1778,9 @@ class NativePaginator {
           layout.renderedHeight(pageStart, end, key.width, key.textScale);
 
       // 二分用「剩余可用高度」度量本段片段，避免每次都整页重排。
-      final gapBefore =
-          prev == null ? 0.0 : layout.paragraphGapBetween(prev, p);
+      final gapBefore = prev == null
+          ? 0.0
+          : layout.paragraphGapBetween(prev, p);
       final remaining = maxHeight - used - gapBefore;
       var lo = 1;
       var hi = metrics.length;
@@ -1719,9 +1821,7 @@ class NativePaginator {
         }
         if (measurePage(end) > maxHeight) {
           // 一页连一行都放不下（上一页已排满）：精确回退，避免死循环。
-          if (applyExact(
-            _exactPageEnd(layout, key, pageStart, i, maxHeight),
-          )) {
+          if (applyExact(_exactPageEnd(layout, key, pageStart, i, maxHeight))) {
             break;
           }
           continue;
@@ -1733,9 +1833,7 @@ class NativePaginator {
 
       if (best >= metrics.length) {
         // 逐段累加低估了页高（整段其实放得下）：本页走精确路径。
-        if (applyExact(
-          _exactPageEnd(layout, key, pageStart, i, maxHeight),
-        )) {
+        if (applyExact(_exactPageEnd(layout, key, pageStart, i, maxHeight))) {
           break;
         }
         continue;
@@ -1749,9 +1847,7 @@ class NativePaginator {
       // 页尾落定前整页复核一次：逐段相加与整页合并测量若有亚像素差，
       // 宁可退精确路径，也不能让页底裁字。
       if (measurePage(end) > maxHeight) {
-        if (applyExact(
-          _exactPageEnd(layout, key, pageStart, i, maxHeight),
-        )) {
+        if (applyExact(_exactPageEnd(layout, key, pageStart, i, maxHeight))) {
           break;
         }
         continue;
@@ -1874,4 +1970,3 @@ class _MeasureRun {
   final TextAlign align;
   final double gap;
 }
-

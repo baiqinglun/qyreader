@@ -262,11 +262,7 @@ class ReaderEdgeMove extends ReaderEvent {
 
 /// 边缘手势结束。
 class ReaderEdgeEnd extends ReaderEvent {
-  const ReaderEdgeEnd({
-    required this.edge,
-    required this.dy,
-    required this.dt,
-  });
+  const ReaderEdgeEnd({required this.edge, required this.dy, required this.dt});
 
   /// 'left' / 'right'。
   final String edge;

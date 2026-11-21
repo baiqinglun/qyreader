@@ -39,15 +39,9 @@ class FreeCurlGeometry {
     final w = math.max(page.width, 1.0);
     final h = math.max(page.height, 1.0);
     final rect = Offset.zero & Size(w, h);
-    final c = Offset(
-      corner.dx.clamp(0.0, w),
-      corner.dy.clamp(0.0, h),
-    );
+    final c = Offset(corner.dx.clamp(0.0, w), corner.dy.clamp(0.0, h));
     final f = clampFinger
-        ? Offset(
-            finger.dx.clamp(0.0, w),
-            finger.dy.clamp(0.0, h),
-          )
+        ? Offset(finger.dx.clamp(0.0, w), finger.dy.clamp(0.0, h))
         : finger;
     final toFinger = f - c;
     final distance = toFinger.distance;
@@ -121,19 +115,18 @@ class FreeCurlGeometry {
     Offset c,
     Offset f,
     bool forward,
-  ) =>
-      FreeCurlGeometry._(
-        pageSize: Size(w, h),
-        corner: c,
-        finger: f,
-        forward: forward,
-        foldA: c,
-        foldB: c,
-        holePath: Path(),
-        flapPath: Path(),
-        reflection: _identity(),
-        progress: 0,
-      );
+  ) => FreeCurlGeometry._(
+    pageSize: Size(w, h),
+    corner: c,
+    finger: f,
+    forward: forward,
+    foldA: c,
+    foldB: c,
+    holePath: Path(),
+    flapPath: Path(),
+    reflection: _identity(),
+    progress: 0,
+  );
 
   final Size pageSize;
 
@@ -218,10 +211,12 @@ List<Offset> _clipHalfPlane(Rect rect, Offset mid, Offset normal) {
       final sPrev = side(prev);
       final sCur = side(cur);
       final t = sPrev / (sPrev - sCur);
-      out.add(Offset(
-        prev.dx + (cur.dx - prev.dx) * t,
-        prev.dy + (cur.dy - prev.dy) * t,
-      ));
+      out.add(
+        Offset(
+          prev.dx + (cur.dx - prev.dx) * t,
+          prev.dy + (cur.dy - prev.dy) * t,
+        ),
+      );
     }
     if (curIn) out.add(cur);
   }
@@ -256,9 +251,9 @@ Float64List _reflection(Offset p, Offset dir) {
 }
 
 Offset _apply(Float64List m, Offset p) => Offset(
-      m[0] * p.dx + m[4] * p.dy + m[12],
-      m[1] * p.dx + m[5] * p.dy + m[13],
-    );
+  m[0] * p.dx + m[4] * p.dy + m[12],
+  m[1] * p.dx + m[5] * p.dy + m[13],
+);
 
 Float64List _identity() {
   final out = Float64List(16);

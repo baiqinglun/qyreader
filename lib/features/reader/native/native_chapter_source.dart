@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 
+import '../../../data/parsers/epub/epub_block_style.dart';
 import '../../../data/parsers/epub/epub_parser.dart';
 import '../../../data/parsers/plain_text_parser.dart';
 import '../../../core/locator.dart';
@@ -22,6 +23,7 @@ class NativeParagraph {
     required this.start,
     this.level = 0,
     this.centered = false,
+    this.style,
   });
 
   /// 段落文本（空白已收敛）。
@@ -35,6 +37,9 @@ class NativeParagraph {
 
   /// 原书是否显式居中。
   final bool centered;
+
+  /// 原书样式（精排用）。
+  final EpubBlockStyle? style;
 
   /// 是否标题。
   bool get isHeading => level > 0;
@@ -54,6 +59,8 @@ class NativeChapter {
     required this.paragraphStarts,
     required this.paragraphLevels,
     required this.paragraphCentered,
+    required this.paragraphStyles,
+    required this.paragraphStyleIds,
   });
 
   /// 从解析结果构造（紧凑数组）。
@@ -65,6 +72,8 @@ class NativeChapter {
     required List<int> paragraphStarts,
     required List<int> paragraphLevels,
     required List<bool> paragraphCentered,
+    List<EpubBlockStyle> paragraphStyles = const <EpubBlockStyle>[],
+    List<int> paragraphStyleIds = const <int>[],
   }) {
     // 旧数据/纯文本：没有段落数组时整章作为一段
     if (paragraphStarts.isEmpty && text.trim().isNotEmpty) {
@@ -76,6 +85,8 @@ class NativeChapter {
         paragraphStarts: const <int>[0],
         paragraphLevels: const <int>[0],
         paragraphCentered: const <bool>[false],
+        paragraphStyles: const <EpubBlockStyle>[],
+        paragraphStyleIds: const <int>[-1],
       );
     }
     return NativeChapter._(
@@ -86,6 +97,8 @@ class NativeChapter {
       paragraphStarts: paragraphStarts,
       paragraphLevels: paragraphLevels,
       paragraphCentered: paragraphCentered,
+      paragraphStyles: paragraphStyles,
+      paragraphStyleIds: paragraphStyleIds,
     );
   }
 
@@ -106,7 +119,16 @@ class NativeChapter {
     final starts = <int>[];
     final levels = <int>[];
     final centered = <bool>[];
+    final styles = <EpubBlockStyle>[];
+    final styleIds = <int>[];
     final buffer = StringBuffer();
+    int idOf(EpubBlockStyle style) {
+      final existing = styles.indexOf(style);
+      if (existing >= 0) return existing;
+      styles.add(style);
+      return styles.length - 1;
+    }
+
     for (final b in source) {
       final text = b.text.trim();
       if (text.isEmpty) continue;
@@ -114,6 +136,7 @@ class NativeChapter {
       starts.add(buffer.length);
       levels.add(b.level);
       centered.add(b.centered);
+      styleIds.add(b.style == null ? -1 : idOf(b.style!));
       buffer.write(text);
     }
     return NativeChapter.fromCompact(
@@ -124,6 +147,8 @@ class NativeChapter {
       paragraphStarts: starts,
       paragraphLevels: levels,
       paragraphCentered: centered,
+      paragraphStyles: styles,
+      paragraphStyleIds: styleIds,
     );
   }
 
@@ -148,27 +173,42 @@ class NativeChapter {
   /// 段落是否原书居中。
   final List<bool> paragraphCentered;
 
+  /// 原书段落样式表（精排用）。
+  final List<EpubBlockStyle> paragraphStyles;
+
+  /// 每段在 [paragraphStyles] 里的下标（-1 = 没有）。
+  final List<int> paragraphStyleIds;
+
   List<NativeParagraph>? _paragraphs;
 
   /// 分段结构（按需生成；只在当前章排版时用到）。
   List<NativeParagraph> get paragraphs => _paragraphs ??= () {
-        final out = <NativeParagraph>[];
-        for (var i = 0; i < paragraphStarts.length; i++) {
-          final start = paragraphStarts[i];
-          final end = i + 1 < paragraphStarts.length
-              ? paragraphStarts[i + 1] - 1
-              : text.length;
-          if (start >= end) continue;
-          out.add(NativeParagraph(
-            text: text.substring(start, end),
-            start: start,
-            level: i < paragraphLevels.length ? paragraphLevels[i] : 0,
-            centered:
-                i < paragraphCentered.length ? paragraphCentered[i] : false,
-          ));
-        }
-        return out;
-      }();
+    final out = <NativeParagraph>[];
+    for (var i = 0; i < paragraphStarts.length; i++) {
+      final start = paragraphStarts[i];
+      final end = i + 1 < paragraphStarts.length
+          ? paragraphStarts[i + 1] - 1
+          : text.length;
+      if (start >= end) continue;
+      out.add(
+        NativeParagraph(
+          text: text.substring(start, end),
+          start: start,
+          level: i < paragraphLevels.length ? paragraphLevels[i] : 0,
+          centered: i < paragraphCentered.length ? paragraphCentered[i] : false,
+          style: _styleAt(i),
+        ),
+      );
+    }
+    return out;
+  }();
+
+  EpubBlockStyle? _styleAt(int index) {
+    if (index >= paragraphStyleIds.length) return null;
+    final id = paragraphStyleIds[index];
+    if (id < 0 || id >= paragraphStyles.length) return null;
+    return paragraphStyles[id];
+  }
 }
 
 /// 章节缓存的键：只认「书源文件」，不认会变化的书籍元数据。
@@ -188,13 +228,13 @@ class NativeChaptersKey {
   });
 
   factory NativeChaptersKey.of(Book book) => NativeChaptersKey(
-        id: book.id,
-        path: book.filePath,
-        sha256: book.fileSha256,
-        size: book.fileSize,
-        format: book.format,
-        title: book.title,
-      );
+    id: book.id,
+    path: book.filePath,
+    sha256: book.fileSha256,
+    size: book.fileSize,
+    format: book.format,
+    title: book.title,
+  );
 
   final String id;
   final String path;
@@ -222,54 +262,59 @@ const Duration _kNativeParseTimeout = Duration(seconds: 60);
 
 /// 按书源提供章节文本（同一文件只解析一次，之后走缓存）。
 final nativeChaptersProvider =
-    FutureProvider.family<List<NativeChapter>, NativeChaptersKey>(
-        (ref, key) async {
-  final file = File(key.path);
-  if (!await file.exists()) {
-    throw StateError('书籍文件不存在');
-  }
-  final bytes = await file.readAsBytes();
-  if (key.format == BookFormat.pdf) {
-    throw StateError('暂不支持 PDF 阅读');
-  }
-  if (key.format != BookFormat.epub) {
-    final plain = await splitPlainTextInIsolate(
-      bytes,
-      title: key.title,
-      markdown: key.format == BookFormat.md,
-    ).timeout(_kNativeParseTimeout);
-    return [
-      for (final c in plain)
-        NativeChapter.fromCompact(
-          idx: c.idx,
-          title: c.title,
+    FutureProvider.family<List<NativeChapter>, NativeChaptersKey>((
+      ref,
+      key,
+    ) async {
+      final file = File(key.path);
+      if (!await file.exists()) {
+        throw StateError('书籍文件不存在');
+      }
+      final bytes = await file.readAsBytes();
+      if (key.format == BookFormat.pdf) {
+        throw StateError('暂不支持 PDF 阅读');
+      }
+      if (key.format != BookFormat.epub) {
+        final plain = await splitPlainTextInIsolate(
+          bytes,
+          title: key.title,
+          markdown: key.format == BookFormat.md,
+        ).timeout(_kNativeParseTimeout);
+        return [
+          for (final c in plain)
+            NativeChapter.fromCompact(
+              idx: c.idx,
+              title: c.title,
+              href: c.href,
+              text: c.text,
+              paragraphStarts: c.paragraphStarts,
+              paragraphLevels: c.paragraphLevels,
+              paragraphCentered: c.paragraphCentered,
+            ),
+        ];
+      }
+      final parsed = await parseEpubInIsolate(
+        bytes,
+        key.title,
+      ).timeout(_kNativeParseTimeout);
+      final out = <NativeChapter>[];
+      for (final c in parsed.chapters) {
+        final chapter = NativeChapter.fromCompact(
+          idx: out.length,
+          title: c.title.isEmpty ? '第 ${out.length + 1} 章' : c.title,
           href: c.href,
-          text: c.text,
+          text: c.bodyText,
           paragraphStarts: c.paragraphStarts,
           paragraphLevels: c.paragraphLevels,
           paragraphCentered: c.paragraphCentered,
-        ),
-    ];
-  }
-  final parsed =
-      await parseEpubInIsolate(bytes, key.title).timeout(_kNativeParseTimeout);
-  final out = <NativeChapter>[];
-  for (final c in parsed.chapters) {
-    final chapter = NativeChapter.fromCompact(
-      idx: out.length,
-      title: c.title.isEmpty ? '第 ${out.length + 1} 章' : c.title,
-      href: c.href,
-      text: c.bodyText,
-      paragraphStarts: c.paragraphStarts,
-      paragraphLevels: c.paragraphLevels,
-      paragraphCentered: c.paragraphCentered,
-    );
-    if (chapter.text.trim().isEmpty) continue; // 跳过封面/空占位章节
-    out.add(chapter);
-  }
-  return out;
-});
-
+          paragraphStyles: c.paragraphStyles,
+          paragraphStyleIds: c.paragraphStyleIds,
+        );
+        if (chapter.text.trim().isEmpty) continue; // 跳过封面/空占位章节
+        out.add(chapter);
+      }
+      return out;
+    });
 
 /// 是否是前置页（扉页/版权/书名页/目录等）。
 bool isFrontMatterTitle(String title) {
@@ -316,16 +361,20 @@ bool _looksLikeFrontMatter(NativeChapter c, int index) {
   if (index > 2) return false;
   final head = c.text.trimLeft();
   final probe = head.length > 80 ? head.substring(0, 80) : head;
-  const markers = [
-    '版权信息',
-    '图书在版编目',
-    'CIP',
-    'ISBN',
-    '目录',
-    '扉页',
-    '书名页',
-  ];
+  const markers = ['版权信息', '图书在版编目', 'CIP', 'ISBN', '目录', '扉页', '书名页'];
   return markers.any(probe.contains);
+}
+
+/// 阅读进度恢复：优先匹配章节索引与文件路径，处理一个文件包含多章的 EPUB。
+int nativeInitialChapterIndex(List<NativeChapter> chapters, Locator? locator) {
+  if (chapters.isEmpty) return 0;
+  if (locator != null) {
+    final matched = nativeChapterForLocator(chapters, locator);
+    if (matched != null) return chapters.indexOf(matched);
+    final index = locator.chapterIndex;
+    if (index != null) return index.clamp(0, chapters.length - 1);
+  }
+  return firstReadableChapterIndex(chapters);
 }
 
 /// 标注 / 书签的 locator → 原生章。

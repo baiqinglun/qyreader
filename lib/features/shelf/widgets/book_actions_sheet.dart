@@ -1,4 +1,5 @@
-/// 书架长按操作菜单：继续阅读 / 编辑信息 / 置顶 / 删除。
+/// 书架长按操作菜单：继续阅读 / 编辑信息 / 覆盖导入 / 移动 / 清缓存 /
+/// 置顶 / 删除。
 ///
 /// 长按先弹轻量菜单，编辑进详情页（[showBookActionsSheet] 返回动作由
 /// 调用方路由）；删除流程（笔记处置三选）从旧的信息面板迁过来，菜单与
@@ -23,11 +24,26 @@ enum BookShelfAction {
   /// 编辑信息（进书籍详情页）。
   edit,
 
+  /// 覆盖导入：用新的书源替换正文，保留笔记与进度。
+  overwriteImport,
+
+  /// 导出阅读数据：把这本书的进度/笔记/书签/时长导出成 JSON。
+  exportData,
+
+  /// 导入阅读数据：从导出的 JSON 里合并这本书的数据。
+  importData,
+
   /// 移动到书架（选已有书架 / 新建书架）。
   moveToShelf,
 
   /// 清除本地缓存（书源文件已备份到同步库后删本地文件）。
   clearCache,
+
+  /// 添加或取消收藏。
+  favorite,
+
+  /// 导出或分享书源。
+  shareBook,
 
   /// 置顶 / 取消置顶。
   pin,
@@ -43,6 +59,10 @@ Future<BookShelfAction?> showBookActionsSheet(
 }) {
   return showModalBottomSheet<BookShelfAction>(
     context: context,
+    isScrollControlled: true,
+    constraints: BoxConstraints(
+      maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+    ),
     sheetAnimationStyle: kSmoothSheetAnimation,
     backgroundColor: Theme.of(context).colorScheme.surface,
     shape: const RoundedRectangleBorder(
@@ -92,8 +112,7 @@ class _BookActionsSheet extends ConsumerWidget {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        if (book.author != null &&
-                            book.author!.isNotEmpty)
+                        if (book.author != null && book.author!.isNotEmpty)
                           Text(
                             book.author!,
                             maxLines: 1,
@@ -107,47 +126,96 @@ class _BookActionsSheet extends ConsumerWidget {
               ),
             ),
             const Divider(height: 1),
-            if (book.lastOpenedAt != null)
-              _ActionTile(
-                icon: Icons.auto_stories_outlined,
-                label: '继续阅读',
-                fg: fg,
-                onTap: () => Navigator.of(context).pop(
-                  BookShelfAction.continueReading,
-                ),
+            // 矮屏（或加了说明行）时菜单会超过底部弹层高度：动作区可滚动，
+            // 头部（封面/书名）保持固定。
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                children: [
+                  if (book.lastOpenedAt != null)
+                    _ActionTile(
+                      icon: Icons.auto_stories_outlined,
+                      label: '继续阅读',
+                      fg: fg,
+                      onTap: () => Navigator.of(
+                        context,
+                      ).pop(BookShelfAction.continueReading),
+                    ),
+                  _ActionTile(
+                    icon: Icons.edit_outlined,
+                    label: '编辑信息',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.edit),
+                  ),
+                  _ActionTile(
+                    icon: Icons.swap_horiz,
+                    label: '覆盖导入',
+                    fg: fg,
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(BookShelfAction.overwriteImport),
+                  ),
+                  _ActionTile(
+                    icon: Icons.share_outlined,
+                    label: '分享书籍',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.shareBook),
+                  ),
+                  _ActionTile(
+                    icon: Icons.ios_share_outlined,
+                    label: '导出阅读数据',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.exportData),
+                  ),
+                  _ActionTile(
+                    icon: Icons.file_open_outlined,
+                    label: '导入阅读数据',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.importData),
+                  ),
+                  _ActionTile(
+                    icon: Icons.drive_file_move_outline,
+                    label: '移动到书架',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.moveToShelf),
+                  ),
+                  _ActionTile(
+                    icon: Icons.delete_sweep_outlined,
+                    label: '清除本地缓存',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.clearCache),
+                  ),
+                  _ActionTile(
+                    icon: book.isFavorite
+                        ? Icons.favorite
+                        : Icons.favorite_border,
+                    label: book.isFavorite ? '取消收藏' : '添加到收藏',
+                    fg: fg,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.favorite),
+                  ),
+                  _ActionTile(
+                    icon: pinned ? Icons.push_pin : Icons.push_pin_outlined,
+                    label: pinned ? '取消置顶' : '在书架置顶',
+                    fg: fg,
+                    onTap: () => Navigator.of(context).pop(BookShelfAction.pin),
+                  ),
+                  _ActionTile(
+                    icon: Icons.delete_outline,
+                    label: '删除这本书',
+                    fg: theme.colorScheme.error,
+                    onTap: () =>
+                        Navigator.of(context).pop(BookShelfAction.delete),
+                  ),
+                ],
               ),
-            _ActionTile(
-              icon: Icons.edit_outlined,
-              label: '编辑信息',
-              fg: fg,
-              onTap: () => Navigator.of(context).pop(BookShelfAction.edit),
-            ),
-            _ActionTile(
-              icon: Icons.drive_file_move_outline,
-              label: '移动到书架',
-              fg: fg,
-              onTap: () =>
-                  Navigator.of(context).pop(BookShelfAction.moveToShelf),
-            ),
-            _ActionTile(
-              icon: Icons.delete_sweep_outlined,
-              label: '清除本地缓存',
-              fg: fg,
-              onTap: () => Navigator.of(context).pop(
-                BookShelfAction.clearCache,
-              ),
-            ),
-            _ActionTile(
-              icon: pinned ? Icons.push_pin : Icons.push_pin_outlined,
-              label: pinned ? '取消置顶' : '在书架置顶',
-              fg: fg,
-              onTap: () => Navigator.of(context).pop(BookShelfAction.pin),
-            ),
-            _ActionTile(
-              icon: Icons.delete_outline,
-              label: '删除这本书',
-              fg: theme.colorScheme.error,
-              onTap: () => Navigator.of(context).pop(BookShelfAction.delete),
             ),
           ],
         ),
@@ -250,9 +318,7 @@ class _MoveToShelfSheetState extends State<_MoveToShelfSheet> {
                     ),
                   for (final s in widget.shelves)
                     _ActionTile(
-                      icon: s == current
-                          ? Icons.folder
-                          : Icons.folder_outlined,
+                      icon: s == current ? Icons.folder : Icons.folder_outlined,
                       label: s,
                       fg: fg,
                       onTap: () => _pick(s),
@@ -343,9 +409,8 @@ class _MiniCover extends StatelessWidget {
                 File(path!),
                 fit: BoxFit.cover,
                 cacheWidth: 120,
-                errorBuilder: (_, __, ___) => Container(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                ),
+                errorBuilder: (_, __, ___) =>
+                    Container(color: theme.colorScheme.surfaceContainerHighest),
               ),
       ),
     );
@@ -363,10 +428,9 @@ Future<bool> confirmDeleteBook(
   required Book book,
 }) async {
   final repo = await ref.read(bookRepositoryProvider.future);
-  final annotations =
-      await ref.read(annotationRepositoryProvider.future).then(
-            (r) => r.listForBook(book.id),
-          );
+  final annotations = await ref
+      .read(annotationRepositoryProvider.future)
+      .then((r) => r.listForBook(book.id));
   if (!context.mounted) return false;
 
   final choice = await showDialog<_DeleteChoice>(
@@ -378,8 +442,8 @@ Future<bool> confirmDeleteBook(
         annotations.isEmpty
             ? '将删除《${book.title}》及其阅读进度、统计数据，云端备份也会删除。'
             : '《${book.title}》有 ${annotations.length} 条笔记/划线。\n'
-                '「删除书籍」保留笔记与划线；「删除全部」连笔记、划线、书签和'
-                '阅读记录一起删除。云端备份也会删除。',
+                  '「删除书籍」保留笔记与划线；「删除全部」连笔记、划线、书签和'
+                  '阅读记录一起删除。云端备份也会删除。',
       ),
       actions: [
         TextButton(
@@ -425,9 +489,7 @@ Future<bool> confirmDeleteBook(
     } catch (_) {
       // 云端清理失败不影响本地删除
     }
-    messenger.showSnackBar(
-      SnackBar(content: Text('已删除《${book.title}》')),
-    );
+    messenger.showSnackBar(SnackBar(content: Text('已删除《${book.title}》')));
     return true;
   } catch (e) {
     messenger.showSnackBar(SnackBar(content: Text('删除失败：$e')));
@@ -435,7 +497,4 @@ Future<bool> confirmDeleteBook(
   }
 }
 
-enum _DeleteChoice {
-  bookOnly,
-  deleteAll,
-}
+enum _DeleteChoice { bookOnly, deleteAll }

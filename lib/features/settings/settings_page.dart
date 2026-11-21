@@ -5,19 +5,34 @@
 /// 「排版」面板里，避免同一项配置出现在两个地方。
 library;
 
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/router.dart'
-    show kBackgroundsPath, kCachePath, kCategoriesPath, kTagsPath;
-import '../reader/fonts/reader_fonts.dart';
-import '../reader/reader_settings.dart';
+    show
+        kAudioPath,
+        kAuthorsPath,
+        kBackgroundsPath,
+        kBookReviewsPath,
+        kCachePath,
+        kCategoriesPath,
+        kDuplicatesPath,
+        kMyReadingPath,
+        kNotesPath,
+        kReedenImportPath,
+        kTagsPath,
+        kWeReadPath;
 import '../reader/widgets/font_picker_sheet.dart';
-import '../shelf/shelf_controller.dart';
 import '../shelf/widgets/sync_sheet.dart';
-import '../tags/tag_library.dart';
 import 'appearance_provider.dart';
+import 'update_check.dart';
+import 'reading_data_export.dart';
+import 'reeden_import.dart';
 
 /// 设置页。
 class SettingsPage extends ConsumerWidget {
@@ -29,16 +44,11 @@ class SettingsPage extends ConsumerWidget {
     final scheme = theme.colorScheme;
     final accent = ref.watch(appAccentControllerProvider);
     final themeMode = ref.watch(appThemeModeControllerProvider);
-    final tagCount = ref.watch(tagSummariesProvider).length;
-    final categoryCount = _categoryCount(ref);
-    final fonts = ref.watch(readerFontsControllerProvider);
-    final settings = ref.watch(readingSettingsControllerProvider);
-    final fontName =
-        findReaderFont(fonts, settings.fontFamily)?.name ?? '系统默认';
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
+        key: const PageStorageKey('settings-scroll'),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: [
           _SectionLabel(text: '外观', theme: theme),
@@ -133,20 +143,21 @@ class SettingsPage extends ConsumerWidget {
                 ListTile(
                   leading: const Icon(Icons.font_download_outlined),
                   title: const Text('字体'),
-                  subtitle: Text(
-                    fonts.isEmpty
-                        ? '$fontName · 可导入 TTF / OTF'
-                        : '$fontName · 已导入 ${fonts.length} 个',
-                  ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => showFontPickerSheet(context),
                 ),
                 ListTile(
                   leading: const Icon(Icons.image_outlined),
                   title: const Text('背景'),
-                  subtitle: const Text('上传 / 查看 / 清理本地背景图'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push(kBackgroundsPath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-audio'),
+                  leading: const Icon(Icons.library_music_outlined),
+                  title: const Text('听书音频'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kAudioPath),
                 ),
               ],
             ),
@@ -158,26 +169,49 @@ class SettingsPage extends ConsumerWidget {
             child: Column(
               children: [
                 ListTile(
+                  leading: const Icon(Icons.auto_stories_outlined),
+                  title: const Text('我的阅读'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kMyReadingPath),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.edit_note_outlined),
+                  title: const Text('笔记回顾'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kNotesPath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-book-reviews'),
+                  leading: const Icon(Icons.rate_review_outlined),
+                  title: const Text('我的书评'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kBookReviewsPath),
+                ),
+                ListTile(
                   leading: const Icon(Icons.sell_outlined),
                   title: const Text('标签'),
-                  subtitle: Text(
-                    tagCount == 0
-                        ? '新增标签，编辑书籍时可直接选择'
-                        : '$tagCount 个标签 · 新增 / 重命名 / 删除',
-                  ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push(kTagsPath),
                 ),
                 ListTile(
                   leading: const Icon(Icons.folder_outlined),
                   title: const Text('分类'),
-                  subtitle: Text(
-                    categoryCount == 0
-                        ? '分类来自书籍的「分类」字段'
-                        : '$categoryCount 个分类 · 重命名 / 删除',
-                  ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push(kCategoriesPath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-authors'),
+                  leading: const Icon(Icons.people_outline),
+                  title: const Text('作者管理'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kAuthorsPath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-duplicate-books'),
+                  leading: const Icon(Icons.content_copy_outlined),
+                  title: const Text('重复书籍整理'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kDuplicatesPath),
                 ),
               ],
             ),
@@ -191,16 +225,44 @@ class SettingsPage extends ConsumerWidget {
                 ListTile(
                   leading: const Icon(Icons.cloud_sync_outlined),
                   title: const Text('同步'),
-                  subtitle: const Text('本地桶 / S3：书籍、进度、标注、字体、背景'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => showSyncSheet(context),
                 ),
                 ListTile(
                   leading: const Icon(Icons.cleaning_services_outlined),
                   title: const Text('缓存'),
-                  subtitle: const Text('书籍 / 字体 / 背景 · 只清本地，云端保留可再下载'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push(kCachePath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-export-reading-data'),
+                  leading: const Icon(Icons.file_upload_outlined),
+                  title: const Text('导出阅读数据'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(exportReadingDataJson(context, ref)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel(text: '实验性功能', theme: theme),
+          Card(
+            elevation: 0,
+            child: Column(
+              children: [
+                ListTile(
+                  key: const ValueKey('settings-weread'),
+                  leading: const Icon(Icons.science_outlined),
+                  title: const Text('微信读书'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push(kWeReadPath),
+                ),
+                ListTile(
+                  key: const ValueKey('settings-reeden-import'),
+                  leading: const Icon(Icons.file_download_outlined),
+                  title: const Text('导入 Reeden 数据'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(_pickReedenExport(context)),
                 ),
               ],
             ),
@@ -212,16 +274,20 @@ class SettingsPage extends ConsumerWidget {
             child: Column(
               children: [
                 ListTile(
+                  leading: const Icon(Icons.system_update_outlined),
+                  title: const Text('检查更新'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(checkForAppUpdate(context)),
+                ),
+                ListTile(
                   leading: const Icon(Icons.info_outline),
                   title: const Text('关于 QYReader'),
-                  subtitle: const Text('本地 EPUB 阅读器 · 纯 Flutter 原生文本渲染'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _showAbout(context),
                 ),
                 ListTile(
                   leading: const Icon(Icons.description_outlined),
                   title: const Text('开源协议'),
-                  subtitle: const Text('查看用到的开源库及其许可证'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _showLicenses(context),
                 ),
@@ -232,13 +298,6 @@ class SettingsPage extends ConsumerWidget {
       ),
     );
   }
-
-  /// 书架里出现过的分类数。
-  int _categoryCount(WidgetRef ref) {
-    final items = ref.watch(shelfItemsProvider).valueOrNull;
-    if (items == null) return 0;
-    return shelfCategories(items).length;
-  }
 }
 
 void _showAbout(BuildContext context) {
@@ -246,7 +305,8 @@ void _showAbout(BuildContext context) {
     context: context,
     applicationName: 'QYReader',
     applicationIcon: const Icon(Icons.menu_book_outlined, size: 36),
-    applicationLegalese: '本地优先的 EPUB 阅读器\n'
+    applicationLegalese:
+        '本地优先的 EPUB 阅读器\n'
         '书籍、进度、标注保存在本机，可选同步到自建对象存储。',
   );
 }
@@ -320,4 +380,34 @@ class _SectionLabel extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 选 Reeden 导出的 JSON，解析后进对比页（逐本勾选要更新的书）。
+Future<void> _pickReedenExport(BuildContext context) async {
+  final picked = await FilePicker.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: const ['json'],
+    withData: true,
+  );
+  final bytes = picked?.files.single.bytes;
+  if (bytes == null || bytes.isEmpty) return;
+  final List<ReedenBookData> books;
+  try {
+    books = parseReedenExport(utf8.decode(bytes, allowMalformed: true));
+  } on FormatException catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('文件格式不对：${e.message}')));
+    return;
+  }
+  if (books.isEmpty) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('文件里没有可导入的书籍')));
+    return;
+  }
+  if (!context.mounted) return;
+  unawaited(context.push(kReedenImportPath, extra: books));
 }

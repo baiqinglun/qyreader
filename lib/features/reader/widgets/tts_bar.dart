@@ -7,13 +7,17 @@ import '../../../app/theme/reading_theme.dart';
 import '../tts/tts_playback.dart';
 
 /// 朗读控制条（固定在底栏上方，播放中显示）。
+///
+/// 信息区可点：进入全屏听书页（[onOpen]）。
 class TtsBar extends StatelessWidget {
   const TtsBar({
     required this.state,
     required this.theme,
+    required this.onOpen,
     required this.onPause,
     required this.onResume,
     required this.onStop,
+    this.tooltips = true,
     super.key,
   });
 
@@ -23,6 +27,9 @@ class TtsBar extends StatelessWidget {
   /// 阅读主题。
   final ReadingTheme theme;
 
+  /// 打开全屏听书页（点信息区）。
+  final VoidCallback onOpen;
+
   /// 暂停。
   final VoidCallback onPause;
 
@@ -31,6 +38,10 @@ class TtsBar extends StatelessWidget {
 
   /// 停止。
   final VoidCallback onStop;
+
+  /// 是否给按钮加 tooltip（控制条脱离 Navigator 的 Overlay 时要关掉，
+  /// 否则 Tooltip 找不到 Overlay 直接抛错）。
+  final bool tooltips;
 
   @override
   Widget build(BuildContext context) {
@@ -44,7 +55,7 @@ class TtsBar extends StatelessWidget {
     final remainingText = remaining == null
         ? ''
         : ' · ${remaining.inMinutes}:'
-            '${(remaining.inSeconds % 60).toString().padLeft(2, '0')}';
+              '${(remaining.inSeconds % 60).toString().padLeft(2, '0')}';
     return Material(
       color: theme.chromeSurface,
       elevation: 2,
@@ -52,37 +63,38 @@ class TtsBar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
         child: Row(
           children: [
-            Icon(
-              Icons.headphones,
-              size: 18,
-              color: theme.accent,
-            ),
+            Icon(Icons.headphones, size: 18, color: theme.accent),
             const SizedBox(width: 8),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    preparing
-                        ? '准备朗读…'
-                        : '${playing ? '朗读中' : '已暂停'} · $progress$remainingText',
-                    style: TextStyle(
-                      color: fg.withValues(alpha: 0.7),
-                      fontSize: 11,
+              // 信息区整体可点 → 全屏听书页（按钮独立响应，不会误触）
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onOpen,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      preparing
+                          ? '准备朗读…'
+                          : '${playing ? '朗读中' : '已暂停'} · $progress$remainingText',
+                      style: TextStyle(
+                        color: fg.withValues(alpha: 0.7),
+                        fontSize: 11,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    state.currentText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: fg, fontSize: 13),
-                  ),
-                ],
+                    const SizedBox(height: 2),
+                    Text(
+                      state.currentText,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: fg, fontSize: 13),
+                    ),
+                  ],
+                ),
               ),
             ),
             IconButton(
-              tooltip: playing ? '暂停' : '继续',
+              tooltip: tooltips ? (playing ? '暂停' : '继续') : null,
               onPressed: preparing ? null : (playing ? onPause : onResume),
               icon: Icon(
                 playing ? Icons.pause_circle_filled : Icons.play_circle_fill,
@@ -91,7 +103,7 @@ class TtsBar extends StatelessWidget {
               ),
             ),
             IconButton(
-              tooltip: '停止',
+              tooltip: tooltips ? '停止' : null,
               onPressed: onStop,
               icon: Icon(Icons.stop_circle_outlined, color: fg, size: 28),
             ),

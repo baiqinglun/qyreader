@@ -13,6 +13,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app/theme/reading_theme.dart';
+import '../../data/sync/theme_sync.dart';
 import 'reader_settings.dart';
 
 part 'reader_themes.g.dart';
@@ -111,19 +112,19 @@ class ReaderThemePreset {
 
   /// 序列化（不含 builtIn，id 前缀决定）。
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'background': background.name,
-        'backgroundImage': backgroundImage,
-        'fontSize': fontSize,
-        'lineHeight': lineHeight,
-        'paragraphSpacing': paragraphSpacing,
-        'marginLeft': marginLeft,
-        'marginRight': marginRight,
-        'marginTop': marginTop,
-        'marginBottom': marginBottom,
-        if (snapshot != null) 'snapshot': snapshot,
-      };
+    'id': id,
+    'name': name,
+    'background': background.name,
+    'backgroundImage': backgroundImage,
+    'fontSize': fontSize,
+    'lineHeight': lineHeight,
+    'paragraphSpacing': paragraphSpacing,
+    'marginLeft': marginLeft,
+    'marginRight': marginRight,
+    'marginTop': marginTop,
+    'marginBottom': marginBottom,
+    if (snapshot != null) 'snapshot': snapshot,
+  };
 
   /// 反序列化；未知字段回退默认。
   factory ReaderThemePreset.fromJson(Map<String, dynamic> json) {
@@ -141,8 +142,9 @@ class ReaderThemePreset {
       id: json['id'] is String ? json['id'] as String : 'custom:unknown',
       name: json['name'] is String ? json['name'] as String : '自定义主题',
       background: background,
-      backgroundImage:
-          json['backgroundImage'] is String ? json['backgroundImage'] as String : '',
+      backgroundImage: json['backgroundImage'] is String
+          ? json['backgroundImage'] as String
+          : '',
       fontSize: numOf('fontSize', 18, 14, 28),
       lineHeight: numOf('lineHeight', 1.7, 1.2, 2.4),
       paragraphSpacing: numOf('paragraphSpacing', 0.4, 0, 2),
@@ -225,9 +227,9 @@ class ReaderThemesState {
 
   /// 当前主题（找不到时回退第一个内置）。
   ReaderThemePreset get active => all.firstWhere(
-        (t) => t.id == activeId,
-        orElse: () => builtInReaderThemes.first,
-      );
+    (t) => t.id == activeId,
+    orElse: () => builtInReaderThemes.first,
+  );
 
   ReaderThemesState copyWith({
     List<ReaderThemePreset>? custom,
@@ -243,7 +245,7 @@ class ReaderThemesState {
 /// 主题库控制器。
 @Riverpod(keepAlive: true)
 class ReaderThemesController extends _$ReaderThemesController {
-  static const String _kCustom = 'reader.customThemes';
+  static const String _kCustom = ThemeSync.themesKey;
   static const String _kActive = 'reader.activeThemeId';
 
   /// 写回防抖：拖动滑杆时每帧都会 patch 设置，攒一下再落盘。
@@ -257,6 +259,14 @@ class ReaderThemesController extends _$ReaderThemesController {
   Future<void>? _restoreFuture;
 
   Future<void> _ready() => _restoreFuture ?? Future<void>.value();
+
+  /// 同步拉到新主题后重新读一遍 prefs（列表 / 当前主题立即更新）。
+  Future<void> reload() async {
+    // 丢弃同步前还没落库的排版写回，避免用旧内存覆盖刚拉下来的主题。
+    _writeBackTimer?.cancel();
+    await _restoreFuture;
+    await _restore();
+  }
 
   @override
   ReaderThemesState build() {
@@ -303,6 +313,14 @@ class ReaderThemesController extends _$ReaderThemesController {
         }
       }
       final active = prefs.getString(_kActive) ?? 'builtin:paper';
+      final activeExists =
+          builtInReaderThemes.any((t) => t.id == active) ||
+          custom.any((t) => t.id == active);
+      if (!activeExists) {
+        await prefs.setString(_kActive, 'builtin:paper');
+        state = ReaderThemesState(custom: custom, activeId: 'builtin:paper');
+        return;
+      }
       state = ReaderThemesState(custom: custom, activeId: active);
     } catch (_) {
       // 读取失败按内置主题处理
@@ -445,6 +463,11 @@ class ReaderThemesController extends _$ReaderThemesController {
       await prefs.setString(
         _kCustom,
         jsonEncode([for (final t in custom) t.toJson()]),
+      );
+      // 主题也参与同步：记下本次改动时间，同步时与云端清单比新。
+      await prefs.setInt(
+        ThemeSync.updatedAtKey,
+        DateTime.now().millisecondsSinceEpoch,
       );
     } catch (_) {
       // 落盘失败：本次仍然生效

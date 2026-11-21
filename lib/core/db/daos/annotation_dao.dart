@@ -20,9 +20,7 @@ class AnnotationDao extends DatabaseAccessor<AppDatabase>
       (select(annotations)
             ..where((r) => r.bookId.equals(bookId))
             ..where((r) => r.deletedAt.isNull())
-            ..orderBy([
-              (r) => OrderingTerm.desc(r.createdAt),
-            ]))
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
           .watch();
 
   /// 查询某本书的标注。
@@ -30,10 +28,15 @@ class AnnotationDao extends DatabaseAccessor<AppDatabase>
       (select(annotations)
             ..where((r) => r.bookId.equals(bookId))
             ..where((r) => r.deletedAt.isNull())
-            ..orderBy([
-              (r) => OrderingTerm.desc(r.createdAt),
-            ]))
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
           .get();
+
+  /// 全库标注（「笔记回顾」用；新在前）。
+  Stream<List<AnnotationRow>> watchAll() =>
+      (select(annotations)
+            ..where((r) => r.deletedAt.isNull())
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
+          .watch();
 
   /// 按 id 查询。
   Future<AnnotationRow> getById(String id) =>
@@ -62,9 +65,7 @@ class BookmarkDao extends DatabaseAccessor<AppDatabase>
       (select(bookmarks)
             ..where((r) => r.bookId.equals(bookId))
             ..where((r) => r.deletedAt.isNull())
-            ..orderBy([
-              (r) => OrderingTerm.desc(r.createdAt),
-            ]))
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
           .watch();
 
   /// 查询某本书的书签。
@@ -72,10 +73,15 @@ class BookmarkDao extends DatabaseAccessor<AppDatabase>
       (select(bookmarks)
             ..where((r) => r.bookId.equals(bookId))
             ..where((r) => r.deletedAt.isNull())
-            ..orderBy([
-              (r) => OrderingTerm.desc(r.createdAt),
-            ]))
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
           .get();
+
+  /// 全库书签（「笔记回顾」用；新在前）。
+  Stream<List<BookmarkRow>> watchAll() =>
+      (select(bookmarks)
+            ..where((r) => r.deletedAt.isNull())
+            ..orderBy([(r) => OrderingTerm.desc(r.createdAt)]))
+          .watch();
 
   /// 按 id 查询。
   Future<BookmarkRow> getById(String id) =>

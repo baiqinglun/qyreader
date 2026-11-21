@@ -64,7 +64,7 @@ final shelfCategoryFilterProvider =
 
 typedef _$ShelfCategoryFilter = Notifier<String>;
 String _$shelfPrefsControllerHash() =>
-    r'2259c1ae2059b8f546ce8f6c05858a672f5fae74';
+    r'546bd7099b3a5979c9a80763a0633f6f8ce44ef4';
 
 /// 书架外观偏好（默认值见 [ShelfPrefs]）。
 ///

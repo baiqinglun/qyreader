@@ -7,13 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/motion.dart';
-
-/// 底栏的三个 Tab。
-const List<({IconData icon, IconData selected, String label})> kHomeTabs = [
-  (icon: Icons.menu_book_outlined, selected: Icons.menu_book, label: '书架'),
-  (icon: Icons.insights_outlined, selected: Icons.insights, label: '统计'),
-  (icon: Icons.settings_outlined, selected: Icons.settings, label: '设置'),
-];
+import '../home_tabs.dart';
 
 /// 悬浮胶囊底栏。
 class FloatingNavBar extends StatelessWidget {
@@ -33,61 +27,70 @@ class FloatingNavBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-      child: Container(
-        key: const ValueKey('nav-bar'),
-        height: 66,
-        decoration: BoxDecoration(
-          color: dark ? scheme.surfaceContainerHigh : Colors.white,
-          borderRadius: BorderRadius.circular(33),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: dark ? 0.30 : 0.07),
-              blurRadius: 24,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final itemWidth = constraints.maxWidth / kHomeTabs.length;
-            // 胶囊在轨道内滑动：左右各留 10px，高度 52（条高 66，上下各 7）。
-            const pillInset = 10.0;
-            return Stack(
-              children: [
-                AnimatedPositioned(
-                  key: const ValueKey('nav-pill'),
-                  duration: context.motion.standard,
-                  curve: kSmoothCurve,
-                  left: pillInset + itemWidth * index,
-                  top: 7,
-                  width: itemWidth - pillInset * 2,
-                  height: 52,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHighest.withValues(
-                        alpha: 0.75,
-                      ),
-                      borderRadius: BorderRadius.circular(26),
-                    ),
-                  ),
-                ),
-                Row(
-                  children: [
-                    for (var i = 0; i < kHomeTabs.length; i++)
-                      Expanded(
-                        child: _NavItem(
-                          item: kHomeTabs[i],
-                          selected: i == index,
-                          onTap: () => onSelect(i),
-                        ),
-                      ),
-                  ],
+    // 宽屏（桌面 / 横屏平板）上底栏不跟着拉满整屏，保持手机上的胶囊比例。
+    // heightFactor: 1 让它在 bottomNavigationBar 插槽里只占自身高度；不写的话
+    // Center 会被撑满整屏，把 body 高度挤成 0（底栏浮在屏幕中间、页面空白）。
+    return Center(
+      heightFactor: 1,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+          child: Container(
+            key: const ValueKey('nav-bar'),
+            height: 66,
+            decoration: BoxDecoration(
+              color: dark ? scheme.surfaceContainerHigh : Colors.white,
+              borderRadius: BorderRadius.circular(33),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: dark ? 0.30 : 0.07),
+                  blurRadius: 24,
+                  offset: const Offset(0, 8),
                 ),
               ],
-            );
-          },
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final itemWidth = constraints.maxWidth / kHomeTabs.length;
+                // 胶囊在轨道内滑动：左右各留 10px，高度 52（条高 66，上下各 7）。
+                const pillInset = 10.0;
+                return Stack(
+                  children: [
+                    AnimatedPositioned(
+                      key: const ValueKey('nav-pill'),
+                      duration: context.motion.standard,
+                      curve: kSmoothCurve,
+                      left: pillInset + itemWidth * index,
+                      top: 7,
+                      width: itemWidth - pillInset * 2,
+                      height: 52,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerHighest.withValues(
+                            alpha: 0.75,
+                          ),
+                          borderRadius: BorderRadius.circular(26),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        for (var i = 0; i < kHomeTabs.length; i++)
+                          Expanded(
+                            child: _NavItem(
+                              item: kHomeTabs[i],
+                              selected: i == index,
+                              onTap: () => onSelect(i),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
         ),
       ),
     );

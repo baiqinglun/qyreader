@@ -11,14 +11,14 @@ void main() {
   group('书架设置默认值', () {
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
-    test('圆角 20 / 自动列数 / 木纹架板；列表四项默认关闭、各 2 行', () {
+    test('圆角 20 / 自动列数 / 无架板；列表四项默认关闭、各 2 行', () {
       final container = ProviderContainer();
       addTearDown(container.dispose);
 
       final prefs = container.read(shelfPrefsControllerProvider);
       expect(prefs.coverRadius, 20);
       expect(prefs.columns, ShelfColumnCount.auto);
-      expect(prefs.plankStyle, ShelfPlankStyle.wood);
+      expect(prefs.plankStyle, ShelfPlankStyle.none);
       expect(prefs.sortField, ShelfSortField.lastOpened);
       expect(prefs.sortAscending, isFalse);
       expect(prefs.showRating, isFalse);
@@ -95,7 +95,7 @@ void main() {
       final prefs = container.read(shelfPrefsControllerProvider);
       expect(prefs.coverRadius, 24); // 上限 24
       expect(prefs.columns, ShelfColumnCount.auto);
-      expect(prefs.plankStyle, ShelfPlankStyle.wood);
+      expect(prefs.plankStyle, ShelfPlankStyle.none);
       expect(prefs.descriptionLines, 1); // 下限 1
       expect(prefs.reviewLines, 4); // 上限 4
     });

@@ -10,6 +10,7 @@ class BookSearchHit {
     required this.href,
     required this.chapterTitle,
     required this.snippet,
+    this.offset = 0,
   });
 
   /// 章序号。
@@ -23,6 +24,9 @@ class BookSearchHit {
 
   /// 命中上下文片段。
   final String snippet;
+
+  /// 命中在章正文里的起始偏移（0 基；找不到时为 0 → 跳到章首）。
+  final int offset;
 }
 
 /// 全书检索。

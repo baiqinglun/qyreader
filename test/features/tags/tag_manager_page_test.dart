@@ -15,20 +15,20 @@ import 'package:qy_reader/features/tags/tag_manager_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 ShelfItem _item(String id, List<String> tags) => ShelfItem(
-      book: Book(
-        id: id,
-        title: '书$id',
-        format: BookFormat.epub,
-        filePath: '/tmp/$id.epub',
-        fileSha256: id,
-        fileSize: 1,
-        addedAt: 0,
-        updatedAt: 0,
-        tags: tags,
-        hlc: '0000000000000-00000-aaaaaaaa',
-        deviceId: 'aaaaaaaa',
-      ),
-    );
+  book: Book(
+    id: id,
+    title: '书$id',
+    format: BookFormat.epub,
+    filePath: '/tmp/$id.epub',
+    fileSha256: id,
+    fileSize: 1,
+    addedAt: 0,
+    updatedAt: 0,
+    tags: tags,
+    hlc: '0000000000000-00000-aaaaaaaa',
+    deviceId: 'aaaaaaaa',
+  ),
+);
 
 class _FakeBookRepository implements BookRepository {
   String? renamedFrom;
@@ -55,10 +55,7 @@ class _FakeBookRepository implements BookRepository {
   }
 
   @override
-  Future<void> deleteBook(
-    String bookId, {
-    required bool deleteAnnotations,
-  }) =>
+  Future<void> deleteBook(String bookId, {required bool deleteAnnotations}) =>
       throw UnimplementedError();
 
   @override
@@ -75,7 +72,10 @@ class _FakeBookRepository implements BookRepository {
   Future<Result<Book>> importFromFile(
     String sourcePath, {
     bool returnExistingOnDuplicate = false,
-  }) =>
+  }) => throw UnimplementedError();
+
+  @override
+  Future<Result<Book>> replaceBookContent(String bookId, String sourcePath) =>
       throw UnimplementedError();
 
   @override
@@ -86,8 +86,18 @@ class _FakeBookRepository implements BookRepository {
     List<String>? tags,
     String? category,
     BookReadStatus? readStatus,
-  }) =>
-      throw UnimplementedError();
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> applyReadingState(
+    String bookId, {
+    BookReadStatus? readStatus,
+    int? lastOpenedAt,
+    int? finishedAt,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> setFavorite(String bookId, bool favorite) async {}
 
   @override
   Future<void> setPinned(String bookId, bool pinned) =>
@@ -97,11 +107,7 @@ class _FakeBookRepository implements BookRepository {
   Future<void> touchOpened(String bookId) => throw UnimplementedError();
 
   @override
-  Future<void> updateBookMeta(
-    String bookId, {
-    String? title,
-    String? author,
-  }) =>
+  Future<void> updateBookMeta(String bookId, {String? title, String? author}) =>
       throw UnimplementedError();
 
   @override
@@ -116,17 +122,21 @@ void main() {
     required List<ShelfItem> items,
     _FakeBookRepository? repo,
   }) async {
-    final container = ProviderContainer(overrides: [
-      shelfItemsProvider.overrideWith((ref) => Stream.value(items)),
-      bookRepositoryProvider.overrideWith(
-        (ref) async => repo ?? _FakeBookRepository(),
-      ),
-    ]);
+    final container = ProviderContainer(
+      overrides: [
+        shelfItemsProvider.overrideWith((ref) => Stream.value(items)),
+        bookRepositoryProvider.overrideWith(
+          (ref) async => repo ?? _FakeBookRepository(),
+        ),
+      ],
+    );
     addTearDown(container.dispose);
-    await tester.pumpWidget(UncontrolledProviderScope(
-      container: container,
-      child: const MaterialApp(home: TagManagerPage()),
-    ));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: TagManagerPage()),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.pump(const Duration(milliseconds: 20));
     await tester.pumpAndSettle();
@@ -134,10 +144,13 @@ void main() {
   }
 
   testWidgets('展示标签与使用数，可搜索', (tester) async {
-    await pumpPage(tester, items: [
-      _item('a', const ['科幻', '经典']),
-      _item('b', const ['科幻', '历史']),
-    ]);
+    await pumpPage(
+      tester,
+      items: [
+        _item('a', const ['科幻', '经典']),
+        _item('b', const ['科幻', '历史']),
+      ],
+    );
 
     expect(find.widgetWithText(TagCapsule, '科幻'), findsOneWidget);
     expect(find.widgetWithText(TagCapsule, '经典'), findsOneWidget);
@@ -155,7 +168,12 @@ void main() {
   });
 
   testWidgets('新增标签落标签库并出现在列表里', (tester) async {
-    final container = await pumpPage(tester, items: [_item('a', const ['科幻'])]);
+    final container = await pumpPage(
+      tester,
+      items: [
+        _item('a', const ['科幻']),
+      ],
+    );
 
     await tester.tap(find.byTooltip('新建标签'));
     await tester.pumpAndSettle();
@@ -163,10 +181,7 @@ void main() {
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
 
-    expect(
-      container.read(tagLibraryControllerProvider),
-      contains('新标签'),
-    );
+    expect(container.read(tagLibraryControllerProvider), contains('新标签'));
     expect(find.text('新标签'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -175,7 +190,9 @@ void main() {
     final repo = _FakeBookRepository()..renameResult = 2;
     await pumpPage(
       tester,
-      items: [_item('a', const ['科幻'])],
+      items: [
+        _item('a', const ['科幻']),
+      ],
       repo: repo,
     );
 
@@ -196,7 +213,9 @@ void main() {
     final repo = _FakeBookRepository()..deleteResult = 3;
     await pumpPage(
       tester,
-      items: [_item('a', const ['科幻'])],
+      items: [
+        _item('a', const ['科幻']),
+      ],
       repo: repo,
     );
 

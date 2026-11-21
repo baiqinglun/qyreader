@@ -55,6 +55,7 @@ void main() {
       const settings = ReadingSettings(
         theme: ReadingTheme.night,
         backgroundImage: '/tmp/bg.png',
+        backgroundFit: BackgroundImageFit.contain,
         fontSize: 22,
         lineHeight: 2.0,
         marginLeft: 32,
@@ -70,6 +71,7 @@ void main() {
       final restored = readingSettingsFromMap(settings.toMap());
       expect(restored.theme, ReadingTheme.night);
       expect(restored.backgroundImage, '/tmp/bg.png');
+      expect(restored.backgroundFit, BackgroundImageFit.contain);
       expect(restored.fontSize, 22);
       expect(restored.lineHeight, 2.0);
       expect(restored.marginLeft, 32);
@@ -95,8 +97,10 @@ void main() {
         'flow': '???',
         'pageTurnMode': 42,
         'pageTurnSound': 'thunder',
+        'backgroundFit': 'no-such-fit',
       });
       expect(restored.theme, ReadingTheme.paper);
+      expect(restored.backgroundFit, BackgroundImageFit.cover);
       expect(restored.fontSize, 28); // clamp 上限
       expect(restored.lineHeight, 1.2); // clamp 下限
       expect(restored.marginTop, 64); // clamp 上限
@@ -116,9 +120,7 @@ void main() {
     });
 
     test('兼容 v1 单一 margin：迁移为左右边距', () {
-      final restored = readingSettingsFromMap(<String, dynamic>{
-        'margin': 24,
-      });
+      final restored = readingSettingsFromMap(<String, dynamic>{'margin': 24});
       expect(restored.marginLeft, 24);
       expect(restored.marginRight, 24);
       expect(restored.marginTop, 12);
@@ -155,8 +157,9 @@ void main() {
         '',
       );
       expect(
-        readingSettingsFromMap(<String, dynamic>{'fontFamily': 'qyfont_x'})
-            .fontFamily,
+        readingSettingsFromMap(<String, dynamic>{
+          'fontFamily': 'qyfont_x',
+        }).fontFamily,
         'qyfont_x',
       );
     });

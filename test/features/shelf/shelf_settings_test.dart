@@ -20,27 +20,26 @@ ShelfItem _item(
   String? review,
   List<String> tags = const [],
   int? rating,
-}) =>
-    ShelfItem(
-      book: Book(
-        id: id,
-        title: '书$id',
-        author: '作者$id',
-        description: description,
-        review: review,
-        rating: rating,
-        tags: tags,
-        format: BookFormat.epub,
-        filePath: '/tmp/$id.epub',
-        fileSha256: 'sha$id',
-        fileSize: 1,
-        addedAt: 0,
-        updatedAt: 0,
-        hlc: '0000000000000-00000-aaaaaaaa',
-        deviceId: 'aaaaaaaa',
-      ),
-      percent: 0.42,
-    );
+}) => ShelfItem(
+  book: Book(
+    id: id,
+    title: '书$id',
+    author: '作者$id',
+    description: description,
+    review: review,
+    rating: rating,
+    tags: tags,
+    format: BookFormat.epub,
+    filePath: '/tmp/$id.epub',
+    fileSha256: 'sha$id',
+    fileSize: 1,
+    addedAt: 0,
+    updatedAt: 0,
+    hlc: '0000000000000-00000-aaaaaaaa',
+    deviceId: 'aaaaaaaa',
+  ),
+  percent: 0.42,
+);
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
@@ -57,15 +56,17 @@ void main() {
       addTearDown(tester.view.reset);
       final scope = container ?? ProviderContainer();
       if (container == null) addTearDown(scope.dispose);
-      await tester.pumpWidget(UncontrolledProviderScope(
-        container: scope,
-        child: const MaterialApp(home: Scaffold(body: ShelfSettingsSheet())),
-      ));
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: scope,
+          child: const MaterialApp(home: Scaffold(body: ShelfSettingsSheet())),
+        ),
+      );
       await tester.pumpAndSettle();
       return scope;
     }
 
-    testWidgets('网格页：圆角滑杆 + 单行数量 + 架板样式 + 进度开关', (tester) async {
+    testWidgets('网格页：圆角滑杆 + 单行数量 + 架板样式 + 进度/名称开关', (tester) async {
       await pumpSheet(tester);
 
       expect(find.text('书架设置'), findsOneWidget);
@@ -75,8 +76,15 @@ void main() {
       expect(find.byKey(const ValueKey('shelf-columns')), findsOneWidget);
       expect(find.byKey(const ValueKey('shelf-plank-style')), findsOneWidget);
       expect(find.byKey(const ValueKey('shelf-show-progress')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('shelf-show-grid-title')),
+        findsOneWidget,
+      );
       expect(find.byKey(const ValueKey('shelf-sort-field')), findsOneWidget);
-      expect(find.byKey(const ValueKey('shelf-sort-direction')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('shelf-sort-direction')),
+        findsOneWidget,
+      );
       expect(find.text('最近阅读'), findsOneWidget);
       expect(find.text('降序'), findsOneWidget);
       expect(
@@ -85,8 +93,30 @@ void main() {
             .value,
         isTrue,
       );
+      expect(
+        tester
+            .widget<Switch>(find.byKey(const ValueKey('shelf-show-grid-title')))
+            .value,
+        isTrue,
+      );
       expect(find.text('20'), findsOneWidget); // 默认圆角
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('显示名称开关切换并落盘', (tester) async {
+      final container = await pumpSheet(tester);
+      await tester.tap(find.byKey(const ValueKey('shelf-show-grid-title')));
+      await tester.pumpAndSettle();
+      expect(
+        container.read(shelfPrefsControllerProvider).showGridTitle,
+        isFalse,
+      );
+      expect(
+        tester
+            .widget<Switch>(find.byKey(const ValueKey('shelf-show-grid-title')))
+            .value,
+        isFalse,
+      );
     });
 
     testWidgets('排序：字段下拉与升 / 降序切换', (tester) async {
@@ -207,10 +237,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('shelf-show-rating')));
       await tester.pumpAndSettle();
-      expect(
-        container.read(shelfPrefsControllerProvider).showRating,
-        isTrue,
-      );
+      expect(container.read(shelfPrefsControllerProvider).showRating, isTrue);
 
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('shelf.columns'), 'five');
@@ -230,31 +257,86 @@ void main() {
       double coverRadius = 20,
       ShelfPlankStyle plankStyle = ShelfPlankStyle.wood,
       int count = 5,
+      bool showTitle = false,
       Size size = const Size(400, 900),
     }) async {
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final items = [for (var i = 0; i < count; i++) _item('b$i')];
-      await tester.pumpWidget(_host(CustomScrollView(
-        slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.all(16),
-            sliver: ShelfFlow(
-              cells: [for (final item in items) ShelfBookCell(item)],
-              mode: ShelfViewMode.grid,
-              columns: columns,
-              coverRadius: coverRadius,
-              plankStyle: plankStyle,
-              onOpenBook: (_) {},
-              onManageBook: (_) {},
-              onOpenCategory: (_) {},
-            ),
+      await tester.pumpWidget(
+        _host(
+          CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.all(16),
+                sliver: ShelfFlow(
+                  cells: [for (final item in items) ShelfBookCell(item)],
+                  mode: ShelfViewMode.grid,
+                  columns: columns,
+                  coverRadius: coverRadius,
+                  plankStyle: plankStyle,
+                  showTitle: showTitle,
+                  onOpenBook: (_) {},
+                  onManageBook: (_) {},
+                  onOpenCategory: (_) {},
+                ),
+              ),
+            ],
           ),
-        ],
-      )));
+        ),
+      );
       await tester.pumpAndSettle();
     }
+
+    testWidgets('显示名称：打开后封面下方出现书名，关闭后消失', (tester) async {
+      await pumpFlow(tester, showTitle: true);
+      expect(find.text('书b0'), findsOneWidget);
+      expect(find.byKey(const ValueKey('book-title-b0')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await pumpFlow(tester, showTitle: false);
+      expect(find.text('书b0'), findsNothing);
+      expect(find.byKey(const ValueKey('book-title-b0')), findsNothing);
+    });
+
+    testWidgets('显示名称：分类格也显示分类名，与书名同一行高', (tester) async {
+      tester.view.physicalSize = const Size(400, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final items = [for (var i = 0; i < 2; i++) _item('b$i')];
+      await tester.pumpWidget(
+        _host(
+          CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.all(16),
+                sliver: ShelfFlow(
+                  cells: [
+                    const ShelfCategoryCell(title: '小说', books: []),
+                    ...[for (final item in items) ShelfBookCell(item)],
+                  ],
+                  mode: ShelfViewMode.grid,
+                  columns: 3,
+                  showTitle: true,
+                  onOpenBook: (_) {},
+                  onManageBook: (_) {},
+                  onOpenCategory: (_) {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('小说'), findsOneWidget);
+      expect(find.byKey(const ValueKey('category-title-小说')), findsOneWidget);
+      // 分类名与书名样式一致（同一字号）。
+      final categoryStyle = tester.widget<Text>(find.text('小说')).style;
+      final bookStyle = tester.widget<Text>(find.text('书b0')).style;
+      expect(categoryStyle?.fontSize, bookStyle?.fontSize);
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('每一行书下面一条木纹架板', (tester) async {
       await pumpFlow(tester);
@@ -293,12 +375,7 @@ void main() {
     });
 
     testWidgets('窄屏固定 5 列：只显示封面，不溢出', (tester) async {
-      await pumpFlow(
-        tester,
-        columns: 5,
-        count: 6,
-        size: const Size(360, 800),
-      );
+      await pumpFlow(tester, columns: 5, count: 6, size: const Size(360, 800));
       expect(find.byType(BookCard), findsNWidgets(6));
       // 网格只留封面 + 右上角进度，书名/作者/评分/标签都不出现。
       expect(find.text('作者b0'), findsNothing);
@@ -320,38 +397,42 @@ void main() {
       );
       expect((cardClip.borderRadius as BorderRadius).topLeft.x, 6);
 
-      await tester.pumpWidget(_host(SizedBox(
-        width: 120,
-        height: 168,
-        child: BookCoverTile(
-          item: _item('c'),
-          coverRadius: 4,
-          onOpen: () {},
-          onManage: () {},
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 120,
+            height: 168,
+            child: BookCoverTile(
+              item: _item('c'),
+              coverRadius: 4,
+              onOpen: () {},
+              onManage: () {},
+            ),
+          ),
         ),
-      )));
+      );
       await tester.pumpAndSettle();
       final clip = tester.widget<ClipRRect>(find.byType(ClipRRect).first);
       expect((clip.borderRadius as BorderRadius).topLeft.x, 4);
 
-      await tester.pumpWidget(_host(SizedBox(
-        width: 120,
-        height: 168,
-        child: CategoryCard(
-          title: '文学',
-          items: [_item('d')],
-          coverRadius: 7,
-          onOpen: () {},
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 120,
+            height: 168,
+            child: CategoryCard(
+              title: '文学',
+              items: [_item('d')],
+              coverRadius: 7,
+              onOpen: () {},
+            ),
+          ),
         ),
-      )));
+      );
       await tester.pumpAndSettle();
       final categoryCard = tester.widget<Card>(find.byType(Card));
-      final categoryShape =
-          categoryCard.shape! as RoundedRectangleBorder;
-      expect(
-        (categoryShape.borderRadius as BorderRadius).topLeft.x,
-        7,
-      );
+      final categoryShape = categoryCard.shape! as RoundedRectangleBorder;
+      expect((categoryShape.borderRadius as BorderRadius).topLeft.x, 7);
       expect(tester.takeException(), isNull);
     });
   });
@@ -361,23 +442,27 @@ void main() {
     const review = '这是一段用来验证书评开关与行数的书评文字。';
 
     testWidgets('四组内容按开关显示，行数跟随设置', (tester) async {
-      await tester.pumpWidget(_host(BookListTile(
-        item: _item(
-          'x',
-          description: description,
-          review: review,
-          tags: const ['心理学', '哲学'],
-          rating: 4,
+      await tester.pumpWidget(
+        _host(
+          BookListTile(
+            item: _item(
+              'x',
+              description: description,
+              review: review,
+              tags: const ['心理学', '哲学'],
+              rating: 4,
+            ),
+            showRating: true,
+            showTags: true,
+            showDescription: true,
+            descriptionLines: 1,
+            showReview: true,
+            reviewLines: 3,
+            onOpen: () {},
+            onManage: () {},
+          ),
         ),
-        showRating: true,
-        showTags: true,
-        showDescription: true,
-        descriptionLines: 1,
-        showReview: true,
-        reviewLines: 3,
-        onOpen: () {},
-        onManage: () {},
-      )));
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('心理学'), findsOneWidget);
@@ -391,23 +476,31 @@ void main() {
     });
 
     testWidgets('全部关掉后不再插入简介/书评，行高收紧', (tester) async {
-      await tester.pumpWidget(_host(BookListTile(
-        item: _item('x', description: description, review: review),
-        showDescription: true,
-        descriptionLines: 4,
-        showReview: true,
-        reviewLines: 4,
-        onOpen: () {},
-        onManage: () {},
-      )));
+      await tester.pumpWidget(
+        _host(
+          BookListTile(
+            item: _item('x', description: description, review: review),
+            showDescription: true,
+            descriptionLines: 4,
+            showReview: true,
+            reviewLines: 4,
+            onOpen: () {},
+            onManage: () {},
+          ),
+        ),
+      );
       await tester.pumpAndSettle();
       final tall = tester.getSize(find.byType(BookListTile)).height;
 
-      await tester.pumpWidget(_host(BookListTile(
-        item: _item('x', description: description, review: review),
-        onOpen: () {},
-        onManage: () {},
-      )));
+      await tester.pumpWidget(
+        _host(
+          BookListTile(
+            item: _item('x', description: description, review: review),
+            onOpen: () {},
+            onManage: () {},
+          ),
+        ),
+      );
       await tester.pumpAndSettle();
       final compact = tester.getSize(find.byType(BookListTile)).height;
 

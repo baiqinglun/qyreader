@@ -7,12 +7,12 @@ import 'package:qy_reader/data/parsers/epub/epub_parser.dart';
 import 'package:qy_reader/features/reader/native/native_chapter_source.dart';
 
 NativeChapter _chapter(int idx, String href) => NativeChapter.fromBlocks(
-      idx: idx,
-      title: '第$idx章',
-      href: href,
-      blocks: [ParsedBlock(text: '正文$idx')],
-      fallbackText: '',
-    );
+  idx: idx,
+  title: '第$idx章',
+  href: href,
+  blocks: [ParsedBlock(text: '正文$idx')],
+  fallbackText: '',
+);
 
 void main() {
   final chapters = [
@@ -21,6 +21,30 @@ void main() {
     _chapter(2, 'b.xhtml'),
     _chapter(3, 'c.xhtml'),
   ];
+
+  test('阅读进度恢复：相同 href 多章按章节索引恢复', () {
+    expect(
+      nativeInitialChapterIndex(
+        chapters,
+        const Locator(href: 'b.xhtml', chapterIndex: 2, offset: 100),
+      ),
+      2,
+    );
+    expect(
+      nativeInitialChapterIndex(
+        chapters,
+        const Locator(href: 'b.xhtml', chapterIndex: 9),
+      ),
+      1,
+    );
+    expect(
+      nativeInitialChapterIndex(
+        chapters,
+        const Locator(href: 'c.xhtml', chapterIndex: 1),
+      ),
+      3,
+    );
+  });
 
   test('同一份 XHTML 拆出的多章：按章索引定位（v2.13.2 划线不显示回归）', () {
     final loc = Locator(href: 'b.xhtml', chapterIndex: 2, offset: 1);

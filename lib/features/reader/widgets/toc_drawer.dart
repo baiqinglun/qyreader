@@ -23,10 +23,16 @@ class TocDrawer extends StatelessWidget {
     required this.onDismiss,
     required this.onChapter,
     required this.onGotoLocator,
+    required this.onGotoAnnotation,
     required this.onDeleteBookmark,
     required this.onDeleteAnnotation,
     required this.onEditNote,
     required this.onExport,
+    this.unlocatedIds = const <String>{},
+    this.onAutoLocate,
+    this.onManualLocate,
+    this.bookTitle = '',
+    this.author = '',
     super.key,
   });
 
@@ -54,8 +60,11 @@ class TocDrawer extends StatelessWidget {
   /// 点击章节跳转。
   final void Function(String href) onChapter;
 
-  /// 跳转到 locator（书签/标注）。
+  /// 跳转到书签 locator（会改变阅读进度）。
   final void Function(String locatorJson) onGotoLocator;
+
+  /// 跳转到标注 locator（挂起进度，等用户选择是否设为进度）。
+  final void Function(String locatorJson) onGotoAnnotation;
 
   /// 删除书签。
   final void Function(String id) onDeleteBookmark;
@@ -68,6 +77,15 @@ class TocDrawer extends StatelessWidget {
 
   /// 导出 Markdown。
   final VoidCallback onExport;
+
+  /// 未定位标注 id / 自动定位 / 手动定位。
+  final Set<String> unlocatedIds;
+  final void Function(Annotation annotation)? onAutoLocate;
+  final void Function(Annotation annotation)? onManualLocate;
+
+  /// 书名 / 作者（标注卡片式分享用）。
+  final String bookTitle;
+  final String author;
 
   @override
   Widget build(BuildContext context) {
@@ -101,10 +119,16 @@ class TocDrawer extends StatelessWidget {
                     onDismiss: onDismiss,
                     onChapter: onChapter,
                     onGotoLocator: onGotoLocator,
+                    onGotoAnnotation: onGotoAnnotation,
                     onDeleteBookmark: onDeleteBookmark,
                     onDeleteAnnotation: onDeleteAnnotation,
                     onEditNote: onEditNote,
                     onExport: onExport,
+                    unlocatedIds: unlocatedIds,
+                    onAutoLocate: onAutoLocate,
+                    onManualLocate: onManualLocate,
+                    bookTitle: bookTitle,
+                    author: author,
                   ),
                 ),
               ],
@@ -124,10 +148,16 @@ class _Panel extends StatelessWidget {
     required this.onDismiss,
     required this.onChapter,
     required this.onGotoLocator,
+    required this.onGotoAnnotation,
     required this.onDeleteBookmark,
     required this.onDeleteAnnotation,
     required this.onEditNote,
     required this.onExport,
+    required this.bookTitle,
+    required this.author,
+    this.unlocatedIds = const <String>{},
+    this.onAutoLocate,
+    this.onManualLocate,
   });
 
   final ReadingTheme theme;
@@ -138,10 +168,18 @@ class _Panel extends StatelessWidget {
   final VoidCallback onDismiss;
   final void Function(String href) onChapter;
   final void Function(String locatorJson) onGotoLocator;
+  final void Function(String locatorJson) onGotoAnnotation;
   final void Function(String id) onDeleteBookmark;
   final void Function(String id) onDeleteAnnotation;
   final void Function(Annotation annotation) onEditNote;
   final VoidCallback onExport;
+  final Set<String> unlocatedIds;
+  final void Function(Annotation annotation)? onAutoLocate;
+  final void Function(Annotation annotation)? onManualLocate;
+
+  /// 书名 / 作者（标注卡片式分享用）。
+  final String bookTitle;
+  final String author;
 
   @override
   Widget build(BuildContext context) {
@@ -175,8 +213,9 @@ class _Panel extends StatelessWidget {
               ),
               TabBar(
                 labelColor: theme.accent,
-                unselectedLabelColor:
-                    theme.chromeForeground.withValues(alpha: 0.6),
+                unselectedLabelColor: theme.chromeForeground.withValues(
+                  alpha: 0.6,
+                ),
                 indicatorColor: theme.accent,
                 tabs: const [
                   Tab(text: '目录'),
@@ -184,7 +223,10 @@ class _Panel extends StatelessWidget {
                   Tab(text: '标注'),
                 ],
               ),
-              Divider(height: 1, color: theme.chromeForeground.withValues(alpha: 0.1)),
+              Divider(
+                height: 1,
+                color: theme.chromeForeground.withValues(alpha: 0.1),
+              ),
               Expanded(
                 child: TabBarView(
                   children: [
@@ -258,11 +300,7 @@ class _Panel extends StatelessWidget {
           ),
           onDismissed: (_) => onDeleteBookmark(bm.id),
           child: ListTile(
-            leading: Icon(
-              Icons.bookmark,
-              color: theme.accent,
-              size: 22,
-            ),
+            leading: Icon(Icons.bookmark, color: theme.accent, size: 22),
             title: Text(
               label,
               maxLines: 1,
@@ -292,13 +330,17 @@ class _Panel extends StatelessWidget {
       theme: theme,
       chapters: chapters,
       annotations: annotations,
-      onGotoLocator: onGotoLocator,
+      onGotoAnnotation: onGotoAnnotation,
       onDelete: onDeleteAnnotation,
       onEditNote: onEditNote,
       onExport: onExport,
+      unlocatedIds: unlocatedIds,
+      onAutoLocate: onAutoLocate,
+      onManualLocate: onManualLocate,
+      bookTitle: bookTitle,
+      author: author,
     );
   }
-
 }
 
 class _AnimatedRow extends StatelessWidget {

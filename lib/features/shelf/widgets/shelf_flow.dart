@@ -3,7 +3,6 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../../../../app/theme/motion.dart';
 import '../../../../domain/entities/book.dart';
 import '../shelf_controller.dart';
 import '../shelf_prefs.dart';
@@ -23,12 +22,14 @@ class ShelfFlow extends StatelessWidget {
     required this.onOpenBook,
     required this.onManageBook,
     required this.onOpenCategory,
+    this.onManageCategory,
     this.selectionMode = false,
     this.selectedBookIds = const <String>{},
     this.onToggleSelect,
     this.coverRadius = 20,
     this.plankStyle = ShelfPlankStyle.wood,
     this.showProgress = true,
+    this.showTitle = false,
     this.showRating = false,
     this.showTags = false,
     this.showDescription = false,
@@ -56,6 +57,9 @@ class ShelfFlow extends StatelessWidget {
   /// 点开一个分类。
   final ValueChanged<String> onOpenCategory;
 
+  /// 长按一个分类（弹出管理菜单）；null = 不响应长按。
+  final ValueChanged<String>? onManageCategory;
+
   /// 多选模式：书格点击变成切换选中。
   final bool selectionMode;
 
@@ -73,6 +77,9 @@ class ShelfFlow extends StatelessWidget {
 
   /// 网格/封面模式是否显示封面右上角进度。
   final bool showProgress;
+
+  /// 网格是否在封面下方显示书名（纯封面模式不显示）。
+  final bool showTitle;
 
   /// 列表行是否显示星级。
   final bool showRating;
@@ -98,42 +105,41 @@ class ShelfFlow extends StatelessWidget {
       ShelfViewMode.grid => _grid(context, coverOnly: false),
       ShelfViewMode.cover => _grid(context, coverOnly: true),
       ShelfViewMode.list => SliverList.builder(
-          itemCount: cells.length,
-          itemBuilder: (context, index) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _AnimatedAppear(
-              index: index,
-              child: switch (cells[index]) {
-                ShelfCategoryCell(:final title, :final books) =>
-                  CategoryListTile(
-                    key: ValueKey('category-$title'),
-                    title: title,
-                    items: books,
-                    coverRadius: coverRadius,
-                    onOpen: () => onOpenCategory(title),
-                  ),
-                ShelfBookCell(:final item) => BookListTile(
-                    key: ValueKey('book-${item.book.id}'),
-                    item: item,
-                    coverRadius: coverRadius,
-                    showRating: showRating,
-                    showTags: showTags,
-                    showDescription: showDescription,
-                    descriptionLines: descriptionLines,
-                    showReview: showReview,
-                    reviewLines: reviewLines,
-                    selectionMode: selectionMode,
-                    selected: selectedBookIds.contains(item.book.id),
-                    onSelect: onToggleSelect == null
-                        ? null
-                        : () => onToggleSelect!(item),
-                    onOpen: () => onOpenBook(item),
-                    onManage: () => onManageBook(item),
-                  ),
-              },
+        itemCount: cells.length,
+        itemBuilder: (context, index) => Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: switch (cells[index]) {
+            ShelfCategoryCell(:final title, :final books) => CategoryListTile(
+              key: ValueKey('category-$title'),
+              title: title == kFavoritesShelf ? '收藏' : title.split('/').last,
+              items: books,
+              coverRadius: coverRadius,
+              onOpen: () => onOpenCategory(title),
+              onLongPress: onManageCategory == null
+                  ? null
+                  : () => onManageCategory!(title),
             ),
-          ),
+            ShelfBookCell(:final item) => BookListTile(
+              key: ValueKey('book-${item.book.id}'),
+              item: item,
+              coverRadius: coverRadius,
+              showRating: showRating,
+              showTags: showTags,
+              showDescription: showDescription,
+              descriptionLines: descriptionLines,
+              showReview: showReview,
+              reviewLines: reviewLines,
+              selectionMode: selectionMode,
+              selected: selectedBookIds.contains(item.book.id),
+              onSelect: onToggleSelect == null
+                  ? null
+                  : () => onToggleSelect!(item),
+              onOpen: () => onOpenBook(item),
+              onManage: () => onManageBook(item),
+            ),
+          },
         ),
+      ),
     };
   }
 
@@ -142,6 +148,7 @@ class ShelfFlow extends StatelessWidget {
   /// 按「行」铺而不是按格铺：架板是一条横贯整行的木板，格子之间的 12dp
   /// 缝隙也要接上，所以一行一个 Row，下面压一条 [ShelfPlank]。
   Widget _grid(BuildContext context, {required bool coverOnly}) {
+    final showBookTitle = !coverOnly && showTitle;
     final rows = (cells.length + columns - 1) ~/ columns;
     return SliverList.builder(
       itemCount: rows,
@@ -157,8 +164,10 @@ class ShelfFlow extends StatelessWidget {
               const gap = 12.0;
               final cellWidth =
                   (constraints.maxWidth - gap * (columns - 1)) / columns;
-              // 与原来的 childAspectRatio: 0.72 一致。
-              final cellHeight = cellWidth / 0.72;
+              // 与原来的 childAspectRatio: 0.72 一致；显示书名时给下方
+              // 文字留 28px（字号 12.5 + 间距 4）。
+              final cellHeight =
+                  cellWidth / 0.72 + (showBookTitle ? 48.0 : 0.0);
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -170,9 +179,11 @@ class ShelfFlow extends StatelessWidget {
                         for (var i = start; i < end; i++) ...[
                           if (i > start) const SizedBox(width: gap),
                           Expanded(
-                            child: _AnimatedAppear(
-                              index: i,
-                              child: _gridCell(i, coverOnly: coverOnly),
+                            child: _gridCell(
+                              context,
+                              i,
+                              coverOnly: coverOnly,
+                              showTitle: showBookTitle,
                             ),
                           ),
                         ],
@@ -198,72 +209,172 @@ class ShelfFlow extends StatelessWidget {
     );
   }
 
-  Widget _gridCell(int index, {required bool coverOnly}) {
+  Widget _gridCell(
+    BuildContext context,
+    int index, {
+    required bool coverOnly,
+    required bool showTitle,
+  }) {
     return switch (cells[index]) {
-      ShelfCategoryCell(:final title, :final books) => CategoryCard(
-          key: ValueKey('category-$title'),
-          title: title,
-          items: books,
-          coverRadius: coverRadius,
-          onOpen: () => onOpenCategory(title),
-        ),
-      ShelfBookCell(:final item) => coverOnly
-          ? BookCoverTile(
-              key: ValueKey('book-${item.book.id}'),
-              item: item,
-              coverRadius: coverRadius,
-              // 纯封面模式只留封面，不看进度；网格模式才显示右上角进度。
-              showProgress: false,
-              selectionMode: selectionMode,
-              selected: selectedBookIds.contains(item.book.id),
-              onSelect: onToggleSelect == null
-                  ? null
-                  : () => onToggleSelect!(item),
-              onOpen: () => onOpenBook(item),
-              onManage: () => onManageBook(item),
-            )
-          : BookCard(
-              key: ValueKey('book-${item.book.id}'),
-              item: item,
-              coverRadius: coverRadius,
-              showProgress: showProgress,
-              selectionMode: selectionMode,
-              selected: selectedBookIds.contains(item.book.id),
-              onSelect: onToggleSelect == null
-                  ? null
-                  : () => onToggleSelect!(item),
-              onOpen: () => onOpenBook(item),
-              onManage: () => onManageBook(item),
-            ),
+      ShelfCategoryCell(:final title, :final books) => _gridCategoryCell(
+        context,
+        title,
+        books,
+        showTitle: showTitle,
+      ),
+      ShelfBookCell(:final item) => _gridBookCell(
+        context,
+        item,
+        coverOnly: coverOnly,
+        showTitle: showTitle,
+      ),
     };
+  }
+
+  Widget _gridCategoryCell(
+    BuildContext context,
+    String title,
+    List<ShelfItem> books, {
+    required bool showTitle,
+  }) {
+    final card = CategoryCard(
+      key: ValueKey('category-$title'),
+      title: title == kFavoritesShelf ? '收藏' : title,
+      items: books,
+      coverRadius: coverRadius,
+      onOpen: () => onOpenCategory(title),
+      onLongPress: onManageCategory == null || title == kFavoritesShelf
+          ? null
+          : () => onManageCategory!(title),
+    );
+    if (!showTitle) {
+      if (title != kFavoritesShelf) return card;
+      return Stack(
+        children: [
+          Positioned.fill(child: card),
+          Positioned(
+            left: 4,
+            bottom: 4,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surface.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  child: Text('收藏', style: TextStyle(fontSize: 11)),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    // 书格下面显示书名，分类格也显示分类名，行高保持一致。
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: card),
+        const SizedBox(height: 4),
+        Text(
+          title == kFavoritesShelf ? '收藏' : title.split('/').last,
+          key: ValueKey('category-title-$title'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.left,
+          style: _gridTitleStyle(context),
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '共 ${books.length} 本',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            if (onManageCategory != null && title != kFavoritesShelf)
+              SizedBox(
+                width: 32,
+                height: 24,
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  tooltip: '管理分类',
+                  iconSize: 20,
+                  onPressed: () => onManageCategory!(title),
+                  icon: const Icon(Icons.more_horiz),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _gridBookCell(
+    BuildContext context,
+    ShelfItem item, {
+    required bool coverOnly,
+    required bool showTitle,
+  }) {
+    void open() => onOpenBook(item);
+    void manage() => onManageBook(item);
+    void toggle() => onToggleSelect!(item);
+    if (coverOnly) {
+      return BookCoverTile(
+        key: ValueKey('book-${item.book.id}'),
+        item: item,
+        coverRadius: coverRadius,
+        // 纯封面模式只留封面，不看进度；网格模式才显示右上角进度。
+        showProgress: false,
+        selectionMode: selectionMode,
+        selected: selectedBookIds.contains(item.book.id),
+        onSelect: onToggleSelect == null ? null : toggle,
+        onOpen: open,
+        onManage: manage,
+      );
+    }
+    final card = BookCard(
+      key: ValueKey('book-${item.book.id}'),
+      item: item,
+      coverRadius: coverRadius,
+      showProgress: showProgress,
+      selectionMode: selectionMode,
+      selected: selectedBookIds.contains(item.book.id),
+      onSelect: onToggleSelect == null ? null : toggle,
+      onOpen: open,
+      onManage: manage,
+    );
+    if (!showTitle) return card;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: card),
+        const SizedBox(height: 4),
+        Text(
+          item.book.title,
+          key: ValueKey('book-title-${item.book.id}'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.left,
+          style: _gridTitleStyle(context),
+        ),
+        const SizedBox(height: 20),
+      ],
+    );
   }
 }
 
-/// 冷启动 stagger：每格 +20ms，封顶 300ms。
-class _AnimatedAppear extends StatelessWidget {
-  const _AnimatedAppear({required this.index, required this.child});
-
-  final int index;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final motion = context.motion;
-    final delayMs = (index * 20).clamp(0, 300);
-    final total = motion.emphasized + Duration(milliseconds: delayMs);
-    final beginFraction = delayMs / total.inMilliseconds;
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: total,
-      curve: Interval(beginFraction, 1, curve: motion.enter),
-      builder: (context, value, child) => Opacity(
-        opacity: value,
-        child: Transform.translate(
-          offset: Offset(0, 12 * (1 - value)),
-          child: child,
-        ),
-      ),
-      child: child,
-    );
-  }
+/// 网格书名 / 分类名的统一样式（单行居中）。
+TextStyle _gridTitleStyle(BuildContext context) {
+  final theme = Theme.of(context);
+  return theme.textTheme.bodySmall?.copyWith(
+        fontSize: 12.5,
+        height: 1.2,
+        fontWeight: FontWeight.w500,
+        color: theme.colorScheme.onSurface,
+      ) ??
+      const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500);
 }

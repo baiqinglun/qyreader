@@ -241,6 +241,13 @@ class _ShelfSettingsSheetState extends ConsumerState<ShelfSettingsSheet>
                         onChanged: (value) =>
                             unawaited(controller.setShowGridProgress(value)),
                       ),
+                      _ToggleRow(
+                        switchKey: const ValueKey('shelf-show-grid-title'),
+                        label: '显示名称',
+                        value: prefs.showGridTitle,
+                        onChanged: (value) =>
+                            unawaited(controller.setShowGridTitle(value)),
+                      ),
                     ],
                   ),
                   _tab(

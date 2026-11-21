@@ -9,25 +9,18 @@
 library;
 
 import 'dart:async';
+import 'reader_input.dart';
 import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, kDebugMode;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kDebugMode;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show
-        Clipboard,
-        ClipboardData,
-        KeyDownEvent,
-        LogicalKeyboardKey,
-        MethodChannel,
-        SystemChrome,
-        SystemUiMode;
+    show Clipboard, ClipboardData, MethodChannel, SystemChrome, SystemUiMode;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
@@ -35,7 +28,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
 import 'package:go_router/go_router.dart';
 
 import '../../app/providers.dart';
-import '../../app/router.dart' show readerSearchPath;
+import '../../app/router.dart'
+    show readerSearchPath, readerTtsPath, routeObserver;
 import '../../app/theme/motion.dart';
 import '../../app/theme/reading_theme.dart';
 import '../../core/locator.dart';
@@ -51,6 +45,7 @@ import 'reader_assets.dart';
 import 'reader_boot.dart';
 import 'widgets/cloud_download_dialog.dart';
 import 'page_turn_sound_player.dart';
+import '../../features/home/widgets/global_tts_bar.dart';
 import 'reader_bridge_events.dart';
 import 'reader_controller.dart';
 import 'reader_active_marker.dart';
@@ -60,16 +55,20 @@ import 'reader_settings.dart';
 import 'fonts/reader_fonts.dart';
 import 'native/native_chapter_source.dart';
 import 'native/native_reader_view.dart';
-import 'native/native_tts_surface.dart';
+import 'note_rematch.dart';
+import '../stats/stats_prefs.dart';
 import 'reading_session_tracker.dart';
 import 'widgets/annotation_dialog.dart';
+import 'widgets/bookmark_note_dialog.dart';
 import 'widgets/note_editor_sheet.dart';
 import 'tts/tts_playback.dart';
 import 'tts/tts_settings.dart';
 import 'widgets/selection_menu.dart';
 import 'widgets/margin_editor_overlay.dart';
+import 'widgets/manual_locate_bar.dart';
 import 'widgets/tts_bar.dart';
 import 'widgets/tts_sheet.dart';
+import 'widgets/reader_jump_actions.dart';
 import 'widgets/toc_drawer.dart';
 import 'widgets/typesetting_panel.dart';
 
@@ -150,17 +149,28 @@ class _Turn {
 
 /// 阅读器页面。
 class ReaderPage extends ConsumerStatefulWidget {
-  const ReaderPage({required this.bookId, super.key});
+  const ReaderPage({
+    required this.bookId,
+    this.initialLocatorJson,
+    this.holdProgress = false,
+    super.key,
+  });
 
   /// 书籍 id。
   final String bookId;
+
+  /// 打开后直接跳到的位置（书籍信息的笔记定位用）。
+  final String? initialLocatorJson;
+
+  /// 跳转后是否挂起进度，等用户选择是否设为阅读进度。
+  final bool holdProgress;
 
   @override
   ConsumerState<ReaderPage> createState() => _ReaderPageState();
 }
 
 class _ReaderPageState extends ConsumerState<ReaderPage>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver, RouteAware {
   final _ViewSlot _a = _ViewSlot('A');
   final _ViewSlot _b = _ViewSlot('B');
   bool _visibleIsA = true;
@@ -170,6 +180,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   String? _bookUrl;
   String? _initialLocatorJson;
   bool _booted = false;
+
+  /// 从标注跳转前的阅读位置；非 null 表示当前处于「标注浏览」模式。
+  Locator? _annotationReturnLocator;
+  bool _annotationJumpHold = false;
   bool _bootTimedOut = false;
 
   /// 书籍仓储 future（`initState` 里取一次）。
@@ -257,10 +271,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   final ValueNotifier<TtsHighlight?> _nativeTtsHighlight =
       ValueNotifier<TtsHighlight?>(null);
 
-  /// 原生 TTS 适配层（章节表就绪后创建）。
-  NativeTtsSurface? _nativeTts;
-
   /// 原生阅读面状态句柄（目录/进度/TTS 跳转用）。
+  final GlobalKey<ReaderInputState> _readerInputKey =
+      GlobalKey<ReaderInputState>();
   final GlobalKey<NativeReaderViewState> _nativeKey =
       GlobalKey<NativeReaderViewState>();
 
@@ -275,19 +288,60 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   Animation<double>? _routeAnim;
   bool _routeAnimHooked = false;
 
+  /// 阅读页是否被其它路由盖住（搜索页 / 弹窗 / 底部面板）：
+  /// 盖住且没在听书 → 不计时（RouteAware 推拉 + 回前台守卫共用）。
+  bool _readerCovered = false;
+
+  /// 听书是否正在播放（ValueNotifier 状态；播放中 = 在读，盖住也计时）。
+  bool _isTtsPlaying() => _ttsState.status == TtsPlaybackStatus.playing;
+
+  /// 听书状态变化（只在阅读页被盖住时影响计时）：播放中恢复/继续计时，
+  /// 停了就结算暂停。只在「播放 ↔ 停」跳变时动作，位置刷新不触发。
+  bool _ttsWasPlaying = false;
+
+  void _onTtsStateChanged(TtsPlaybackState next) {
+    final playing = next.status == TtsPlaybackStatus.playing;
+    if (playing == _ttsWasPlaying) return;
+    _ttsWasPlaying = playing;
+    if (!_readerCovered) return;
+    if (playing) {
+      _session?.start();
+    } else {
+      unawaited(_session?.flush());
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_routeAnimHooked) return;
-    _routeAnimHooked = true;
-    final anim = ModalRoute.of(context)?.animation;
-    if (anim == null) {
-      _contentRevealed = true;
-      return;
+    if (!_routeAnimHooked) {
+      _routeAnimHooked = true;
+      final anim = ModalRoute.of(context)?.animation;
+      if (anim == null) {
+        _contentRevealed = true;
+      } else {
+        _routeAnim = anim;
+        anim.addStatusListener(_onRouteAnimStatus);
+        if (anim.status == AnimationStatus.completed) _contentRevealed = true;
+      }
     }
-    _routeAnim = anim;
-    anim.addStatusListener(_onRouteAnimStatus);
-    if (anim.status == AnimationStatus.completed) _contentRevealed = true;
+    // 路由覆盖感知：盖住时暂停计时，回到最上层恢复（搜索页、
+    // 排版/朗读面板、各种弹窗都是 ModalRoute，统一走这里）
+    routeObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
+  void didPushNext() {
+    // 被其它页面盖住：没在听书就结算暂停（听书播放中 = 在读，继续计时）
+    _readerCovered = true;
+    if (!_isTtsPlaying()) unawaited(_session?.flush());
+  }
+
+  @override
+  void didPopNext() {
+    // 回到阅读页最上层：重新起算（听书没停的话会话本来就没断，start 是 no-op）
+    _readerCovered = false;
+    _session?.start();
   }
 
   void _onRouteAnimStatus(AnimationStatus status) {
@@ -302,6 +356,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     'green': Color(0x73A9D98B),
     'blue': Color(0x6B9CC3F5),
     'rose': Color(0x6BF2A9B8),
+  };
+
+  /// 下划线颜色（不透明，保证细线可见）。
+  static const Map<String, Color> _markLines = {
+    'yellow': Color(0xFFD6A400),
+    'green': Color(0xFF4C9A2A),
+    'blue': Color(0xFF2F6FD0),
+    'rose': Color(0xFFC94F6D),
   };
 
   /// 已尝试过锚点迁移的标注 id。
@@ -327,8 +389,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   /// 正在操作的既有划线（非空 = 显示划线操作面板）。
   Annotation? _activeAnnotation;
 
-  /// TTS 播放控制器（句级朗读 + 跟读高亮 + 自动翻页/续章）。
-  late final TtsPlaybackController _tts;
+  /// 手动定位中的标注（非空 = 阅读页显示「设为当前页」悬浮条）。
+  Annotation? _manualLocate;
+
+  /// 全局听书控制器（keepAlive 单例；退出阅读页后朗读继续）。
+  TtsPlayback get _tts => ref.read(ttsPlaybackProvider.notifier);
+
+  /// 全局听书状态快照（Notifier.state 是 protected，外部一律走 provider）。
+  TtsPlaybackState get _ttsState => ref.read(ttsPlaybackProvider);
 
   /// 阅读会话跟踪（统计时长/字数）。
   ReadingSessionTracker? _session;
@@ -366,11 +434,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _settle.addStatusListener((status) {
       if (status == AnimationStatus.completed) _finalizeTurn();
     });
-    _tts = TtsPlaybackController(
-      bridge: () => _useNative(ref.read(readingSettingsControllerProvider))
-          ? (_nativeTts ??= _makeNativeTts())
-          : _visible.bridge,
-      onFinishedChapter: () {
+    // 阅读页有自己的听书控制条：让全局条让位（dispose 时归还）
+    TtsBarOverlay.suppress();
+    // 绑定全局听书控制器：高亮句不在当前页时翻页（阅读页在场才生效），
+    // 退出阅读页自动解绑，朗读照常继续
+    _tts.bindReader(
+      onJump: (chapterIdx, offset) {
+        final view = _nativeKey.currentState;
+        if (view == null || view.isSelectingText) return;
+        if (view.currentChapter != chapterIdx) {
+          view.jumpToChapter(chapterIdx, offset: offset);
+        } else {
+          view.jumpToOffset(offset);
+        }
+      },
+      onFinishedAll: () {
         if (!mounted) return;
         ScaffoldMessenger.of(
           context,
@@ -414,9 +492,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       local = await _downloadBookWithProgress(book);
       if (!mounted) return;
       if (!local) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('下载失败：检查同步设置或云端备份后再试')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('下载失败：检查同步设置或云端备份后再试')));
         context.pop();
         return;
       }
@@ -445,10 +523,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         barrierDismissible: false,
         builder: (dialogContextValue) {
           dialogContext.value = dialogContextValue;
-          return PopScope(
-            canPop: false,
-            child: cloudDownloadProgress(book),
-          );
+          return PopScope(canPop: false, child: cloudDownloadProgress(book));
         },
       ),
     );
@@ -479,9 +554,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final repo = _bookRepoFuture;
     if (repo == null) return;
     unawaited(
-      repo.then((r) {
-        return r.flushOpened(widget.bookId);
-      }).catchError((Object _) {}),
+      repo
+          .then((r) {
+            return r.flushOpened(widget.bookId);
+          })
+          .catchError((Object _) {}),
     );
   }
 
@@ -508,25 +585,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     });
   }
 
-  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    if (_marginGroup != null) return KeyEventResult.handled;
-    final settings = ref.read(readingSettingsControllerProvider);
-    if (settings.flow == ReadingFlow.scrolled) return KeyEventResult.ignored;
-    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-      _requestForward();
-      return KeyEventResult.handled;
-    }
-    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-      _goBackward();
-      return KeyEventResult.handled;
-    }
-    return KeyEventResult.ignored;
-  }
-
   @override
   void dispose() {
     _routeAnim?.removeStatusListener(_onRouteAnimStatus);
+    routeObserver.unsubscribe(this);
     unawaited(clearReaderActive());
     // 退出阅读器才把「最近打开」时间落库：书架此刻重排（打开瞬间落库
     // 会让转场下的书架闪动，用户口径：退出时才重新渲染位置）。
@@ -548,14 +610,23 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _turnProgress.dispose();
     unawaited(_annotationsSub?.cancel());
     unawaited(_bookmarksSub?.cancel());
-    unawaited(_tts.dispose());
+    _tts.unbindReader();
+    TtsBarOverlay.unsuppress();
     final session = _session;
     if (session != null) {
       unawaited(session.flush());
       session.dispose();
     }
     unawaited(_assetServer.stop());
-    ref.read(readerControllerProvider(widget.bookId).notifier).flushProgress();
+    final controller = ref.read(
+      readerControllerProvider(widget.bookId).notifier,
+    );
+    if (_annotationJumpHold) {
+      // 标注浏览中退出：保留跳转前的阅读进度，不把浏览位置写成进度。
+      controller.cancelProgressHold();
+    } else {
+      controller.flushProgress();
+    }
     super.dispose();
   }
 
@@ -583,7 +654,20 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     // 任何一步慢（或插件首次初始化慢）都不能继续挡住「正在打开…」。
     final nativeMode = _useNative(ref.read(readingSettingsControllerProvider));
     _readerUri = Uri.parse('assets/reader/reader.html');
-    final initial = state.initialLocator;
+    var initial = state.initialLocator;
+    final requested = widget.initialLocatorJson == null
+        ? null
+        : locatorFromJson(widget.initialLocatorJson!);
+    if (requested != null) {
+      // 从书籍信息点笔记进来：直接落到笔记位置；原阅读进度先挂起，
+      // 由右下角「返回原位置 / 设为阅读进度」决定这次跳转算不算阅读。
+      initial = requested;
+      if (widget.holdProgress && state.initialLocator != null) {
+        _annotationReturnLocator = state.initialLocator;
+        _annotationJumpHold = true;
+        _controller.holdProgress();
+      }
+    }
     _initialLocatorJson = initial == null ? null : locatorToJson(initial);
     _diagLog('book ${book.fileSize}B, initial locator: $_initialLocatorJson');
 
@@ -627,15 +711,23 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   /// 启动的收尾工作：都是「有更好、没有也能读」的附属步骤，逐个限时，
   /// 任何一个卡住都不影响正文显示。
   Future<void> _finishBoot(Book book, {required bool nativeMode}) async {
-    // M5：阅读会话计时（字数按 relocated 正增量估算）
+    // M5：阅读会话计时（字数按 relocated 正增量估算；单页计时按
+    // 「统计页 → 单页最长计时」封顶，防止开着书离开把时长灌爆）
     try {
       final statsRepo = await ref
           .read(statsRepositoryProvider.future)
           .timeout(const Duration(seconds: 4));
+      final prefs = await SharedPreferences.getInstance();
+      final pageCapMinutes =
+          prefs.getInt(kPageCapPrefsKey) ?? kDefaultPageCapMinutes;
       _session = ReadingSessionTracker(
         repository: statsRepo,
         bookId: widget.bookId,
         wordCount: book.wordCount,
+        pageCapMinutes: pageCapMinutes,
+        // 计时条件：阅读页最上层（前台）或在听书播放中
+        isListening: _isTtsPlaying,
+        isCovered: () => _readerCovered,
       )..start();
     } catch (e) {
       _diagLog('stats skipped: $e');
@@ -674,8 +766,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           html: await loadReaderHtml(),
           bookPath: book.filePath,
         );
-        _bookUrl =
-            _assetServer.pageUri!.replace(path: '/book.epub').toString();
+        _bookUrl = _assetServer.pageUri!.replace(path: '/book.epub').toString();
         _diagLog('page: $_readerUri book: $_bookUrl');
         if (mounted) setState(() => _booted = true);
       } catch (e) {
@@ -1676,14 +1767,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       state.jumpToOffset((v * len).round());
       return;
     }
-    // 全书进度：章索引 + 章内比例，落到章中间而不是章首
-    final total = chapters.length;
-    final pos = v * total;
-    var idx = pos.floor();
-    if (idx >= total) idx = total - 1;
-    final frac = (pos - idx).clamp(0.0, 1.0);
-    final len = chapters[idx].text.length;
-    state.jumpToChapter(idx, offset: (frac * len).round());
+    // 全书进度：按内容字符量反解落点（与上报的全书进度同口径，
+    // 长短章不再均摊——拖到 50% 就落在全书一半内容处）
+    final (idx, offset) = chapterForContentPercent(chapters, v);
+    state.jumpToChapter(idx, offset: offset);
   }
 
   void _onChapterTap(String href) {
@@ -1769,9 +1856,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     String? json;
     try {
       // WebView 正忙时这句可能迟迟不回：超时就走常规落库，别把退出卡住。
-      json = await bridge
-          .currentLocatorJson()
-          .timeout(const Duration(milliseconds: 800));
+      json = await bridge.currentLocatorJson().timeout(
+        const Duration(milliseconds: 800),
+      );
     } catch (e) {
       _diagLog('final locator failed: $e');
       json = null;
@@ -1814,6 +1901,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   /// 进入边距直调模式：正文 / 页眉 / 页脚三页。
   void _openMarginEditor(MarginGroup group) {
+    _dismissAnnotationUi();
     setState(() {
       _marginGroup = group;
       _marginDraft = null;
@@ -1842,7 +1930,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _marginDraft = draft;
     // patch 在第一个 await 前就同步更新 state，页面不会先闪回旧值。
     unawaited(
-      ref.read(readingSettingsControllerProvider.notifier).patch(
+      ref
+          .read(readingSettingsControllerProvider.notifier)
+          .patch(
             marginLeft: draft.marginLeft,
             marginRight: draft.marginRight,
             marginTop: draft.marginTop,
@@ -2004,17 +2094,48 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   /// 按选区创建划线（4 色 / 笔记共用入口）。
-  Future<void> _createHighlight(
+  Future<Annotation?> _createHighlight(
     AnnotationColor color,
     ReaderSelected sel, {
     String note = '',
+    AnnotationType type = AnnotationType.highlight,
   }) async {
-    final repo = await ref.read(annotationRepositoryProvider.future);
-    // 原生模式：锚点是「章索引 + 字符区间」，渲染时不需要迁移
     final nsel = _nativeSelection;
-    final isNative =
-        nsel != null &&
-        sel.cfiRange == '@${nsel.chapterIndex}:${nsel.start}:${nsel.end}';
+    final isNative = nsel != null && sel.cfiRange == _nativeSelectionKey(nsel);
+    _dismissAnnotationUi();
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    if (!mounted) return null;
+    if (isNative && nsel.spansChapters) {
+      final book = _controllerState.book;
+      final chapters = book == null
+          ? null
+          : ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
+      if (chapters == null || nsel.endChapterIndex >= chapters.length) {
+        return null;
+      }
+      // 锚点按章存储。连续拖动跨章时，为每章写入独立的章内标注。
+      Annotation? first;
+      for (var i = nsel.chapterIndex; i <= nsel.endChapterIndex; i++) {
+        final chapter = chapters[i];
+        final start = i == nsel.chapterIndex ? nsel.start : 0;
+        final end = i == nsel.endChapterIndex ? nsel.end : chapter.text.length;
+        final quote = chapter.text.substring(start, end).trim();
+        if (quote.isEmpty) continue;
+        final annotation = await repo.addHighlight(
+          bookId: widget.bookId,
+          cfiRange: '',
+          color: color,
+          quotedText: quote,
+          href: chapter.href,
+          chapterIndex: i,
+          offset: start,
+          offsetEnd: end,
+          type: type,
+        );
+        first ??= annotation;
+      }
+      return first;
+    }
     final created = await repo.addHighlight(
       bookId: widget.bookId,
       cfiRange: isNative ? '' : sel.cfiRange,
@@ -2024,6 +2145,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       chapterIndex: isNative ? nsel.chapterIndex : null,
       offset: isNative ? nsel.start : null,
       offsetEnd: isNative ? nsel.end : null,
+      type: type,
     );
     if (note.isNotEmpty) {
       await repo.setNote(created.id, note);
@@ -2039,17 +2161,34 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         ),
       );
     }
-    _dismissAnnotationUi();
+    return created;
+  }
+
+  /// 从选区直接创建标注并打开编辑弹窗。
+  Future<void> _createFromSelection(
+    AnnotationType type,
+    AnnotationColor color, {
+    bool focusNote = false,
+  }) async {
+    final sel = _selection;
+    if (sel == null) return;
+    final created = await _createHighlight(color, sel, type: type);
+    if (created == null || !mounted) return;
+    await _showAnnotationDialog(created, focusNote: focusNote);
   }
 
   /// 划线操作弹窗（屏幕中间）：改颜色 / 写想法 / 删除。
-  Future<void> _showAnnotationDialog(Annotation a) async {
+  Future<void> _showAnnotationDialog(
+    Annotation a, {
+    bool focusNote = false,
+  }) async {
     setState(() => _activeAnnotation = a);
     try {
       final result = await showAnnotationEditDialog(
         context,
         annotation: a,
         theme: _theme,
+        focusNote: focusNote,
       );
       if (result == null || !mounted) return;
       final repo = await ref.read(annotationRepositoryProvider.future);
@@ -2137,34 +2276,297 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (existing != null) {
       await repo.removeBookmark(existing.id);
     } else {
+      if (!mounted) return;
+      // 添加前先问备注（可留空）；取消则什么都不做。
+      final note = await showBookmarkNoteDialog(context, theme: _theme);
+      if (note == null || !mounted) return;
       await repo.addBookmark(
         bookId: widget.bookId,
         locatorJson: locatorToJson(loc),
+        label: note.isEmpty ? null : note,
       );
     }
   }
 
-  /// 目录跳转到标注/书签的 locator。
+  /// 目录跳转到书签的 locator（书签即阅读位置，正常推进度）。
   void _gotoLocatorJson(String locatorJson) {
     setState(() => _tocOpen = false);
     final loc = locatorFromJson(locatorJson);
+    if (loc != null) _jumpToLocator(loc);
+  }
+
+  /// 从标注跳转：默认不改变阅读进度，先挂起进度并记下原位置。
+  ///
+  /// 右下角浮出「返回原位置 / 设为阅读进度」，由用户决定这次跳转算不算阅读。
+  void _gotoAnnotationLocator(String locatorJson) {
+    final loc = locatorFromJson(locatorJson);
     if (loc == null) return;
-    // 原生阅读面：按 href / 章索引定位到章，再按章内字符偏移定位到页。
-    // （旧实现走 _visible.bridge，原生模式下 bridge 恒为 null，点了没反应。）
+    if (!_annotationJumpHold) {
+      final original =
+          _controllerState.currentLocator ?? _controllerState.initialLocator;
+      if (original != null) {
+        _annotationReturnLocator = original;
+        _annotationJumpHold = true;
+        _controller.holdProgress();
+      }
+    }
+    setState(() => _tocOpen = false);
+    _jumpToLocator(loc);
+  }
+
+  /// 标注列表里「未定位 / 对不上原文」的标注。
+  List<Annotation> _unlocatedAnnotations() {
+    final book = _controllerState.book;
+    if (book == null) return const <Annotation>[];
+    final chapters = ref
+        .read(nativeChaptersProvider(NativeChaptersKey.of(book)))
+        .value;
+    if (chapters == null || chapters.isEmpty) return const <Annotation>[];
+    return <Annotation>[
+      for (final a in _annotations)
+        if (!annotationAnchorLocated(a, chapters)) a,
+    ];
+  }
+
+  /// 标注列表里「未定位 / 对不上原文」的标注 id。
+  Set<String> _unlocatedAnnotationIds() => <String>{
+    for (final a in _unlocatedAnnotations()) a.id,
+  };
+
+  /// 自动查询定位：用原文搜索当前书，找到就写回锚点并跳过去。
+  Future<void> _autoLocateAnnotation(Annotation annotation) async {
+    final quote = (annotation.quotedText ?? '').trim();
+    if (quote.isEmpty) {
+      _locateSnack('这条标注没有原文，试试手动定位');
+      return;
+    }
     final book = _controllerState.book;
     final chapters = book == null
         ? null
         : ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
-    if (chapters != null) {
-      final chapter = nativeChapterForLocator(chapters, loc);
-      if (chapter != null) {
-        _nativeKey.currentState?.jumpToChapter(
-          chapter.idx,
-          offset: loc.offset ?? 0,
-        );
-        return;
-      }
+    if (chapters == null || chapters.isEmpty) {
+      _locateSnack('正文还没加载好，稍后再试');
+      return;
     }
+    final old = locatorFromJson(annotation.locatorStart);
+    final match = NoteLocator(chapters).locate(
+      quote,
+      preferredChapterIndex: old?.chapterIndex,
+      preferredHref: old?.href,
+    );
+    if (match == null) {
+      _locateSnack('没有找到这条标注的原文，试试手动定位');
+      return;
+    }
+    final json = locatorToJson(
+      Locator(
+        href: match.href,
+        chapterIndex: match.chapterIndex,
+        offset: match.start,
+        offsetEnd: match.end,
+      ),
+    );
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.setAnchor(annotation.id, json, locatorEnd: json);
+    if (!mounted) return;
+    _tocOpen = false;
+    _gotoAnnotationLocator(json);
+    _locateSnack('已自动定位到「${chapters[match.chapterIndex].title}」');
+  }
+
+  /// 进入手动定位：收起列表，正文继续翻页，底部出现「设为当前页」。
+  void _beginManualLocate(Annotation annotation) {
+    setState(() {
+      _tocOpen = false;
+      _manualLocate = annotation;
+    });
+  }
+
+  /// 长按选中文字 →「定位」：把当前选区设成某条未定位笔记的位置。
+  Future<void> _pickUnlocatedForSelection() async {
+    final selection = _nativeSelection;
+    if (selection == null || selection.end <= selection.start) {
+      _locateSnack('先在正文里选中要定位的文字');
+      return;
+    }
+    final notes = _unlocatedAnnotations();
+    if (notes.isEmpty) {
+      _locateSnack('没有未定位的笔记');
+      return;
+    }
+    final picked = await showModalBottomSheet<Annotation>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(ctx).height * 0.6,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '选择未定位的笔记',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '选中文字：${selection.text}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Theme.of(
+                          ctx,
+                        ).colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: notes.length,
+                  itemBuilder: (_, index) {
+                    final a = notes[index];
+                    final note = (a.note ?? '').trim();
+                    return ListTile(
+                      key: ValueKey('locate-note-${a.id}'),
+                      leading: Container(
+                        width: 4,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color:
+                              _markFills[a.color.token] ?? _markFills['yellow'],
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      title: Text(
+                        (a.quotedText ?? '').trim(),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        note.isEmpty ? '未定位' : note,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => Navigator.of(ctx).pop(a),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final href = _nativeHrefOf(selection.chapterIndex);
+    final json = locatorToJson(
+      Locator(
+        href: href,
+        chapterIndex: selection.chapterIndex,
+        offset: selection.start,
+        offsetEnd: selection.end,
+      ),
+    );
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.setAnchor(picked.id, json, locatorEnd: json);
+    if (!mounted) return;
+    _dismissAnnotationUi();
+    _locateSnack('已把这条笔记定位到选中的文字');
+  }
+
+  /// 手动定位确认：把当前页首锚给这条标注（带 manual 标记，不再做原文校验）。
+  Future<void> _confirmManualLocate() async {
+    final annotation = _manualLocate;
+    if (annotation == null) return;
+    final book = _controllerState.book;
+    final chapters = book == null
+        ? null
+        : ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
+    final current =
+        _controllerState.currentLocator ?? _controllerState.initialLocator;
+    if (chapters == null || chapters.isEmpty || current == null) {
+      _locateSnack('还没定位到当前页，稍后再试');
+      return;
+    }
+    final chapter = nativeChapterForLocator(chapters, current);
+    if (chapter == null || chapter.text.isEmpty) {
+      _locateSnack('当前页没有正文，换一页再试');
+      return;
+    }
+    final length = chapter.text.length;
+    final start = math.min(math.max(current.offset ?? 0, 0), length - 1);
+    final quoteLength = (annotation.quotedText ?? '').trim().length;
+    final end = math.min(start + math.max(quoteLength, 1), length);
+    final json = jsonEncode(<String, dynamic>{
+      'v': 1,
+      'href': chapter.href,
+      'chapterIndex': chapter.idx,
+      'offset': start,
+      'offsetEnd': end,
+      // 用户自己确认的位置：标注列表不再按原文对照判「未定位」。
+      'manual': true,
+    });
+    final repo = await ref.read(annotationRepositoryProvider.future);
+    await repo.setAnchor(annotation.id, json, locatorEnd: json);
+    if (!mounted) return;
+    setState(() => _manualLocate = null);
+    _locateSnack('已把这条标注定位到「${chapter.title}」');
+  }
+
+  void _locateSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 回到标注跳转前的阅读位置。
+  void _returnFromAnnotationJump() {
+    final target = _annotationReturnLocator;
+    _annotationReturnLocator = null;
+    _annotationJumpHold = false;
+    _controller.cancelProgressHold();
+    setState(() {});
+    if (target != null) _jumpToLocator(target);
+  }
+
+  /// 把当前标注所在页写成新的阅读进度。
+  Future<void> _setAnnotationJumpAsProgress() async {
+    _annotationReturnLocator = null;
+    setState(() => _annotationJumpHold = false);
+    await _controller.releaseProgress(saveCurrent: true);
+  }
+
+  /// 按 href / 章索引定位到章，再按章内字符偏移定位到页。
+  void _jumpToLocator(Locator loc) {
+    final book = _controllerState.book;
+    final chapters = book == null
+        ? null
+        : ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
+    if (chapters == null) return;
+    final chapter = nativeChapterForLocator(chapters, loc);
+    if (chapter == null) return;
+    _nativeKey.currentState?.jumpToChapter(
+      chapter.idx,
+      offset: loc.offset ?? 0,
+    );
   }
 
   /// 全书搜索入口。
@@ -2172,9 +2574,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final hit = await context.push<BookSearchHit>(
       readerSearchPath(widget.bookId),
     );
-    if (hit == null) return;
-    unawaited(_visible.bridge?.gotoHref(hit.href));
-    _resetHiddenSync();
+    if (hit == null || !mounted) return;
+    // 原生阅读面没有 WebView bridge：按命中章 + 章内偏移跳，不再只跳到章首
+    //（旧代码只调 bridge.gotoHref，原生模式点搜索结果没反应）。
+    _jumpToLocator(
+      Locator(href: hit.href, chapterIndex: hit.chapterIdx, offset: hit.offset),
+    );
   }
 
   /// 标注导出 Markdown：写入应用文档目录 exports/，SnackBar 给出路径。
@@ -2198,21 +2603,86 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     ).showSnackBar(SnackBar(content: Text('已导出：${file.path}')));
   }
 
-  /// 朗读入口：设置面板 → 开始朗读。
+  /// 朗读入口：听书中 → 进全屏听书页；否则弹设置面板开始朗读。
   Future<void> _showTtsSheet() async {
+    if (_ttsState.active) {
+      await _openTtsPage();
+      return;
+    }
     // 朗读时收起 chrome 与抽屉，避免遮挡正文
     final started = await showTtsSheet(
       context,
       theme: _theme,
-      loadVoices: _tts.availableVoices,
+      loadEngines: _tts.availableEngines,
     );
     if (started != true || !mounted) return;
     setState(() => _chromeVisible = false);
-    await _tts.start(ref.read(ttsSettingsControllerProvider));
-    if (_tts.value.error != null && mounted) {
+    await _startListening();
+  }
+
+  /// 启动全局听书：章节表与当前位置由阅读页提供（此后控制器自足，
+  /// 退出阅读页也能继续朗读/续章）。
+  Future<void> _startListening({int? startChapter, int? startOffset}) async {
+    // 冷启动后设置是异步恢复的：等它完成，保证用用户上次的引擎/音色
+    await ref.read(ttsSettingsControllerProvider.notifier).waitRestored();
+    final book = _controllerState.book;
+    if (book == null) return;
+    final chapters =
+        ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value ??
+        const <NativeChapter>[];
+    await _tts.start(
+      settings: ref.read(ttsSettingsControllerProvider),
+      bookId: book.id,
+      bookTitle: book.title,
+      chapters: chapters,
+      chapterIdx:
+          startChapter ??
+          _nativeKey.currentState?.currentChapter ??
+          _nativeStartChapter,
+      startOffset:
+          startOffset ?? _nativeKey.currentState?.currentPageOffset ?? 0,
+    );
+    if (_ttsState.error != null && mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(_tts.value.error!)));
+      ).showSnackBar(SnackBar(content: Text(_ttsState.error!)));
+    }
+  }
+
+  /// 打开全屏听书页（控制条与底栏入口共用；控制器是全局单例，
+  /// 听书页直接从 provider 取，不经过路由 extra）。
+  Future<void> _openTtsPage() async {
+    await context.push(readerTtsPath(widget.bookId));
+  }
+
+  /// 定位到正在朗读的句（浮动「定位」按钮；章节不同先跳章）。
+  void _locateTtsSentence() {
+    final h = _ttsState.highlight;
+    if (h == null) return;
+    final view = _nativeKey.currentState;
+    if (view == null) return;
+    if (view.currentChapter != h.chapterIndex) {
+      view.jumpToChapter(h.chapterIndex, offset: h.start);
+    } else {
+      view.jumpToOffset(h.start);
+    }
+  }
+
+  /// 选区菜单「从此听」：从选中的那句开始朗读（选区起点 = 章内字符偏移，
+  /// 桥按「包含该偏移的句子」取句）。
+  Future<void> _listenFromSelection() async {
+    final selection = _selection == null ? null : _nativeSelection;
+    _dismissAnnotationUi();
+    if (!mounted) return;
+    setState(() => _chromeVisible = false);
+    await _startListening(
+      startChapter: selection?.chapterIndex,
+      startOffset: selection?.start,
+    );
+    if (_ttsState.error != null && mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_ttsState.error!)));
     }
   }
 
@@ -2224,6 +2694,20 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   Widget build(BuildContext context) {
     final state = ref.watch(readerControllerProvider(widget.bookId));
     final settings = ref.watch(readingSettingsControllerProvider);
+    // 全局听书状态：句推进/暂停都会通知（高频）——这里只把高亮拷给正文
+    // notifier（NativeReaderView 内部局部重绘），计时联动按播放跳变处理
+    final ttsState = ref.watch(ttsPlaybackProvider);
+    ref.listen(ttsPlaybackProvider, (prev, next) {
+      _onTtsStateChanged(next);
+      if (next.bookId == widget.bookId) {
+        if (_nativeTtsHighlight.value != next.highlight) {
+          _nativeTtsHighlight.value = next.highlight;
+        }
+      } else if (_nativeTtsHighlight.value != null) {
+        // 正在听的是别的书：清掉本页高亮（多书切换防串染）
+        _nativeTtsHighlight.value = null;
+      }
+    });
     final liveMargins = ref.watch(liveReaderMarginsProvider);
     final theme = settings.theme;
     final insets = _readingVerticalInsets();
@@ -2245,10 +2729,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final rightGutter = padding.right + safePadding.right;
 
     final contentReady =
-        _booted &&
-        state.book != null &&
-        !_bootTimedOut &&
-        _readerUri != null;
+        _booted && state.book != null && !_bootTimedOut && _readerUri != null;
+    // 听书定位：正在读的句不在当前可见页时，浮出「定位」按钮
+    // （auto-follow 正常时播放中基本隐藏；暂停后翻走 / 章节错位时出现）
+    final ttsHighlight = ttsState.highlight;
+    final ttsLocateVisible =
+        contentReady &&
+        ttsState.active &&
+        ttsHighlight != null &&
+        !(_nativeKey.currentState?.isOffsetVisible(
+              ttsHighlight.chapterIndex,
+              ttsHighlight.start,
+            ) ??
+            true);
 
     // 底部进度条：按设置显示全书或本章进度
     final progressScope = settings.progressScope;
@@ -2282,7 +2775,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           _selection == null &&
           _activeAnnotation == null,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
+        if (didPop) {
+          // 退出那一刻就结算会话：HomeShell 的 didPopNext 会在 pop 瞬间
+          // 重建首页/统计并重拉数据，等 dispose（退场动画结束后）才 flush
+          // 的话，返回首页读到的是结算前的旧数字（v2.48.2 修）。
+          _readerCovered = true;
+          unawaited(_session?.flush());
+          return;
+        }
         if (_marginGroup != null) {
           _closeMarginEditor();
           return;
@@ -2307,8 +2807,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           top: false,
           bottom: false,
           child: Focus(
-            autofocus: true,
-            onKeyEvent: _onKeyEvent,
             child: Stack(
               children: [
                 // [0] 内容层：边距 = WebView 外层 padding（拖动只改 padding，
@@ -2322,8 +2820,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                           // 也靠它贯通到屏幕上下边缘），外层不能再叠一遍，
                           // 否则上下各多出一条双重留白（色带标注下实测）。
                           // WebView 路径仍靠外层 padding 做拖边距实时预览。
-                          padding:
-                              _useNative(settings) ? EdgeInsets.zero : padding,
+                          padding: _useNative(settings)
+                              ? EdgeInsets.zero
+                              : padding,
                           child: Stack(
                             children: [
                               // 固定槽位顺序：交换可视/隐藏时不要让 Stack
@@ -2403,10 +2902,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                             ],
                           ),
                         )
-                      : _openingPanel(
-                          theme,
-                          title: state.book?.title,
-                        ),
+                      : _openingPanel(theme, title: state.book?.title),
                 ),
                 // [1] 后翻覆盖层：旧页截图滑出
                 Positioned.fill(
@@ -2494,6 +2990,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                               onToggleBookmark: _toggleBookmark,
                               onSearch: _openSearch,
                               onExport: _exportAnnotations,
+                              onInputSettings: () =>
+                                  _readerInputKey.currentState?.configure(),
                               onDiag: () async {
                                 setState(() => _diagVisible = true);
                                 await _dumpPageDiag();
@@ -2506,13 +3004,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                                 children: [
                                   // 控制条是独立层（chrome 隐藏时仍可见），
                                   // 此处留出底栏高度避免遮挡
-                                  SizedBox(height: _tts.value.active ? 64 : 0),
+                                  SizedBox(height: ttsState.active ? 64 : 0),
                                   _BottomBar(
                                     state: state,
                                     theme: theme,
                                     progressValue: progressValue,
                                     progressLabel: progressLabel,
-                                    ttsActive: _tts.value.active,
+                                    ttsActive: ttsState.active,
                                     onToc: () =>
                                         setState(() => _tocOpen = true),
                                     onJump: _showJumpPanel,
@@ -2539,24 +3037,84 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                       padding: EdgeInsets.only(
                         bottom: (_chromeVisible && state.book != null) ? 96 : 8,
                       ),
-                      child: ValueListenableBuilder<TtsPlaybackState>(
-                        valueListenable: _tts,
-                        builder: (context, ttsState, _) {
-                          if (!ttsState.active) {
-                            return const SizedBox.shrink();
-                          }
-                          return TtsBar(
-                            state: ttsState,
-                            theme: theme,
-                            onPause: _tts.pause,
-                            onResume: _tts.resume,
-                            onStop: _tts.stop,
-                          );
-                        },
-                      ),
+                      child: ttsState.active
+                          ? TtsBar(
+                              state: ttsState,
+                              theme: theme,
+                              onOpen: () => unawaited(_openTtsPage()),
+                              onPause: _tts.pause,
+                              onResume: _tts.resume,
+                              onStop: _tts.stop,
+                            )
+                          : const SizedBox.shrink(),
                     ),
                   ),
                 ),
+                // [3.55] 听书定位按钮：正在读的句不在当前页时浮出
+                if (ttsLocateVisible)
+                  Positioned(
+                    top: safePadding.top + (_chromeVisible ? 60 : 8),
+                    right: 16,
+                    child: Material(
+                      elevation: 3,
+                      borderRadius: BorderRadius.circular(20),
+                      color: theme.chromeSurface,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(20),
+                        onTap: _locateTtsSentence,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.my_location_rounded,
+                                size: 15,
+                                color: theme.accent,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '定位朗读句',
+                                style: TextStyle(
+                                  color: theme.chromeForeground,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                // [3.6] 划线跳转后的进度选择：默认不改变阅读进度。
+                if (_annotationJumpHold)
+                  Positioned(
+                    right: 16,
+                    bottom: safePadding.bottom + 104,
+                    child: ReaderJumpActions(
+                      theme: theme,
+                      onReturn: _returnFromAnnotationJump,
+                      onSetProgress: () =>
+                          unawaited(_setAnnotationJumpAsProgress()),
+                    ),
+                  ),
+                // [3.7] 手动定位标注：正文可继续翻页，确认后锚到当前页。
+                if (_manualLocate != null)
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom:
+                        safePadding.bottom + (_annotationJumpHold ? 164 : 96),
+                    child: ManualLocateBar(
+                      theme: theme,
+                      quote: _manualLocate!.quotedText ?? '',
+                      onCancel: () => setState(() => _manualLocate = null),
+                      onConfirm: () => unawaited(_confirmManualLocate()),
+                    ),
+                  ),
                 // [4] 目录抽屉（目录/书签/标注三 Tab）。
                 // 必须 Positioned.fill：Stack 尺寸由非定位子节点决定，
                 // 收起时的 SizedBox.shrink 会把整个根 Stack 塌缩成 0×0，
@@ -2569,9 +3127,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                     currentHref: _visible.locator?.href,
                     bookmarks: _bookmarks,
                     annotations: _annotations,
+                    bookTitle: state.book?.title ?? '',
+                    author: state.book?.author ?? '',
                     onDismiss: () => setState(() => _tocOpen = false),
                     onChapter: _onChapterTap,
                     onGotoLocator: _gotoLocatorJson,
+                    onGotoAnnotation: _gotoAnnotationLocator,
                     onDeleteBookmark: (id) async {
                       final repo = await ref.read(
                         annotationRepositoryProvider.future,
@@ -2589,6 +3150,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                       if (a != null) await _deleteAnnotation(a);
                     },
                     onExport: _exportAnnotations,
+                    unlocatedIds: _tocOpen
+                        ? _unlocatedAnnotationIds()
+                        : const <String>{},
+                    onAutoLocate: (a) => unawaited(_autoLocateAnnotation(a)),
+                    onManualLocate: _beginManualLocate,
                   ),
                 ),
                 // [4.5] 选区标注菜单（锚定选区矩形上方/下方，z 序高于抽屉）
@@ -2596,28 +3162,32 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                   SelectionMenu(
                     rect: _selection!.rect,
                     theme: theme,
-                    onColor: (c) => _createHighlight(c, _selection!),
-                    onNote: () async {
-                      final sel = _selection;
-                      if (sel == null) return;
-                      final note = await showNoteEditorSheet(
-                        context,
-                        theme: theme,
-                      );
-                      if (note == null) return;
-                      if (!mounted) return;
-                      await _createHighlight(
-                        AnnotationColor.yellow,
-                        sel,
-                        note: note,
-                      );
-                    },
                     onCopy: () {
                       Clipboard.setData(
                         ClipboardData(text: _selection?.text ?? ''),
                       );
                       _dismissAnnotationUi();
                     },
+                    onUnderline: () => _createFromSelection(
+                      AnnotationType.underline,
+                      AnnotationColor.blue,
+                    ),
+                    onHighlight: () => _createFromSelection(
+                      AnnotationType.highlight,
+                      AnnotationColor.yellow,
+                    ),
+                    onNote: () => _createFromSelection(
+                      AnnotationType.highlight,
+                      AnnotationColor.yellow,
+                      focusNote: true,
+                    ),
+                    onListen: _listenFromSelection,
+                    // 未定位笔记只能绑定到单章选区。
+                    onLocateNote:
+                        _nativeSelection?.spansChapters == true ||
+                            _unlocatedAnnotations().isEmpty
+                        ? null
+                        : () => unawaited(_pickUnlocatedForSelection()),
                   ),
                 // [4.7] 首次进入引导
                 if (_guideVisible)
@@ -2632,8 +3202,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
                     child: MarginEditorOverlay(
                       key: const ValueKey('margin-editor'),
                       settings: settings,
-                      textScale: MediaQuery.textScalerOf(context).scale(100) /
-                          100,
+                      textScale:
+                          MediaQuery.textScalerOf(context).scale(100) / 100,
                       initialGroup: _marginGroup!,
                       onPreview: _previewMargins,
                       onCommit: _commitMargins,
@@ -2707,36 +3277,46 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           }
           return KeyedSubtree(
             key: const ValueKey('native-reader'),
-            child: NativeReaderView(
-              key: _nativeKey,
-              chapters: chapters,
-              settings: _nativeSettings(settings),
-              pageLayout: ref.watch(pageLayoutControllerProvider),
-              previewListenable: liveReaderTypesetPreview,
-              marginPreviewListenable: liveReaderMarginPreview,
-              padding: padding,
-              theme: theme,
-              backgroundImage: settings.backgroundImage,
-              // 页眉/页脚「全文进度」用；控制器里的 percent 是当前书位
-              bookPercent: (state.percent ?? 0).clamp(0.0, 1.0),
-              initialChapterIndex: _nativeStartChapter,
-              initialOffset: _nativeStartOffset,
-              ttsHighlight: _nativeTtsHighlight,
-              marks: _nativeMarks(chapters),
-              // 长按选字 → 四色/笔记/复制菜单（原生模式的标注入口）
-              onSelection: _onNativeSelection,
-              // 拖手柄/重新选字时先把菜单收起来（否则菜单盖住手柄，
-              // 用户只能一个字一个字点，没法顺畅拖范围）
-              onSelectionClear: () {
-                if (!mounted || _selection == null) return;
-                setState(() => _selection = null);
-              },
-              // 点已有划线 → 操作面板（改色/加想法/删除）
-              onMarkTap: _onNativeMarkTap,
-              onPosition: _onNativePosition,
-              onCenterTap: () {
-                if (mounted) setState(() => _chromeVisible = !_chromeVisible);
-              },
+            child: ReaderInput(
+              key: _readerInputKey,
+              wheelEnabled: settings.flow != ReadingFlow.scrolled,
+              previous: () => _nativeKey.currentState?.previousPage(),
+              next: () => _nativeKey.currentState?.nextPage(),
+              child: NativeReaderView(
+                key: _nativeKey,
+                chapters: chapters,
+                settings: _nativeSettings(settings),
+                pageLayout: ref.watch(pageLayoutControllerProvider),
+                previewListenable: liveReaderTypesetPreview,
+                marginPreviewListenable: liveReaderMarginPreview,
+                padding: padding,
+                theme: theme,
+                backgroundImage: settings.backgroundImage,
+                backgroundFit: settings.backgroundFit,
+                // 页眉/页脚「全文进度」用；控制器里的 percent 是当前书位
+                bookPercent: (state.percent ?? 0).clamp(0.0, 1.0),
+                initialChapterIndex: _nativeStartChapter,
+                initialOffset: _nativeStartOffset,
+                ttsHighlight: _nativeTtsHighlight,
+                marks: _nativeMarks(chapters),
+                // 长按选字 → 四色/笔记/复制菜单（原生模式的标注入口）
+                onSelection: _onNativeSelection,
+                // 拖手柄/重新选字时先把菜单收起来（否则菜单盖住手柄，
+                // 用户只能一个字一个字点，没法顺畅拖范围）
+                onSelectionClear: () {
+                  if (!mounted || _selection == null) return;
+                  setState(() {
+                    _selection = null;
+                    _nativeSelection = null;
+                  });
+                },
+                // 点已有划线 → 操作面板（改色/加想法/删除）
+                onMarkTap: _onNativeMarkTap,
+                onPosition: _onNativePosition,
+                onCenterTap: () {
+                  if (mounted) setState(() => _chromeVisible = !_chromeVisible);
+                },
+              ),
             ),
           );
         },
@@ -2794,45 +3374,43 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     );
   }
 
-  /// 用保存的 href / 章索引对齐到原生章节表。
-  int _nativeChapterFor(List<NativeChapter> chapters) {
-    final loc =
-        _controllerState.initialLocator ?? _controllerState.currentLocator;
-    final href = loc?.href;
-    if (href != null) {
-      for (var i = 0; i < chapters.length; i++) {
-        if (chapters[i].href == href) return i;
-      }
+  /// 原生阅读面的起始位置：优先用路由带来的目标 locator（笔记跳转），
+  /// 其次才是控制器恢复的阅读进度。
+  Locator? _nativeTargetLocator() {
+    final raw = _initialLocatorJson;
+    if (raw != null) {
+      final requested = locatorFromJson(raw);
+      if (requested != null) return requested;
     }
-    final idx = loc?.chapterIndex;
-    if (idx != null) return idx.clamp(0, chapters.length - 1);
-    // 新书：跳过扉页/版权页/目录等前置页，避免打开像空白
-    return firstReadableChapterIndex(chapters);
+    return _controllerState.initialLocator ?? _controllerState.currentLocator;
   }
 
+  /// 用保存的 href / 章索引对齐到原生章节表。
+  int _nativeChapterFor(List<NativeChapter> chapters) =>
+      nativeInitialChapterIndex(chapters, _nativeTargetLocator());
+
   int _nativeOffsetFor(List<NativeChapter> chapters) {
-    final loc =
-        _controllerState.initialLocator ?? _controllerState.currentLocator;
+    final loc = _nativeTargetLocator();
     return (loc?.offset ?? 0).clamp(0, 1 << 30);
   }
 
-  /// 原生正文长按选字 → 弹标注菜单。
-  ///
-  /// 复用 WebView 时代那套 `SelectionMenu`（四色/笔记/复制），只是锚点
-  /// 用长按位置（SelectableText 不回调选区矩形）。
+  static String _nativeSelectionKey(NativeSelection selection) =>
+      '@${selection.chapterIndex}:${selection.start}-'
+      '${selection.endChapterIndex}:${selection.end}';
+
+  /// 原生选区松手后在拖动位置附近显示标注菜单。
   void _onNativeSelection(NativeSelection sel) {
     if (!mounted) return;
     setState(() {
       _nativeSelection = sel;
       _selection = ReaderSelected(
-        // 编码成 @章:起:止，创建划线时再解回偏移
-        cfiRange: '@${sel.chapterIndex}:${sel.start}:${sel.end}',
+        cfiRange: _nativeSelectionKey(sel),
         text: sel.text,
         rect: SelectionRect(
           left: sel.anchor.dx,
           top: sel.anchor.dy,
           width: 1,
-          height: 1,
+          height: 32, // 置于选区下方时给手柄留出触控空间。
         ),
       );
     });
@@ -2853,7 +3431,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final atEnd =
         p.chapterIndex >=
             (ref
-                        .read(nativeChaptersProvider(NativeChaptersKey.of(_controllerState.book!)))
+                        .read(
+                          nativeChaptersProvider(
+                            NativeChaptersKey.of(_controllerState.book!),
+                          ),
+                        )
                         .value
                         ?.length ??
                     1) -
@@ -2881,35 +3463,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   String? _nativeHrefOf(int chapterIdx) {
     final book = _controllerState.book;
     if (book == null) return null;
-    final chapters = ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
+    final chapters = ref
+        .read(nativeChaptersProvider(NativeChaptersKey.of(book)))
+        .value;
     if (chapters == null || chapterIdx < 0 || chapterIdx >= chapters.length) {
       return null;
     }
     return chapters[chapterIdx].href;
-  }
-
-  /// 原生阅读面的位置回报 → 控制器（页码 HUD / 进度 / 统计共用）。
-  /// 构造原生 TTS 适配层（章节表来自同一 provider）。
-  NativeTtsSurface _makeNativeTts() {
-    final book = _controllerState.book;
-    final chapters = book == null
-        ? null
-        : ref.read(nativeChaptersProvider(NativeChaptersKey.of(book))).value;
-    return NativeTtsSurface(
-      chapters: chapters ?? const [],
-      currentChapter: () => _nativeKey.currentState?.currentChapter ?? 0,
-      currentOffset: () => _nativeKey.currentState?.currentPageOffset ?? 0,
-      onHighlight: (h) => _nativeTtsHighlight.value = h,
-      onJumpTo: (chapterIdx, offset) {
-        final state = _nativeKey.currentState;
-        if (state == null) return;
-        if (state.currentChapter != chapterIdx) {
-          state.jumpToChapter(chapterIdx, offset: offset);
-        } else {
-          state.jumpToOffset(offset);
-        }
-      },
-    );
   }
 
   /// 解析划线在本章内的字符区间（原生渲染用）。
@@ -2919,35 +3479,50 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   List<NativeMark> _nativeMarks(List<NativeChapter> chapters) {
     if (_annotations.isEmpty) return const [];
     final out = <NativeMark>[];
+    final matcher = NoteLocator(chapters);
     for (final a in _annotations) {
       final loc = locatorFromJson(a.locatorStart);
       if (loc == null) continue;
       final chapter = nativeChapterForLocator(chapters, loc);
-      if (chapter == null) continue;
-      var start = loc.offset;
-      var end = loc.offsetEnd;
-      if (start == null || end == null || end <= start) {
-        final quote = (a.quotedText ?? '').trim();
-        if (quote.isEmpty) continue;
-        final at = chapter.text.indexOf(quote);
-        if (at < 0) continue; // 找不到就跳过（不误画）
-        start = at;
-        end = at + quote.length;
-        _persistAnchor(a.id, chapter, start, end);
+      final start = loc.offset;
+      final end = loc.offsetEnd;
+      // 已有有效区间：直接画（锚点就是原生章内偏移）。
+      if (chapter != null && start != null && end != null && end > start) {
+        out.add(_nativeMark(a, chapter.idx, start, end));
+        continue;
       }
-      out.add(
-        NativeMark(
-          id: a.id,
-          chapterIndex: chapter.idx,
-          start: start,
-          end: end,
-          color: _markFills[a.color.token] ?? _markFills['yellow']!,
-        ),
+      // 老数据只有 CFI / 章首兜底：用完整原文搜，搜不到再逐字缩短重试，
+      // 成功后回写成章索引 + 字符偏移（幂等：迁移成功后不再重复）。
+      final quote = (a.quotedText ?? '').trim();
+      if (quote.isEmpty) continue;
+      final match = matcher.locate(
+        quote,
+        preferredChapterIndex: chapter?.idx ?? loc.chapterIndex,
+        preferredHref: chapter?.href ?? loc.href,
       );
+      if (match == null) continue; // 找不到就跳过（不误画）
+      final target = chapters[match.chapterIndex];
+      _persistAnchor(a.id, target, match.start, match.end);
+      out.add(_nativeMark(a, target.idx, match.start, match.end));
     }
     return out;
   }
 
+  NativeMark _nativeMark(
+    Annotation annotation,
+    int chapterIndex,
+    int start,
+    int end,
+  ) => NativeMark(
+    id: annotation.id,
+    chapterIndex: chapterIndex,
+    start: start,
+    end: end,
+    color: annotation.type == AnnotationType.underline
+        ? _markLines[annotation.color.token] ?? _markLines['blue']!
+        : _markFills[annotation.color.token] ?? _markFills['yellow']!,
+    underline: annotation.type == AnnotationType.underline,
+  );
 
   /// 把 CFI 锚点迁移成「章索引 + 字符偏移」并回写数据库（每个标注只写一次）。
   void _persistAnchor(String id, NativeChapter chapter, int start, int end) {
@@ -3369,6 +3944,7 @@ class _TopBar extends StatelessWidget {
     required this.onToggleBookmark,
     required this.onSearch,
     required this.onExport,
+    required this.onInputSettings,
     required this.onDiag,
   });
 
@@ -3379,6 +3955,7 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onToggleBookmark;
   final VoidCallback onSearch;
   final VoidCallback onExport;
+  final VoidCallback onInputSettings;
   final VoidCallback onDiag;
 
   @override
@@ -3423,10 +4000,12 @@ class _TopBar extends StatelessWidget {
                   onSelected: (v) {
                     if (v == 'export') onExport();
                     if (v == 'diag') onDiag();
+                    if (v == 'input') onInputSettings();
                   },
                   itemBuilder: (context) => const [
                     PopupMenuItem(value: 'export', child: Text('导出标注')),
                     PopupMenuItem(value: 'diag', child: Text('诊断信息')),
+                    PopupMenuItem(value: 'input', child: Text('键盘与鼠标翻页')),
                   ],
                 ),
                 const SizedBox(width: 4),
@@ -3872,4 +4451,3 @@ class _PageSkeleton extends StatelessWidget {
     );
   }
 }
-

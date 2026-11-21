@@ -24,8 +24,10 @@ enum BookFormat {
 }
 
 /// 从名称解析格式，未知值回退 epub。
-BookFormat bookFormatFromName(String? name) => BookFormat.values
-    .firstWhere((f) => f.name == name, orElse: () => BookFormat.epub);
+BookFormat bookFormatFromName(String? name) => BookFormat.values.firstWhere(
+  (f) => f.name == name,
+  orElse: () => BookFormat.epub,
+);
 
 /// 阅读状态：未读 / 在读 / 已读 / 弃读。
 enum BookReadStatus {
@@ -50,6 +52,7 @@ enum BookReadStatus {
 /// 从名称解析阅读状态；未知值回退未读。
 BookReadStatus bookReadStatusFromName(String? name) => BookReadStatus.values
     .firstWhere((s) => s.name == name, orElse: () => BookReadStatus.unread);
+
 /// 书籍。
 @freezed
 abstract class Book with _$Book {
@@ -105,6 +108,9 @@ abstract class Book with _$Book {
     /// 最近打开时间（epoch ms）。
     int? lastOpenedAt,
 
+    /// 读完时间（epoch ms）；微信读书来源时用其 finishTime。
+    int? finishedAt,
+
     /// 是否读完（旧字段，保留兼容）。
     @Default(false) bool isFinished,
 
@@ -129,6 +135,9 @@ abstract class Book with _$Book {
     /// 书架置顶时间（epoch ms）；null = 未置顶。
     int? pinnedAt,
 
+    /// 是否收藏。
+    @Default(false) bool isFavorite,
+
     /// 墓碑（epoch ms），参与 LWW 合并。
     int? deletedAt,
 
@@ -145,70 +154,73 @@ abstract class Book with _$Book {
 
 /// 序列化：Book → JSON Map（同步 payload 用；null 字段省略）。
 Map<String, dynamic> bookToJson(Book b) => <String, dynamic>{
-      'id': b.id,
-      'title': b.title,
-      if (b.author != null) 'author': b.author,
-      if (b.series != null) 'series': b.series,
-      if (b.seriesIndex != 0) 'seriesIndex': b.seriesIndex,
-      if (b.language != null) 'language': b.language,
-      if (b.description != null) 'description': b.description,
-      'format': b.format.name,
-      'filePath': b.filePath,
-      'fileSha256': b.fileSha256,
-      'fileSize': b.fileSize,
-      if (b.coverPath != null) 'coverPath': b.coverPath,
-      if (b.chapterCount != 0) 'chapterCount': b.chapterCount,
-      if (b.wordCount != 0) 'wordCount': b.wordCount,
-      'addedAt': b.addedAt,
-      'updatedAt': b.updatedAt,
-      if (b.lastOpenedAt != null) 'lastOpenedAt': b.lastOpenedAt,
-      if (b.isFinished) 'isFinished': b.isFinished,
-      if (b.readStatus != BookReadStatus.unread)
-        'readStatus': b.readStatus.name,
-      if (b.isArchived) 'isArchived': b.isArchived,
-      if (b.rating != null) 'rating': b.rating,
-      if (b.review != null && b.review!.isNotEmpty) 'review': b.review,
-      if (b.tags.isNotEmpty) 'tags': b.tags,
-      if (b.category != null && b.category!.isNotEmpty) 'category': b.category,
-      if (b.pinnedAt != null) 'pinnedAt': b.pinnedAt,
-      if (b.deletedAt != null) 'deletedAt': b.deletedAt,
-      if (b.metaJson != null) 'metaJson': b.metaJson,
-      'hlc': b.hlc,
-      'deviceId': b.deviceId,
-    };
+  'id': b.id,
+  'title': b.title,
+  if (b.author != null) 'author': b.author,
+  if (b.series != null) 'series': b.series,
+  if (b.seriesIndex != 0) 'seriesIndex': b.seriesIndex,
+  if (b.language != null) 'language': b.language,
+  if (b.description != null) 'description': b.description,
+  'format': b.format.name,
+  'filePath': b.filePath,
+  'fileSha256': b.fileSha256,
+  'fileSize': b.fileSize,
+  if (b.coverPath != null) 'coverPath': b.coverPath,
+  if (b.chapterCount != 0) 'chapterCount': b.chapterCount,
+  if (b.wordCount != 0) 'wordCount': b.wordCount,
+  'addedAt': b.addedAt,
+  'updatedAt': b.updatedAt,
+  if (b.lastOpenedAt != null) 'lastOpenedAt': b.lastOpenedAt,
+  if (b.finishedAt != null) 'finishedAt': b.finishedAt,
+  if (b.isFinished) 'isFinished': b.isFinished,
+  if (b.readStatus != BookReadStatus.unread) 'readStatus': b.readStatus.name,
+  if (b.isArchived) 'isArchived': b.isArchived,
+  if (b.rating != null) 'rating': b.rating,
+  if (b.review != null && b.review!.isNotEmpty) 'review': b.review,
+  if (b.tags.isNotEmpty) 'tags': b.tags,
+  if (b.category != null && b.category!.isNotEmpty) 'category': b.category,
+  if (b.pinnedAt != null) 'pinnedAt': b.pinnedAt,
+  'isFavorite': b.isFavorite,
+  if (b.deletedAt != null) 'deletedAt': b.deletedAt,
+  if (b.metaJson != null) 'metaJson': b.metaJson,
+  'hlc': b.hlc,
+  'deviceId': b.deviceId,
+};
 
 /// 反序列化：JSON Map → Book；损坏输入抛 FormatException（调用方兜底）。
 Book bookFromJson(Map<String, dynamic> json) => Book(
-      id: json['id'] as String,
-      title: json['title'] as String,
-      author: json['author'] as String?,
-      series: json['series'] as String?,
-      seriesIndex: (json['seriesIndex'] as num?)?.toDouble() ?? 0,
-      language: json['language'] as String?,
-      description: json['description'] as String?,
-      format: bookFormatFromName(json['format'] as String?),
-      filePath: json['filePath'] as String,
-      fileSha256: json['fileSha256'] as String,
-      fileSize: (json['fileSize'] as num?)?.toInt() ?? 0,
-      coverPath: json['coverPath'] as String?,
-      chapterCount: (json['chapterCount'] as num?)?.toInt() ?? 0,
-      wordCount: (json['wordCount'] as num?)?.toInt() ?? 0,
-      addedAt: (json['addedAt'] as num?)?.toInt() ?? 0,
-      updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
-      lastOpenedAt: (json['lastOpenedAt'] as num?)?.toInt(),
-      isFinished: json['isFinished'] as bool? ?? false,
-      readStatus: bookReadStatusFromName(json['readStatus'] as String?),
-      isArchived: json['isArchived'] as bool? ?? false,
-      rating: (json['rating'] as num?)?.toInt(),
-      review: json['review'] as String?,
-      tags: _parseTags(json['tags']),
-      category: json['category'] as String?,
-      pinnedAt: (json['pinnedAt'] as num?)?.toInt(),
-      deletedAt: (json['deletedAt'] as num?)?.toInt(),
-      metaJson: json['metaJson'] as String?,
-      hlc: json['hlc'] as String? ?? '',
-      deviceId: json['deviceId'] as String? ?? '',
-    );
+  id: json['id'] as String,
+  title: json['title'] as String,
+  author: json['author'] as String?,
+  series: json['series'] as String?,
+  seriesIndex: (json['seriesIndex'] as num?)?.toDouble() ?? 0,
+  language: json['language'] as String?,
+  description: json['description'] as String?,
+  format: bookFormatFromName(json['format'] as String?),
+  filePath: json['filePath'] as String,
+  fileSha256: json['fileSha256'] as String,
+  fileSize: (json['fileSize'] as num?)?.toInt() ?? 0,
+  coverPath: json['coverPath'] as String?,
+  chapterCount: (json['chapterCount'] as num?)?.toInt() ?? 0,
+  wordCount: (json['wordCount'] as num?)?.toInt() ?? 0,
+  addedAt: (json['addedAt'] as num?)?.toInt() ?? 0,
+  updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
+  lastOpenedAt: (json['lastOpenedAt'] as num?)?.toInt(),
+  finishedAt: (json['finishedAt'] as num?)?.toInt(),
+  isFinished: json['isFinished'] as bool? ?? false,
+  readStatus: bookReadStatusFromName(json['readStatus'] as String?),
+  isArchived: json['isArchived'] as bool? ?? false,
+  rating: (json['rating'] as num?)?.toInt(),
+  review: json['review'] as String?,
+  tags: _parseTags(json['tags']),
+  category: json['category'] as String?,
+  pinnedAt: (json['pinnedAt'] as num?)?.toInt(),
+  isFavorite: json['isFavorite'] as bool? ?? false,
+  deletedAt: (json['deletedAt'] as num?)?.toInt(),
+  metaJson: json['metaJson'] as String?,
+  hlc: json['hlc'] as String? ?? '',
+  deviceId: json['deviceId'] as String? ?? '',
+);
 
 /// 标签解析：JSON 数组；兼容逗号分隔字符串。
 List<String> _parseTags(dynamic raw) {

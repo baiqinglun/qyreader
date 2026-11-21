@@ -2,11 +2,13 @@
 library;
 
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:uuid/uuid.dart';
 
 import '../../core/db/app_database.dart';
 import '../../core/hlc.dart';
+import '../../core/locator.dart';
 import '../../domain/entities/reading_progress.dart';
 import '../../domain/repositories/progress_repository.dart';
 
@@ -17,9 +19,9 @@ class ProgressRepositoryImpl implements ProgressRepository {
     required AppDatabase db,
     required HlcClock hlcClock,
     required this.deviceId,
-  })  : _db = db,
-        _hlcClock = hlcClock,
-        _uuid = const Uuid();
+  }) : _db = db,
+       _hlcClock = hlcClock,
+       _uuid = const Uuid();
 
   final AppDatabase _db;
   final HlcClock _hlcClock;
@@ -37,6 +39,75 @@ class ProgressRepositoryImpl implements ProgressRepository {
       furthestLocator: row.furthestLocator,
       furthestPercent: row.furthestPercent,
       updatedAt: row.updatedAt,
+    );
+  }
+
+  /// 百分比 → 章索引 + 章内偏移。
+  ///
+  /// 章节按 [idx] 升序；按各章 `charCount` 占比找落点。没有章节字数时
+  /// 返回 null（调用方写一个只有 percent 的兜底 locator）。
+  static ({int chapterIndex, int offset, String href})? positionForPercent(
+    List<({int charCount, String href})> chapters,
+    double percent,
+  ) {
+    if (chapters.isEmpty) return null;
+    final total = chapters.fold<int>(
+      0,
+      (sum, chapter) => sum + math.max(0, chapter.charCount),
+    );
+    if (total <= 0) {
+      // 旧书/同步书的 char_count 可能还没回填；至少按章节数落到大致的章，
+      // 不要永远停在第一章。
+      final index = (percent.clamp(0.0, 1.0) * chapters.length).floor().clamp(
+        0,
+        chapters.length - 1,
+      );
+      return (chapterIndex: index, offset: 0, href: chapters[index].href);
+    }
+    final target = ((percent.clamp(0.0, 1.0)) * total).round();
+    var before = 0;
+    for (var i = 0; i < chapters.length; i++) {
+      final length = math.max(0, chapters[i].charCount);
+      final isLast = i == chapters.length - 1;
+      if (target < before + length || isLast) {
+        final offset = (target - before).clamp(0, length);
+        return (chapterIndex: i, offset: offset, href: chapters[i].href);
+      }
+      before += length;
+    }
+    return (
+      chapterIndex: chapters.length - 1,
+      offset: chapters.last.charCount,
+      href: chapters.last.href,
+    );
+  }
+
+  @override
+  Future<void> saveExternalProgress({
+    required String bookId,
+    required double percent,
+  }) async {
+    final clamped = percent.clamp(0.0, 1.0).toDouble();
+    final rows = await (_db.select(
+      _db.chapters,
+    )..where((chapter) => chapter.bookId.equals(bookId))).get();
+    rows.sort((a, b) => a.idx.compareTo(b.idx));
+    final position = positionForPercent(<({int charCount, String href})>[
+      for (final row in rows) (charCount: row.charCount, href: row.href),
+    ], clamped);
+    final locator = position == null
+        ? Locator(percent: clamped, pos: clamped)
+        : Locator(
+            href: position.href,
+            chapterIndex: position.chapterIndex,
+            offset: position.offset,
+            percent: clamped,
+            pos: clamped,
+          );
+    await saveProgress(
+      bookId: bookId,
+      locator: locatorToJson(locator),
+      percent: clamped,
     );
   }
 
@@ -62,17 +133,21 @@ class ProgressRepositoryImpl implements ProgressRepository {
     }
 
     await _db.transaction(() async {
-      await _db.progressDao.upsert(ReadingProgressRow(
-        bookId: bookId,
-        locator: locator,
-        percent: percent,
-        furthestLocator: furthestLocator,
-        furthestPercent: furthestPercent,
-        updatedAt: now,
-        hlc: hlc.encode(),
-        deviceId: deviceId,
-      ));
-      await _db.into(_db.syncOps).insert(
+      await _db.progressDao.upsert(
+        ReadingProgressRow(
+          bookId: bookId,
+          locator: locator,
+          percent: percent,
+          furthestLocator: furthestLocator,
+          furthestPercent: furthestPercent,
+          updatedAt: now,
+          hlc: hlc.encode(),
+          deviceId: deviceId,
+        ),
+      );
+      await _db
+          .into(_db.syncOps)
+          .insert(
             SyncOpsCompanion.insert(
               opId: _uuid.v4(),
               entity: 'progress',

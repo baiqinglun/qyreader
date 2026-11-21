@@ -14,10 +14,7 @@ import 'curl_geometry.dart';
 
 /// 一帧折页翻页的绘制数据。
 class CurlRenderState {
-  const CurlRenderState({
-    required this.geometry,
-    required this.background,
-  });
+  const CurlRenderState({required this.geometry, required this.background});
 
   final CurlGeometry geometry;
 
@@ -47,8 +44,7 @@ class CurlTurnPainter extends CustomPainter {
     final dir = g.fromLeft ? -1.0 : 1.0;
     final side = g.fromLeft
         ? Rect.fromLTRB(0, 0, g.foldX, g.pageSize.height)
-        : Rect.fromLTRB(
-            g.foldX, 0, g.pageSize.width, g.pageSize.height);
+        : Rect.fromLTRB(g.foldX, 0, g.pageSize.width, g.pageSize.height);
     canvas.save();
     canvas.clipRect(side);
     canvas.drawRect(
@@ -57,10 +53,7 @@ class CurlTurnPainter extends CustomPainter {
         ..shader = ui.Gradient.linear(
           Offset(g.foldX, 0),
           Offset(g.foldX + 26 * dir, 0),
-          [
-            const Color(0x33000000),
-            const Color(0x00000000),
-          ],
+          [const Color(0x33000000), const Color(0x00000000)],
         ),
     );
     canvas.restore();
@@ -80,10 +73,7 @@ class CurlTurnPainter extends CustomPainter {
       const Color(0xFFFFFFFF),
       0.24,
     )!.withValues(alpha: 0.98);
-    final from = Offset(
-      g.fromLeft ? g.curlRect.right : g.curlRect.left,
-      0,
-    );
+    final from = Offset(g.fromLeft ? g.curlRect.right : g.curlRect.left, 0);
     final to = Offset(g.foldX, 0);
     // 外缘做一点弯曲，避免看起来像一条白色的直条。
     final outer = from.dx;
@@ -92,12 +82,7 @@ class CurlTurnPainter extends CustomPainter {
       ..moveTo(g.foldX, 0)
       ..lineTo(g.foldX, g.pageSize.height)
       ..lineTo(outer + amp, g.pageSize.height)
-      ..quadraticBezierTo(
-        outer - amp,
-        g.pageSize.height / 2,
-        outer + amp,
-        0,
-      )
+      ..quadraticBezierTo(outer - amp, g.pageSize.height / 2, outer + amp, 0)
       ..close();
 
     canvas.save();
@@ -105,12 +90,7 @@ class CurlTurnPainter extends CustomPainter {
     canvas.clipRect(rect.inflate(amp + 2).intersect(g.pageRect));
     canvas.drawPath(
       path,
-      Paint()
-        ..shader = ui.Gradient.linear(
-          from,
-          to,
-          [base, near],
-        ),
+      Paint()..shader = ui.Gradient.linear(from, to, [base, near]),
     );
     canvas.restore();
   }
@@ -131,10 +111,7 @@ class CurlTurnPainter extends CustomPainter {
         ..shader = ui.Gradient.linear(
           Offset(outer + 16 * dir, 0),
           Offset(outer, 0),
-          [
-            const Color(0x00000000),
-            const Color(0x1A000000),
-          ],
+          [const Color(0x00000000), const Color(0x1A000000)],
         ),
     );
     canvas.restore();

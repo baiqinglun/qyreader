@@ -208,9 +208,8 @@ class _PageLayoutEditorState extends ConsumerState<PageLayoutEditor> {
                   Expanded(
                     child: OutlinedButton(
                       key: const ValueKey('page-layout-reset'),
-                      onPressed: () => setState(
-                        () => _draft = PageLayoutSettings.defaults,
-                      ),
+                      onPressed: () =>
+                          setState(() => _draft = PageLayoutSettings.defaults),
                       child: const Text('重置'),
                     ),
                   ),
@@ -242,10 +241,7 @@ class _PageLayoutEditorState extends ConsumerState<PageLayoutEditor> {
                   Expanded(
                     child: Padding(
                       padding: const EdgeInsets.all(4),
-                      child: _zoneCell(
-                        index: row * 3 + col,
-                        scheme: scheme,
-                      ),
+                      child: _zoneCell(index: row * 3 + col, scheme: scheme),
                     ),
                   ),
               ],
@@ -280,10 +276,7 @@ class _PageLayoutEditorState extends ConsumerState<PageLayoutEditor> {
               const SizedBox(height: 2),
               Text(
                 '区域 ${index + 1}',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: scheme.onSurfaceVariant,
-                ),
+                style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
               ),
             ],
           ),
@@ -348,10 +341,7 @@ class _PageLayoutEditorState extends ConsumerState<PageLayoutEditor> {
                 fit: BoxFit.scaleDown,
                 child: Text(
                   '${action.label} $label',
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: scheme.onSurface,
-                  ),
+                  style: TextStyle(fontSize: 15, color: scheme.onSurface),
                 ),
               ),
             ),
@@ -362,15 +352,15 @@ class _PageLayoutEditorState extends ConsumerState<PageLayoutEditor> {
   }
 
   static IconData _zoneIcon(TapZoneAction action) => switch (action) {
-        TapZoneAction.previousPage => Icons.chevron_left,
-        TapZoneAction.nextPage => Icons.chevron_right,
-        TapZoneAction.menu => Icons.menu,
-      };
+    TapZoneAction.previousPage => Icons.chevron_left,
+    TapZoneAction.nextPage => Icons.chevron_right,
+    TapZoneAction.menu => Icons.menu,
+  };
 
   static IconData _edgeIcon(EdgeZoneAction action) => switch (action) {
-        EdgeZoneAction.followGrid => Icons.grid_on,
-        EdgeZoneAction.previousPage => Icons.chevron_left,
-        EdgeZoneAction.nextPage => Icons.chevron_right,
-        EdgeZoneAction.menu => Icons.menu,
-      };
+    EdgeZoneAction.followGrid => Icons.grid_on,
+    EdgeZoneAction.previousPage => Icons.chevron_left,
+    EdgeZoneAction.nextPage => Icons.chevron_right,
+    EdgeZoneAction.menu => Icons.menu,
+  };
 }

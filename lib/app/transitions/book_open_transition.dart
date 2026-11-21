@@ -38,6 +38,8 @@ class BookLaunch {
     this.rect,
     this.coverPath,
     this.radius = 12,
+    this.initialLocatorJson,
+    this.holdProgress = false,
   });
 
   /// 书籍 id（用来在书架上找回这本书的位置）。
@@ -54,6 +56,12 @@ class BookLaunch {
 
   /// 起始圆角（卡片 12 / 书脊 2.5）。
   final double radius;
+
+  /// 打开后直接跳到这个 locator（书籍信息的笔记定位用）。
+  final String? initialLocatorJson;
+
+  /// 跳转后挂起进度，等用户选择「返回原位置 / 设为阅读进度」。
+  final bool holdProgress;
 }
 
 /// 书架上某个书籍元素的当前位置与外观。
@@ -90,8 +98,11 @@ class BookCoverRegistry {
     Gradient? gradient,
     Color? solid,
   }) {
-    _spots[_key(kind, bookId)] =
-        BookCoverSpot(rect: rect, gradient: gradient, solid: solid);
+    _spots[_key(kind, bookId)] = BookCoverSpot(
+      rect: rect,
+      gradient: gradient,
+      solid: solid,
+    );
   }
 
   /// 查某本书的位置；没有登记（未进屏 / 已销毁）→ null。
@@ -215,9 +226,7 @@ class BookOpenTransition extends StatelessWidget {
         // 再缩回书架——不然只看到纸页往后缩，像书被塞回架子（用户要求
         // 「书籍要往前移」）。打开不动它。
         final liftBump = closing
-            ? math.sin(
-                math.pi * ((1 - v) * 1.6).clamp(0.0, 1.0),
-              )
+            ? math.sin(math.pi * ((1 - v) * 1.6).clamp(0.0, 1.0))
             : 0.0;
         final coverScale = 1 + 0.07 * liftBump;
 
@@ -240,13 +249,15 @@ class BookOpenTransition extends StatelessWidget {
                       scale: coverScale,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          borderRadius:
-                              BorderRadius.vertical(top: Radius.circular(radius)),
+                          borderRadius: BorderRadius.vertical(
+                            top: Radius.circular(radius),
+                          ),
                           boxShadow: [
                             if (liftBump > 0.01)
                               BoxShadow(
-                                color: Colors.black
-                                    .withValues(alpha: 0.18 * liftBump),
+                                color: Colors.black.withValues(
+                                  alpha: 0.18 * liftBump,
+                                ),
                                 blurRadius: 30 * liftBump,
                                 offset: const Offset(0, 12),
                               ),
@@ -343,8 +354,8 @@ class _BookCover extends StatelessWidget {
       return DecoratedBox(decoration: BoxDecoration(gradient: gradient));
     }
     return ColoredBox(
-      color: spot?.solid ??
-          Theme.of(context).colorScheme.surfaceContainerHighest,
+      color:
+          spot?.solid ?? Theme.of(context).colorScheme.surfaceContainerHighest,
     );
   }
 }
@@ -371,11 +382,8 @@ class BookOpenPage<T> extends Page<T> {
   final BookLaunch? launch;
 
   @override
-  Route<T> createRoute(BuildContext context) => BookOpenRoute<T>(
-        settings: this,
-        child: child,
-        launch: launch,
-      );
+  Route<T> createRoute(BuildContext context) =>
+      BookOpenRoute<T>(settings: this, child: child, launch: launch);
 }
 
 /// [BookOpenPage] 对应的路由。
@@ -426,12 +434,7 @@ class BookOpenRoute<T> extends PageRoute<T> {
     BuildContext context,
     Animation<double> animation,
     Animation<double> secondaryAnimation,
-  ) =>
-      Semantics(
-        scopesRoute: true,
-        explicitChildNodes: true,
-        child: child,
-      );
+  ) => Semantics(scopesRoute: true, explicitChildNodes: true, child: child);
 
   @override
   Widget buildTransitions(
@@ -439,10 +442,5 @@ class BookOpenRoute<T> extends PageRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
     Widget child,
-  ) =>
-      BookOpenTransition(
-        animation: animation,
-        launch: launch,
-        child: child,
-      );
+  ) => BookOpenTransition(animation: animation, launch: launch, child: child);
 }

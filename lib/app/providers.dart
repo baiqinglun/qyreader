@@ -169,5 +169,6 @@ Future<StatsRepository> statsRepository(Ref ref) async {
   return StatsRepositoryImpl(
     db: ref.watch(appDatabaseProvider),
     deviceId: await ref.watch(deviceIdProvider.future),
+    hlcClock: await ref.watch(hlcClockProvider.future),
   );
 }

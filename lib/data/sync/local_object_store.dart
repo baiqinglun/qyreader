@@ -20,6 +20,9 @@ class LocalObjectStore implements ObjectStore {
   /// 被读取过的 key（测试用：断言增量同步没有重复下载）。
   final List<String> readKeys = <String>[];
 
+  /// 被写入过的 key（测试用：断言没有重复上传分片/操作）。
+  final List<String> putKeys = <String>[];
+
   /// .. 段转义成 %2E%2E，避免写到桶目录外面。
   String _escape(String key) => key.replaceAll('..', '%2E%2E');
 
@@ -28,6 +31,7 @@ class LocalObjectStore implements ObjectStore {
 
   @override
   Future<void> put(String key, List<int> bytes) async {
+    putKeys.add(key);
     final file = _file(key);
     await file.parent.create(recursive: true);
     await file.writeAsBytes(bytes, flush: true);

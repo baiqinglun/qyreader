@@ -32,9 +32,9 @@ void main() {
   tearDown(() async => db.close());
 
   Future<void> seed() => repo.indexBook('b1', [
-        (0, 'OEBPS/ch1.xhtml', '第一章', '山川湖海，日月星辰。天地玄黄，宇宙洪荒。'),
-        (1, 'OEBPS/ch2.xhtml', '第二章', '寒来暑往，秋收冬藏。闰余成岁，律吕调阳。'),
-      ]);
+    (0, 'OEBPS/ch1.xhtml', '第一章', '山川湖海，日月星辰。天地玄黄，宇宙洪荒。'),
+    (1, 'OEBPS/ch2.xhtml', '第二章', '寒来暑往，秋收冬藏。闰余成岁，律吕调阳。'),
+  ]);
 
   test('indexBook + 中文长查询命中并带章节信息', () async {
     await seed();
@@ -45,13 +45,12 @@ void main() {
     expect(hits.single.chapterIdx, 0);
     expect(hits.single.href, 'OEBPS/ch1.xhtml');
     expect(hits.single.snippet, contains('山川湖海'));
+    expect(hits.single.offset, 0);
   });
 
   test('重复 indexBook 覆盖旧索引', () async {
     await seed();
-    await repo.indexBook('b1', [
-      (0, 'OEBPS/x.xhtml', '新章', '新的正文内容。'),
-    ]);
+    await repo.indexBook('b1', [(0, 'OEBPS/x.xhtml', '新章', '新的正文内容。')]);
     final hits = await repo.search(bookId: 'b1', query: '山川湖海');
     expect(hits, isEmpty);
     expect(await repo.search(bookId: 'b1', query: '新的正文'), hasLength(1));
@@ -63,6 +62,8 @@ void main() {
     final hits = await repo.search(bookId: 'b1', query: '日月星辰');
     expect(hits, hasLength(1));
     expect(hits.single.snippet, contains('【日月星辰】'));
+    // 点击搜索结果要能跳到命中位置，而不是只跳章首。
+    expect(hits.single.offset, 5);
   });
 
   test('两字短查询降级 LIKE 路径仍可命中', () async {
@@ -71,6 +72,7 @@ void main() {
     expect(hits, hasLength(1));
     expect(hits.single.chapterIdx, 1);
     expect(hits.single.snippet, contains('【寒来】'));
+    expect(hits.single.offset, 0);
   });
 
   test('未命中返回空；空查询返回空', () async {

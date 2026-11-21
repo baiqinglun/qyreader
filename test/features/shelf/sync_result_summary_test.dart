@@ -11,17 +11,23 @@ void main() {
   });
 
   test('有上传 / 合并 / 文件 / 字体时逐项列出', () {
-    final summary = syncResultSummary(const SyncResult(
-      pushed: 2,
-      applied: 3,
-      backedUpFiles: 1,
-      backedUpBytes: 2048,
-      fontsSynced: 1,
-    ));
+    final summary = syncResultSummary(
+      const SyncResult(
+        pushed: 2,
+        applied: 3,
+        backedUpFiles: 1,
+        backedUpBytes: 2048,
+        fontsSynced: 1,
+        audiosSynced: 2,
+        themesSynced: 2,
+      ),
+    );
     expect(summary, contains('上传 2 条改动'));
     expect(summary, contains('合并 3 处云端改动'));
     expect(summary, contains('补齐 1 个本地文件（2 KB）'));
     expect(summary, contains('同步 1 个字体'));
+    expect(summary, contains('同步 2 个音频'));
+    expect(summary, contains('同步 2 个主题'));
   });
 
   test('失败时给出原因', () {

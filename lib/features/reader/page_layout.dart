@@ -49,11 +49,11 @@ enum EdgeZoneAction {
 
   /// 转成九宫格动作；[followGrid] 返回 null。
   TapZoneAction? get action => switch (this) {
-        EdgeZoneAction.followGrid => null,
-        EdgeZoneAction.previousPage => TapZoneAction.previousPage,
-        EdgeZoneAction.nextPage => TapZoneAction.nextPage,
-        EdgeZoneAction.menu => TapZoneAction.menu,
-      };
+    EdgeZoneAction.followGrid => null,
+    EdgeZoneAction.previousPage => TapZoneAction.previousPage,
+    EdgeZoneAction.nextPage => TapZoneAction.nextPage,
+    EdgeZoneAction.menu => TapZoneAction.menu,
+  };
 }
 
 /// 页面布局配置。
@@ -122,12 +122,7 @@ class PageLayoutSettings {
   }
 
   /// 按页码列解析页眉/页脚「跟随九宫格」。
-  TapZoneAction _edgeAction(
-    EdgeZoneAction edge,
-    int row,
-    double x,
-    Size size,
-  ) {
+  TapZoneAction _edgeAction(EdgeZoneAction edge, int row, double x, Size size) {
     final fixed = edge.action;
     if (fixed != null) return fixed;
     final col = _column(x, size.width);
@@ -164,12 +159,12 @@ class PageLayoutSettings {
 
   /// 序列化成 prefs JSON。
   String toJson() => jsonEncode({
-        'zones': [for (final z in zones) z.name],
-        'headerLeft': headerLeft.name,
-        'headerRight': headerRight.name,
-        'footerLeft': footerLeft.name,
-        'footerRight': footerRight.name,
-      });
+    'zones': [for (final z in zones) z.name],
+    'headerLeft': headerLeft.name,
+    'headerRight': headerRight.name,
+    'footerLeft': footerLeft.name,
+    'footerRight': footerRight.name,
+  });
 
   /// 从 prefs JSON 恢复；坏数据回退默认。
   factory PageLayoutSettings.fromJson(String raw) {
@@ -225,19 +220,19 @@ class PageLayoutSettings {
 
   @override
   int get hashCode => Object.hash(
-        Object.hashAll(zones),
-        headerLeft,
-        headerRight,
-        footerLeft,
-        footerRight,
-      );
+    Object.hashAll(zones),
+    headerLeft,
+    headerRight,
+    footerLeft,
+    footerRight,
+  );
 }
 
 /// 页面布局配置的读取 / 保存（prefs key `reader.pageLayout`）。
 final pageLayoutControllerProvider =
     NotifierProvider<PageLayoutController, PageLayoutSettings>(
-  PageLayoutController.new,
-);
+      PageLayoutController.new,
+    );
 
 /// 页面布局配置控制器。
 class PageLayoutController extends Notifier<PageLayoutSettings> {

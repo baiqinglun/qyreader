@@ -1,11 +1,15 @@
 /// 阅读统计仓储实现：reading_sessions 明细 + daily_stats 物化聚合（可重算）。
 library;
 
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/db/app_database.dart';
+import '../../core/hlc.dart';
+import '../../core/stats_revision.dart';
 import '../../domain/entities/reading_stats.dart';
 import '../../domain/repositories/stats_repository.dart';
 
@@ -15,12 +19,17 @@ class StatsRepositoryImpl implements StatsRepository {
   StatsRepositoryImpl({
     required AppDatabase db,
     required this.deviceId,
-  }) : _db = db;
+    required HlcClock hlcClock,
+  }) : _db = db,
+       _hlcClock = hlcClock;
 
   final AppDatabase _db;
 
   /// 本机设备 id（会话明细带写入设备，便于统计多设备合并后的总量）。
   final String deviceId;
+
+  /// 混合逻辑时钟（会话 op 的同步时间戳）。
+  final HlcClock _hlcClock;
 
   static const String _kGoalKey = 'stats.dailyGoalMinutes';
   static const Uuid _uuid = Uuid();
@@ -31,28 +40,62 @@ class StatsRepositoryImpl implements StatsRepository {
     required int startedAt,
     required int endedAt,
     required int charsRead,
+    int? countedDurationMs,
   }) async {
     if (endedAt <= startedAt) return;
-    final durationMs = endedAt - startedAt;
+    // 计入统计的时长：单页封顶后的合计（v2.47.1）；不传 = 全额
+    var durationMs = countedDurationMs ?? endedAt - startedAt;
+    if (durationMs < 0) durationMs = 0;
     // 极短会话（<10s）视为误触，不记录
     if (durationMs < 10000) return;
     final day = _dayOf(DateTime.fromMillisecondsSinceEpoch(startedAt));
+    final chars = charsRead < 0 ? 0 : charsRead;
+    final id = _uuid.v4();
+    final hlc = _hlcClock.tick();
     await _db.transaction(() async {
-      await _db.into(_db.readingSessions).insert(
+      await _db
+          .into(_db.readingSessions)
+          .insert(
             ReadingSessionsCompanion.insert(
-              id: _uuid.v4(),
+              id: id,
               bookId: bookId,
               startedAt: startedAt,
               endedAt: endedAt,
               durationMs: durationMs,
-              charsRead: Value(charsRead < 0 ? 0 : charsRead),
+              charsRead: Value(chars),
               deviceId: deviceId,
             ),
           );
       // 按日聚合两份：单书 + 全书合计（bookId=''）
-      await _bumpDaily(day, bookId, durationMs, charsRead);
-      await _bumpDaily(day, '', durationMs, charsRead);
+      await _bumpDaily(day, bookId, durationMs, chars);
+      await _bumpDaily(day, '', durationMs, chars);
+      // 会话也是同步单元：op 与会话同事务落库，其他设备按 id 合并后
+      // 重算 daily_stats（合并逻辑见 sync_repository_impl._mergeSession）。
+      // opId 固定派生自会话 id：历史会话补传（sync.sessionsBackfilled）
+      // 用同一规则，天然去重。
+      await _db.into(_db.syncOps).insert(
+            SyncOpsCompanion.insert(
+              opId: 'ses-$id',
+              entity: 'session',
+              entityId: bookId,
+              op: 'upsert',
+              payload: jsonEncode(<String, dynamic>{
+                'id': id,
+                'bookId': bookId,
+                'startedAt': startedAt,
+                'endedAt': endedAt,
+                'durationMs': durationMs,
+                'charsRead': chars,
+                'deviceId': deviceId,
+                'hlc': hlc.encode(),
+              }),
+              hlc: hlc.encode(),
+              createdAt: endedAt,
+            ),
+          );
     });
+    // 会话落库：通知可见的首页/统计页重拉（返回首页数字马上跟上）
+    bumpStatsRevision();
   }
 
   Future<void> _bumpDaily(
@@ -61,12 +104,15 @@ class StatsRepositoryImpl implements StatsRepository {
     int durationMs,
     int charsRead,
   ) async {
-    final existing = await (_db.select(_db.dailyStats)
-          ..where((r) => r.day.equals(day))
-          ..where((r) => r.bookId.equals(bookId)))
-        .getSingleOrNull();
+    final existing =
+        await (_db.select(_db.dailyStats)
+              ..where((r) => r.day.equals(day))
+              ..where((r) => r.bookId.equals(bookId)))
+            .getSingleOrNull();
     if (existing == null) {
-      await _db.into(_db.dailyStats).insert(
+      await _db
+          .into(_db.dailyStats)
+          .insert(
             DailyStatsCompanion.insert(
               day: day,
               bookId: Value(bookId),
@@ -80,12 +126,15 @@ class StatsRepositoryImpl implements StatsRepository {
     await (_db.update(_db.dailyStats)
           ..where((r) => r.day.equals(day))
           ..where((r) => r.bookId.equals(bookId)))
-        .write(DailyStatsCompanion(
-      durationMs: Value(existing.durationMs + durationMs),
-      charsRead:
-          Value(existing.charsRead + (charsRead < 0 ? 0 : charsRead)),
-      sessions: Value(existing.sessions + 1),
-    ));
+        .write(
+          DailyStatsCompanion(
+            durationMs: Value(existing.durationMs + durationMs),
+            charsRead: Value(
+              existing.charsRead + (charsRead < 0 ? 0 : charsRead),
+            ),
+            sessions: Value(existing.sessions + 1),
+          ),
+        );
   }
 
   @override
@@ -93,9 +142,9 @@ class StatsRepositoryImpl implements StatsRepository {
     final now = DateTime.now();
     final today = _dayOf(now);
 
-    final totalsRows = await (_db.select(_db.dailyStats)
-          ..where((r) => r.bookId.equals('')))
-        .get();
+    final totalsRows = await (_db.select(
+      _db.dailyStats,
+    )..where((r) => r.bookId.equals(''))).get();
     var totalMs = 0;
     var totalChars = 0;
     var todayMs = 0;
@@ -118,12 +167,14 @@ class StatsRepositoryImpl implements StatsRepository {
       final d = now.subtract(Duration(days: i));
       final key = _dayOf(d);
       final row = byDay[key];
-      recent.add(DailyReadingStat(
-        day: key,
-        durationMs: row?.durationMs ?? 0,
-        charsRead: row?.charsRead ?? 0,
-        sessions: row?.sessions ?? 0,
-      ));
+      recent.add(
+        DailyReadingStat(
+          day: key,
+          durationMs: row?.durationMs ?? 0,
+          charsRead: row?.charsRead ?? 0,
+          sessions: row?.sessions ?? 0,
+        ),
+      );
     }
 
     final goal = await dailyGoalMinutes();
@@ -164,11 +215,13 @@ class StatsRepositoryImpl implements StatsRepository {
     final startMs = start.millisecondsSinceEpoch;
     final endMs = end.millisecondsSinceEpoch;
 
-    final rows = await (_db.select(_db.readingSessions)
-          ..where((r) =>
-              r.startedAt.isSmallerThanValue(endMs) &
-              r.endedAt.isBiggerThanValue(startMs)))
-        .get();
+    final rows =
+        await (_db.select(_db.readingSessions)..where(
+              (r) =>
+                  r.startedAt.isSmallerThanValue(endMs) &
+                  r.endedAt.isBiggerThanValue(startMs),
+            ))
+            .get();
     final bookRows = await _db.select(_db.books).get();
     final titles = {for (final b in bookRows) b.id: b.title};
 
@@ -199,17 +252,20 @@ class StatsRepositoryImpl implements StatsRepository {
       _distributeToBuckets(period, buckets, a, b, chars);
     }
 
-    final books = byBook.entries
-        .map((e) => BookReadingStat(
-              bookId: e.key,
-              title: titles[e.key] ?? '已删除书籍',
-              durationMs: e.value.durationMs,
-              charsRead: e.value.charsRead,
-              sessions: e.value.sessions,
-              exists: titles.containsKey(e.key),
-            ))
-        .toList()
-      ..sort((a, b) => b.durationMs.compareTo(a.durationMs));
+    final books =
+        byBook.entries
+            .map(
+              (e) => BookReadingStat(
+                bookId: e.key,
+                title: titles[e.key] ?? '已删除书籍',
+                durationMs: e.value.durationMs,
+                charsRead: e.value.charsRead,
+                sessions: e.value.sessions,
+                exists: titles.containsKey(e.key),
+              ),
+            )
+            .toList()
+          ..sort((a, b) => b.durationMs.compareTo(a.durationMs));
 
     return PeriodReadingStats(
       period: period,
@@ -251,8 +307,7 @@ class StatsRepositoryImpl implements StatsRepository {
     switch (period) {
       case StatsPeriod.day:
         return [
-          for (var h = 0; h < 24; h++)
-            _BucketAcc(h.toString().padLeft(2, '0')),
+          for (var h = 0; h < 24; h++) _BucketAcc(h.toString().padLeft(2, '0')),
         ];
       case StatsPeriod.week:
         const labels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
@@ -285,8 +340,7 @@ class StatsRepositoryImpl implements StatsRepository {
         final index = _bucketIndex(period, dt);
         if (index >= 0 && index < buckets.length) {
           buckets[index].durationMs += segMs;
-          buckets[index].charsRead +=
-              (chars * segMs / totalMs).round();
+          buckets[index].charsRead += (chars * segMs / totalMs).round();
         }
       }
       cursor = segEnd;
@@ -312,12 +366,16 @@ class StatsRepositoryImpl implements StatsRepository {
       case StatsPeriod.day:
         return t.hour;
       case StatsPeriod.week:
-        final monday = DateTime(t.year, t.month, t.day)
-            .subtract(Duration(days: t.weekday - 1));
-        return DateTime(t.year, t.month, t.day)
-            .difference(monday)
-            .inDays
-            .clamp(0, 6);
+        final monday = DateTime(
+          t.year,
+          t.month,
+          t.day,
+        ).subtract(Duration(days: t.weekday - 1));
+        return DateTime(
+          t.year,
+          t.month,
+          t.day,
+        ).difference(monday).inDays.clamp(0, 6);
       case StatsPeriod.month:
         return t.day - 1;
       case StatsPeriod.year:
@@ -339,9 +397,9 @@ class StatsRepositoryImpl implements StatsRepository {
 
   @override
   Future<int> bookTotalDurationMs(String bookId) async {
-    final rows = await (_db.select(_db.dailyStats)
-          ..where((r) => r.bookId.equals(bookId)))
-        .get();
+    final rows = await (_db.select(
+      _db.dailyStats,
+    )..where((r) => r.bookId.equals(bookId))).get();
     var total = 0;
     for (final r in rows) {
       total += r.durationMs;
@@ -350,16 +408,39 @@ class StatsRepositoryImpl implements StatsRepository {
   }
 
   @override
+  Future<List<BookReadingTotal>> bookTotals() async {
+    final rows = await _db.select(_db.dailyStats).get();
+    final totals = <String, ({int durationMs, int charsRead})>{};
+    for (final r in rows) {
+      if (r.bookId.isEmpty) continue; // 空 id 是全书合计行
+      final current = totals[r.bookId];
+      totals[r.bookId] = (
+        durationMs: (current?.durationMs ?? 0) + r.durationMs,
+        charsRead: (current?.charsRead ?? 0) + r.charsRead,
+      );
+    }
+    final out = [
+      for (final e in totals.entries)
+        BookReadingTotal(
+          bookId: e.key,
+          durationMs: e.value.durationMs,
+          charsRead: e.value.charsRead,
+        ),
+    ]..sort((a, b) => b.durationMs.compareTo(a.durationMs));
+    return out;
+  }
+
+  @override
   Future<Map<String, int>> bookDailyDurations(
     String bookId, {
     int days = 14,
   }) async {
-    final sinceDay =
-        _dayOf(DateTime.now().subtract(Duration(days: days - 1)));
-    final rows = await (_db.select(_db.dailyStats)
-          ..where((r) => r.bookId.equals(bookId))
-          ..where((r) => r.day.isBiggerOrEqualValue(sinceDay)))
-        .get();
+    final sinceDay = _dayOf(DateTime.now().subtract(Duration(days: days - 1)));
+    final rows =
+        await (_db.select(_db.dailyStats)
+              ..where((r) => r.bookId.equals(bookId))
+              ..where((r) => r.day.isBiggerOrEqualValue(sinceDay)))
+            .get();
     return {for (final r in rows) r.day: r.durationMs};
   }
 

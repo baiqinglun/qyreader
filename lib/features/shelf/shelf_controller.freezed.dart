@@ -125,13 +125,13 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  idle,TResult Function()?  loading,TResult Function( List<Book> books,  List<String> failures)?  done,TResult Function( String message)?  error,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  idle,TResult Function()?  loading,TResult Function( List<Book> books,  List<String> failures,  List<ImportRecord> records)?  done,TResult Function( String message,  List<ImportRecord> records)?  error,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case ImportIdle() when idle != null:
 return idle();case ImportLoading() when loading != null:
 return loading();case ImportDone() when done != null:
-return done(_that.books,_that.failures);case ImportError() when error != null:
-return error(_that.message);case _:
+return done(_that.books,_that.failures,_that.records);case ImportError() when error != null:
+return error(_that.message,_that.records);case _:
   return orElse();
 
 }
@@ -149,13 +149,13 @@ return error(_that.message);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  idle,required TResult Function()  loading,required TResult Function( List<Book> books,  List<String> failures)  done,required TResult Function( String message)  error,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  idle,required TResult Function()  loading,required TResult Function( List<Book> books,  List<String> failures,  List<ImportRecord> records)  done,required TResult Function( String message,  List<ImportRecord> records)  error,}) {final _that = this;
 switch (_that) {
 case ImportIdle():
 return idle();case ImportLoading():
 return loading();case ImportDone():
-return done(_that.books,_that.failures);case ImportError():
-return error(_that.message);}
+return done(_that.books,_that.failures,_that.records);case ImportError():
+return error(_that.message,_that.records);}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -169,13 +169,13 @@ return error(_that.message);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  idle,TResult? Function()?  loading,TResult? Function( List<Book> books,  List<String> failures)?  done,TResult? Function( String message)?  error,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  idle,TResult? Function()?  loading,TResult? Function( List<Book> books,  List<String> failures,  List<ImportRecord> records)?  done,TResult? Function( String message,  List<ImportRecord> records)?  error,}) {final _that = this;
 switch (_that) {
 case ImportIdle() when idle != null:
 return idle();case ImportLoading() when loading != null:
 return loading();case ImportDone() when done != null:
-return done(_that.books,_that.failures);case ImportError() when error != null:
-return error(_that.message);case _:
+return done(_that.books,_that.failures,_that.records);case ImportError() when error != null:
+return error(_that.message,_that.records);case _:
   return null;
 
 }
@@ -251,7 +251,7 @@ String toString() {
 
 
 class ImportDone implements ImportState {
-  const ImportDone(final  List<Book> books, {final  List<String> failures = const <String>[]}): _books = books,_failures = failures;
+  const ImportDone(final  List<Book> books, {final  List<String> failures = const <String>[], final  List<ImportRecord> records = const <ImportRecord>[]}): _books = books,_failures = failures,_records = records;
   
 
  final  List<Book> _books;
@@ -268,6 +268,15 @@ class ImportDone implements ImportState {
   return EqualUnmodifiableListView(_failures);
 }
 
+/// 本次导入的逐文件结果（用于导入结果弹窗；打开方式导入不放这里）。
+ final  List<ImportRecord> _records;
+/// 本次导入的逐文件结果（用于导入结果弹窗；打开方式导入不放这里）。
+@JsonKey() List<ImportRecord> get records {
+  if (_records is EqualUnmodifiableListView) return _records;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_records);
+}
+
 
 /// Create a copy of ImportState
 /// with the given fields replaced by the non-null parameter values.
@@ -279,16 +288,16 @@ $ImportDoneCopyWith<ImportDone> get copyWith => _$ImportDoneCopyWithImpl<ImportD
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImportDone&&const DeepCollectionEquality().equals(other._books, _books)&&const DeepCollectionEquality().equals(other._failures, _failures));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImportDone&&const DeepCollectionEquality().equals(other._books, _books)&&const DeepCollectionEquality().equals(other._failures, _failures)&&const DeepCollectionEquality().equals(other._records, _records));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_books),const DeepCollectionEquality().hash(_failures));
+int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_books),const DeepCollectionEquality().hash(_failures),const DeepCollectionEquality().hash(_records));
 
 @override
 String toString() {
-  return 'ImportState.done(books: $books, failures: $failures)';
+  return 'ImportState.done(books: $books, failures: $failures, records: $records)';
 }
 
 
@@ -299,7 +308,7 @@ abstract mixin class $ImportDoneCopyWith<$Res> implements $ImportStateCopyWith<$
   factory $ImportDoneCopyWith(ImportDone value, $Res Function(ImportDone) _then) = _$ImportDoneCopyWithImpl;
 @useResult
 $Res call({
- List<Book> books, List<String> failures
+ List<Book> books, List<String> failures, List<ImportRecord> records
 });
 
 
@@ -316,11 +325,12 @@ class _$ImportDoneCopyWithImpl<$Res>
 
 /// Create a copy of ImportState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') $Res call({Object? books = null,Object? failures = null,}) {
+@pragma('vm:prefer-inline') $Res call({Object? books = null,Object? failures = null,Object? records = null,}) {
   return _then(ImportDone(
 null == books ? _self._books : books // ignore: cast_nullable_to_non_nullable
 as List<Book>,failures: null == failures ? _self._failures : failures // ignore: cast_nullable_to_non_nullable
-as List<String>,
+as List<String>,records: null == records ? _self._records : records // ignore: cast_nullable_to_non_nullable
+as List<ImportRecord>,
   ));
 }
 
@@ -331,10 +341,19 @@ as List<String>,
 
 
 class ImportError implements ImportState {
-  const ImportError(this.message);
+  const ImportError(this.message, {final  List<ImportRecord> records = const <ImportRecord>[]}): _records = records;
   
 
  final  String message;
+/// 本次导入的逐文件结果（用于导入结果弹窗）。
+ final  List<ImportRecord> _records;
+/// 本次导入的逐文件结果（用于导入结果弹窗）。
+@JsonKey() List<ImportRecord> get records {
+  if (_records is EqualUnmodifiableListView) return _records;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_records);
+}
+
 
 /// Create a copy of ImportState
 /// with the given fields replaced by the non-null parameter values.
@@ -346,16 +365,16 @@ $ImportErrorCopyWith<ImportError> get copyWith => _$ImportErrorCopyWithImpl<Impo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImportError&&(identical(other.message, message) || other.message == message));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImportError&&(identical(other.message, message) || other.message == message)&&const DeepCollectionEquality().equals(other._records, _records));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode => Object.hash(runtimeType,message,const DeepCollectionEquality().hash(_records));
 
 @override
 String toString() {
-  return 'ImportState.error(message: $message)';
+  return 'ImportState.error(message: $message, records: $records)';
 }
 
 
@@ -366,7 +385,7 @@ abstract mixin class $ImportErrorCopyWith<$Res> implements $ImportStateCopyWith<
   factory $ImportErrorCopyWith(ImportError value, $Res Function(ImportError) _then) = _$ImportErrorCopyWithImpl;
 @useResult
 $Res call({
- String message
+ String message, List<ImportRecord> records
 });
 
 
@@ -383,10 +402,11 @@ class _$ImportErrorCopyWithImpl<$Res>
 
 /// Create a copy of ImportState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') $Res call({Object? message = null,}) {
+@pragma('vm:prefer-inline') $Res call({Object? message = null,Object? records = null,}) {
   return _then(ImportError(
 null == message ? _self.message : message // ignore: cast_nullable_to_non_nullable
-as String,
+as String,records: null == records ? _self._records : records // ignore: cast_nullable_to_non_nullable
+as List<ImportRecord>,
   ));
 }
 

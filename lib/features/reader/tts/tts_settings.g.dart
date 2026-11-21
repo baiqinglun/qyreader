@@ -7,7 +7,7 @@ part of 'tts_settings.dart';
 // **************************************************************************
 
 String _$ttsSettingsControllerHash() =>
-    r'919960d5a36fd2d047053ca13851f7d4a63d43d7';
+    r'8e999e99317f2dc84abe6cc5c272561a709142cf';
 
 /// 朗读设置控制器。
 ///

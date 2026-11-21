@@ -26,6 +26,8 @@ import '../../domain/entities/annotation.dart';
 import '../../domain/entities/book.dart';
 import '../../domain/entities/reading_progress.dart';
 import '../../domain/services/book_reviews.dart';
+import '../notes/annotation_share_sheet.dart';
+import 'widgets/book_note_card.dart';
 import '../shelf/shelf_controller.dart' show shelfCategories;
 import '../shelf/widgets/book_actions_sheet.dart' show confirmDeleteBook;
 import '../shelf/widgets/tag_capsule.dart';
@@ -52,8 +54,7 @@ enum _BookTabs {
   final String label;
 
   /// TabBar 用的展示名列表。
-  static List<String> get labels =>
-      [for (final t in _BookTabs.values) t.label];
+  static List<String> get labels => [for (final t in _BookTabs.values) t.label];
 }
 
 /// 书籍详情/编辑页。
@@ -72,14 +73,17 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
   List<BookChapter> _chapters = const [];
   ReadingProgressSnapshot? _progress;
   var _dailyMs = <String, int>{};
+  var _showAllDaily = false;
   var _suggestedTags = <String>[];
   var _suggestedShelves = <String>[];
   var _localCached = true;
   var _loading = true;
 
   /// 顶部 Tab：基础信息 / 标签分类 / 目录 / 书评 / 笔记。
-  late final TabController _tab =
-      TabController(length: _BookTabs.labels.length, vsync: this);
+  late final TabController _tab = TabController(
+    length: _BookTabs.labels.length,
+    vsync: this,
+  );
 
   /// 笔记列表（进入页面加载一次）。
   var _annotations = <Annotation>[];
@@ -140,7 +144,11 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
     final localCached = await File(book.filePath).exists();
     if (!mounted) return;
     final statsRepo = await ref.read(statsRepositoryProvider.future);
-    final daily = await statsRepo.bookDailyDurations(widget.bookId, days: 14);
+    // 拉全量：页面只展示有阅读记录的前 14 天，超过再给「显示更多」。
+    final daily = await statsRepo.bookDailyDurations(
+      widget.bookId,
+      days: 36500,
+    );
     if (!mounted) return;
     // 建议标签：其他书用过的标签（书架全量）。
     final shelf = await bookRepo.watchShelf().first;
@@ -190,9 +198,9 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败：$e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('保存失败：$e')));
       }
     }
   }
@@ -258,7 +266,11 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
     final newAuthor = author.trim();
     if (saved != true || !mounted) return;
     final repo = await ref.read(bookRepositoryProvider.future);
-    await repo.updateBookMeta(widget.bookId, title: newTitle, author: newAuthor);
+    await repo.updateBookMeta(
+      widget.bookId,
+      title: newTitle,
+      author: newAuthor,
+    );
     if (!mounted) return;
     setState(() {
       _book = book.copyWith(
@@ -334,12 +346,14 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
   void _setPinned(bool value) {
     setState(() {
       _pinned = value;
-      _book = _book!.copyWith(pinnedAt: value ? DateTime.now().millisecondsSinceEpoch : null);
+      _book = _book!.copyWith(
+        pinnedAt: value ? DateTime.now().millisecondsSinceEpoch : null,
+      );
     });
     unawaited(
-      ref.read(bookRepositoryProvider.future).then(
-            (repo) => repo.setPinned(widget.bookId, value),
-          ),
+      ref
+          .read(bookRepositoryProvider.future)
+          .then((repo) => repo.setPinned(widget.bookId, value)),
     );
   }
 
@@ -414,9 +428,8 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
       ? 0
       : math.max(1, (_book!.wordCount / _kCharsPerPage).ceil());
 
-  int get _estPage => _percent <= 0
-      ? 0
-      : (_percent * _estPages).round().clamp(1, _estPages);
+  int get _estPage =>
+      _percent <= 0 ? 0 : (_percent * _estPages).round().clamp(1, _estPages);
 
   String get _chapterTitle {
     final idx = _chapterIndex;
@@ -474,32 +487,29 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
                 ),
                 tabs: [
                   for (final t in _BookTabs.values)
-                    Tab(
-                      key: ValueKey('book-tab-${t.name}'),
-                      text: t.label,
-                    ),
+                    Tab(key: ValueKey('book-tab-${t.name}'), text: t.label),
                 ],
               ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _book == null
-              ? Center(
-                  child: Text('书籍不存在或已删除', style: TextStyle(color: muted)),
-                )
-              : TabBarView(
-                  controller: _tab,
-                  children: [
-                    _basicTab(theme, fg, muted),
-                    _tagsTab(theme, fg, muted),
-                    _tocTab(theme, fg, muted),
-                    _reviewTab(theme, fg, muted),
-                    _notesTab(theme, fg, muted),
-                  ],
-                ),
+          ? Center(
+              child: Text('书籍不存在或已删除', style: TextStyle(color: muted)),
+            )
+          : TabBarView(
+              controller: _tab,
+              children: [
+                _basicTab(theme, fg, muted),
+                _tagsTab(theme, fg, muted),
+                _tocTab(theme, fg, muted),
+                _reviewTab(theme, fg, muted),
+                _notesTab(theme, fg, muted),
+              ],
+            ),
       bottomNavigationBar: _loading || _book == null
           ? null
-              : _buildBottomBar(theme, fg),
+          : _buildBottomBar(theme, fg),
     );
   }
 
@@ -516,13 +526,11 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
     if (percent <= 0) {
       summary = '还没有阅读记录，可以从第一章开始。';
     } else {
-      final where = _chapterTitle.isEmpty
-          ? _chapterLabel
-          : '「$_chapterTitle」';
+      final where = _chapterTitle.isEmpty ? _chapterLabel : '「$_chapterTitle」';
       final remainPart = pagesLeft > 0 ? '还剩约 $pagesLeft 页' : '已经读到末尾';
       final estPart = avgMin > 0 && pagesLeft > 0
           ? '；按你最近平均每天读 $avgMin 分钟，'
-              '大约 ${math.max(1, (pagesLeft * _kMinutesPerPage / avgMin).ceil())} 天读完'
+                '大约 ${math.max(1, (pagesLeft * _kMinutesPerPage / avgMin).ceil())} 天读完'
           : '';
       summary = '读到$where，$remainPart$estPart。';
     }
@@ -636,12 +644,7 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
         const SizedBox(height: 28),
         Row(
           children: [
-            _DataCard(
-              value: '约$estPages',
-              label: '总页数',
-              fg: fg,
-              muted: muted,
-            ),
+            _DataCard(value: '约$estPages', label: '总页数', fg: fg, muted: muted),
             const SizedBox(width: 10),
             _DataCard(
               value: '${book.chapterCount}',
@@ -669,7 +672,8 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       children: [
         _bookHeader(theme, fg, muted),
-        if (book.description != null && book.description!.trim().isNotEmpty) ...[
+        if (book.description != null &&
+            book.description!.trim().isNotEmpty) ...[
           const SizedBox(height: 28),
           _sectionTitle('简介', fg),
           const SizedBox(height: 8),
@@ -682,8 +686,23 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
             ),
           ),
         ],
+        if (book.lastOpenedAt != null || book.finishedAt != null) ...[
+          const SizedBox(height: 24),
+          _sectionTitle('阅读记录', fg),
+          const SizedBox(height: 6),
+          if (book.lastOpenedAt != null)
+            _recordRow('最近阅读', _dateTimeLabel(book.lastOpenedAt!), fg, muted),
+          if (book.finishedAt != null)
+            _recordRow('读完时间', _dateTimeLabel(book.finishedAt!), fg, muted),
+        ],
         const SizedBox(height: 28),
-        _DailyBars(dailyMs: _dailyMs, muted: muted, fg: fg),
+        BookDailyBars(
+          dailyMs: _dailyMs,
+          muted: muted,
+          fg: fg,
+          showAll: _showAllDaily,
+          onToggleShowAll: () => setState(() => _showAllDaily = !_showAllDaily),
+        ),
       ],
     );
   }
@@ -714,8 +733,10 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
         const SizedBox(height: 8),
         _TagEditor(
           tags: _tags,
-          suggestions:
-              _suggestedTags.where((t) => !_tags.contains(t)).take(10).toList(),
+          suggestions: _suggestedTags
+              .where((t) => !_tags.contains(t))
+              .take(10)
+              .toList(),
           libraryCount: libraryTags.length,
           onAdd: _addTag,
           onRemove: _removeTag,
@@ -776,7 +797,9 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
             ),
           ),
           title: Text(
-            chapter.title.trim().isEmpty ? '第${_cnNumber(index + 1)}章' : chapter.title.trim(),
+            chapter.title.trim().isEmpty
+                ? '第${_cnNumber(index + 1)}章'
+                : chapter.title.trim(),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
@@ -834,8 +857,9 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
             margin: const EdgeInsets.only(bottom: 10),
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest
-                  .withValues(alpha: 0.5),
+              color: theme.colorScheme.surfaceContainerHighest.withValues(
+                alpha: 0.5,
+              ),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
@@ -878,6 +902,42 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
     );
   }
 
+  /// 打开阅读器并定位到这条笔记；默认挂起进度，避免「看笔记」改掉阅读进度。
+  void _openAnnotation(Annotation item) {
+    final locatorJson = item.locatorStart.trim();
+    if (locatorJson.isEmpty) return;
+    unawaited(
+      context.push(
+        readerPath(widget.bookId),
+        extra: BookLaunch(
+          bookId: widget.bookId,
+          kind: BookLaunchKind.card,
+          coverPath: _book?.coverPath,
+          radius: 12,
+          initialLocatorJson: locatorJson,
+          holdProgress: true,
+        ),
+      ),
+    );
+  }
+
+  /// 分享这条划线 / 高亮 / 笔记。
+  Future<void> _shareAnnotation(Annotation item) async {
+    final note = (item.note ?? '').trim();
+    await showAnnotationShareSheet(
+      context,
+      AnnotationCardData(
+        quote: (item.quotedText ?? '').trim(),
+        note: note.isEmpty ? null : note,
+        bookTitle: _book?.title ?? '',
+        author: _book?.author ?? '',
+        createdAt: item.createdAt,
+        colorToken: item.color.token,
+        kindLabel: BookNoteCard.typeLabel(item.type),
+      ),
+    );
+  }
+
   /// 笔记页签：这本书的划线与笔记。
   Widget _notesTab(ThemeData theme, Color fg, Color muted) {
     if (_annotationsLoading) {
@@ -898,98 +958,46 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
       separatorBuilder: (_, __) => const SizedBox(height: 10),
       itemBuilder: (context, index) {
         final item = _annotations[index];
-        final quote = item.quotedText?.trim() ?? '';
-        final note = item.note?.trim() ?? '';
-        final date = DateTime.fromMillisecondsSinceEpoch(item.createdAt);
-        final dateText =
-            '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-        return Container(
-          key: ValueKey('book-note-${item.id}'),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest
-                .withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _annotationColor(theme, item.color),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    _annotationTypeLabel(item.type),
-                    style: TextStyle(color: muted, fontSize: 11),
-                  ),
-                  const Spacer(),
-                  Text(
-                    dateText,
-                    style: TextStyle(color: muted, fontSize: 11),
-                  ),
-                ],
-              ),
-              if (quote.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  quote,
-                  style: TextStyle(
-                    color: fg.withValues(alpha: 0.85),
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-              ],
-              if (note.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  note,
-                  style: TextStyle(
-                    color: fg,
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-              ],
-            ],
-          ),
+        return BookNoteCard(
+          item: item,
+          foreground: fg,
+          muted: muted,
+          onTap: () => _openAnnotation(item),
+          onShare: () => unawaited(_shareAnnotation(item)),
         );
       },
     );
   }
 
-  Color _annotationColor(ThemeData theme, AnnotationColor color) {
-    return switch (color) {
-      AnnotationColor.yellow => const Color(0xFFE0A030),
-      AnnotationColor.green => const Color(0xFF4CAF7D),
-      AnnotationColor.blue => const Color(0xFF5B9BD5),
-      AnnotationColor.rose => const Color(0xFFE57399),
-    };
-  }
-
-  String _annotationTypeLabel(AnnotationType type) {
-    return switch (type) {
-      AnnotationType.highlight => '划线',
-      AnnotationType.underline => '下划线',
-      AnnotationType.note => '笔记',
-    };
-  }
-
   Widget _sectionTitle(String text, Color fg) => Text(
-        text,
-        style: TextStyle(
-          color: fg,
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-        ),
-      );
+    text,
+    style: TextStyle(color: fg, fontSize: 13, fontWeight: FontWeight.w600),
+  );
+
+  Widget _recordRow(String label, String value, Color fg, Color muted) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Text(label, style: TextStyle(color: muted, fontSize: 12.5)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: TextStyle(color: fg, fontSize: 12.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _dateTimeLabel(int epochMs) {
+    final d = DateTime.fromMillisecondsSinceEpoch(epochMs);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
 
   List<String> _suggestedCategories() {
     // 全量书架（当前书架由编辑器自行并入选中态）。
@@ -1007,20 +1015,18 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
     final when = d.inMinutes < 1
         ? '刚刚'
         : d.inHours < 1
-            ? '${d.inMinutes} 分钟前'
-            : d.inDays < 1
-                ? '${d.inHours} 小时前'
-                : d.inDays == 1
-                    ? '昨天'
-                    : '${d.inDays} 天前';
+        ? '${d.inMinutes} 分钟前'
+        : d.inDays < 1
+        ? '${d.inHours} 小时前'
+        : d.inDays == 1
+        ? '昨天'
+        : '${d.inDays} 天前';
     return '在读 · $when';
   }
 
   Widget _buildBottomBar(ThemeData theme, Color fg) {
     final estPage = _estPage;
-    final label = _percent > 0
-        ? '从$_chapterLabel继续 · 约$estPage页'
-        : '开始阅读';
+    final label = _percent > 0 ? '从$_chapterLabel继续 · 约$estPage页' : '开始阅读';
     return SafeArea(
       top: false,
       child: Padding(
@@ -1036,8 +1042,11 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
                 ),
               ),
               onPressed: () async {
-                final deleted =
-                    await confirmDeleteBook(context, ref, book: _book!);
+                final deleted = await confirmDeleteBook(
+                  context,
+                  ref,
+                  book: _book!,
+                );
                 if (deleted && mounted) context.pop();
               },
               icon: const Icon(Icons.delete_outline, size: 20),
@@ -1077,7 +1086,6 @@ class _BookDetailPageState extends ConsumerState<BookDetailPage>
       ),
     );
   }
-
 }
 
 /// 数字转中文（章节标注用；大于 12 直接用数字）。
@@ -1131,8 +1139,7 @@ class _BookCover3D extends StatelessWidget {
                             File(path!),
                             fit: BoxFit.cover,
                             cacheWidth: 280,
-                            errorBuilder: (_, __, ___) =>
-                                _placeholder(theme),
+                            errorBuilder: (_, __, ___) => _placeholder(theme),
                           ),
                     // 书脊明暗：左缘一道暗到透明的竖向明暗（表现装订侧）
                     const DecoratedBox(
@@ -1140,10 +1147,7 @@ class _BookCover3D extends StatelessWidget {
                         gradient: LinearGradient(
                           begin: Alignment.centerLeft,
                           end: Alignment.centerRight,
-                          colors: [
-                            Color(0x5F000000),
-                            Color(0x00000000),
-                          ],
+                          colors: [Color(0x5F000000), Color(0x00000000)],
                         ),
                       ),
                     ),
@@ -1174,22 +1178,22 @@ class _BookCover3D extends StatelessWidget {
   }
 
   Widget _placeholder(ThemeData theme) => Container(
-        color: const Color(0xFF3A3A3A),
-        alignment: Alignment.center,
-        padding: const EdgeInsets.all(8),
-        child: Text(
-          title,
-          maxLines: 4,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Color(0xFFDAD7D0),
-            fontSize: 11,
-            height: 1.4,
-            letterSpacing: 1,
-          ),
-        ),
-      );
+    color: const Color(0xFF3A3A3A),
+    alignment: Alignment.center,
+    padding: const EdgeInsets.all(8),
+    child: Text(
+      title,
+      maxLines: 4,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+      style: const TextStyle(
+        color: Color(0xFFDAD7D0),
+        fontSize: 11,
+        height: 1.4,
+        letterSpacing: 1,
+      ),
+    ),
+  );
 }
 
 // ---- 源信息芯片（格式 / 章节 / 字数 / 文件大小 / 导入时间） ----
@@ -1460,112 +1464,227 @@ class _DataCard extends StatelessWidget {
   }
 }
 
-// ---- 最近 14 天每日时长（迷你柱状，黑白灰） ----
+// ---- 最近阅读日每日时长（竖排列表，有记录的前 14 天，可展开更多） ----
 
-class _DailyBars extends StatelessWidget {
-  const _DailyBars({
+/// 书籍信息页的每日阅读时长：竖排逐日列出，只展示有记录的前 14 天。
+class BookDailyBars extends StatelessWidget {
+  /// 构造。
+  const BookDailyBars({
+    super.key,
     required this.dailyMs,
     required this.muted,
     required this.fg,
+    required this.showAll,
+    required this.onToggleShowAll,
   });
 
   final Map<String, int> dailyMs;
   final Color muted;
   final Color fg;
+  final bool showAll;
+  final VoidCallback onToggleShowAll;
+
+  static const int _visibleDays = 14;
 
   @override
   Widget build(BuildContext context) {
-    const days = 14;
-    final now = DateTime.now();
-    final values = <(DateTime, int)>[
-      for (var i = days - 1; i >= 0; i--)
-        (now.subtract(Duration(days: i)), 0),
-    ];
-    for (var i = 0; i < values.length; i++) {
-      final d = values[i].$1;
-      final key =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      values[i] = (d, dailyMs[key] ?? 0);
+    final active = <(DateTime, int)>[];
+    for (final entry in dailyMs.entries) {
+      if (entry.value <= 0) continue;
+      final date = DateTime.tryParse(entry.key);
+      if (date == null) continue;
+      active.add((date, entry.value));
     }
-    final maxMs = values.fold<int>(0, (a, b) => a + b.$2);
-
-    String two(int v) => v.toString().padLeft(2, '0');
-    String dayKey(DateTime d) =>
-        '${d.month.toString().padLeft(2, '0')}-${two(d.day)}';
+    // 最近阅读日在前，竖排逐行往下。
+    active.sort((a, b) => b.$1.compareTo(a.$1));
+    final shown = active.take(_visibleDays).toList(growable: false);
+    final totalMs = active.fold<int>(0, (sum, item) => sum + item.$2);
+    final maxMs = shown.fold<int>(0, (max, item) => math.max(max, item.$2));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '最近 $days 天',
-          style: TextStyle(
-            color: fg,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 10),
-        SizedBox(
-          height: 62,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              for (final (d, ms) in values)
-                Expanded(
-                  child: Tooltip(
-                    message: ms > 0
-                        ? '${dayKey(d)} · ${_minutesLabel(ms)}'
-                        : '${dayKey(d)} · 未读',
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          Container(
-                            height: math.max(
-                              2.0,
-                              maxMs > 0 ? 52 * ms / maxMs : 0,
-                            ),
-                            decoration: BoxDecoration(
-                              color: ms > 0
-                                  ? fg.withValues(alpha: 0.75)
-                                  : muted.withValues(alpha: 0.35),
-                              borderRadius: const BorderRadius.vertical(
-                                top: Radius.circular(2),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 6),
+      children: <Widget>[
         Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
+          children: <Widget>[
             Text(
-              dayKey(values.first.$1),
-              style: TextStyle(color: muted, fontSize: 10),
+              '阅读时间',
+              style: TextStyle(
+                color: fg,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-            Text(
-              dayKey(values.last.$1),
-              style: TextStyle(color: muted, fontSize: 10),
-            ),
+            const SizedBox(width: 12),
+            if (active.isNotEmpty)
+              Expanded(
+                child: Text(
+                  '共 ${active.length} 天 · ${_minutesLabel(totalMs)}',
+                  textAlign: TextAlign.right,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: muted, fontSize: 11),
+                ),
+              ),
           ],
         ),
+        const SizedBox(height: 10),
+        if (active.isEmpty)
+          Text('还没有阅读记录', style: TextStyle(color: muted, fontSize: 12))
+        else ...<Widget>[
+          for (final (date, ms) in shown)
+            _DailyRow(
+              key: ValueKey('book-daily-row-${_fullKey(date)}'),
+              date: date,
+              ms: ms,
+              maxMs: maxMs,
+              fg: fg,
+              muted: muted,
+            ),
+          if (active.length > _visibleDays) ...<Widget>[
+            const SizedBox(height: 2),
+            TextButton.icon(
+              key: const ValueKey('book-daily-show-more'),
+              onPressed: onToggleShowAll,
+              icon: Icon(
+                showAll ? Icons.expand_less : Icons.expand_more,
+                size: 18,
+              ),
+              label: Text(
+                showAll ? '收起' : '显示更多（还有 ${active.length - _visibleDays} 天）',
+              ),
+            ),
+            if (showAll) ...<Widget>[
+              const SizedBox(height: 2),
+              Text('更早的阅读记录', style: TextStyle(color: muted, fontSize: 11)),
+              const SizedBox(height: 6),
+              for (final (date, ms) in active.skip(_visibleDays))
+                _DailyRow(
+                  key: ValueKey('book-daily-more-${_fullKey(date)}'),
+                  date: date,
+                  ms: ms,
+                  maxMs: maxMs,
+                  fg: fg,
+                  muted: muted,
+                  fullDate: true,
+                ),
+            ],
+          ],
+        ],
       ],
     );
   }
+
+  static String _fullKey(DateTime d) =>
+      '${d.year}-${_two(d.month)}-${_two(d.day)}';
+
+  static String _two(int v) => v.toString().padLeft(2, '0');
 
   static String _minutesLabel(int ms) {
     final m = ms ~/ 60000;
     if (m < 1) return '不足 1 分钟';
     if (m < 60) return '$m 分钟';
     return '${(m / 60).toStringAsFixed(1)} 小时';
+  }
+}
+
+/// 一行阅读日：日期 + 星期 / 横向时长条 / 时长（整块竖排）。
+class _DailyRow extends StatelessWidget {
+  const _DailyRow({
+    super.key,
+    required this.date,
+    required this.ms,
+    required this.maxMs,
+    required this.fg,
+    required this.muted,
+    this.fullDate = false,
+  });
+
+  final DateTime date;
+  final int ms;
+  final int maxMs;
+  final Color fg;
+  final Color muted;
+  final bool fullDate;
+
+  static const List<String> _weekdays = <String>[
+    '周一',
+    '周二',
+    '周三',
+    '周四',
+    '周五',
+    '周六',
+    '周日',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final ratio = maxMs <= 0 ? 0.02 : (ms / maxMs).clamp(0.02, 1.0);
+    final dateLabel = fullDate
+        ? '${date.year}-${BookDailyBars._two(date.month)}-'
+              '${BookDailyBars._two(date.day)}'
+        : '${BookDailyBars._two(date.month)}-${BookDailyBars._two(date.day)}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 9),
+      child: Row(
+        children: <Widget>[
+          SizedBox(
+            width: 66,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  dateLabel,
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  _weekdays[date.weekday - 1],
+                  style: TextStyle(color: muted, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Container(
+              height: 6,
+              decoration: BoxDecoration(
+                color: fg.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: ratio,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: fg.withValues(alpha: 0.62),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 62,
+            child: Text(
+              BookDailyBars._minutesLabel(ms),
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: muted,
+                fontSize: 12,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

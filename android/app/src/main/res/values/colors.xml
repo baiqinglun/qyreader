@@ -7,4 +7,11 @@
          夜间模式用夜间阅读底色（见 values-night/styles.xml）。 -->
     <color name="normal_window_background">#F7F3EB</color>
     <color name="normal_window_background_night">#1F1F22</color>
+    <!-- 桌面组件（RemoteViews 用的固定配色；values-night 有暗色覆盖） -->
+    <color name="widget_card">#FFFFFF</color>
+    <color name="widget_text_primary">#1B1D22</color>
+    <color name="widget_text_secondary">#7A808C</color>
+    <color name="widget_track">#E8EBF2</color>
+    <color name="widget_accent">#1E7BFF</color>
+    <color name="widget_cover_placeholder">#EDF2FB</color>
 </resources>

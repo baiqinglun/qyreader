@@ -146,17 +146,56 @@ class S3ObjectStore implements ObjectStore {
   }
 
   /// 连通性自检：桶可访问且可列举（读权限）。
+  ///
+  /// 用 GET 列举探测，不用 HEAD（bucketExists）：HEAD 响应没有 body，
+  /// SDK 拿不到 S3 错误码，只能把 HTTP reason phrase 当错误信息
+  /// （表现为「MinioError: Forbidden」）；GET 的错误响应带 XML，
+  /// 能给出真实错误码（如阿里云账号停机时的 UserDisable）。
   Future<String?> testConnection() async {
     try {
-      final exists = await _minio.bucketExists(bucket);
-      if (!exists) return '桶不存在：$bucket';
-      // 列举一次验证读权限（1 条即返回）
+      // 列举一次验证桶存在 + 读权限（1 条即返回）
       await _minio.listObjects(bucket, prefix: prefix, recursive: true)
           .take(1)
           .toList();
       return null;
     } catch (e) {
-      return '连接失败：$e';
+      if (e is MinioS3Error &&
+          (e.response?.statusCode == 404 || e.error?.code == 'NoSuchBucket')) {
+        return '桶不存在：$bucket';
+      }
+      return '连接失败：${describeStoreError(e)}';
     }
   }
+}
+
+/// 把 minio SDK 抛出的异常转成带上下文的可读错误信息。
+///
+/// `MinioS3Error` 的 `toString()` 只有 message：请求没有响应体时（HEAD）
+/// SDK 退化为 HTTP reason phrase（「Forbidden」），看不出真实原因；
+/// 带 XML 响应体时也丢了状态码与请求 ID。这里统一补上，便于对账排查。
+/// 非 S3 错误原样返回 `$error`，所有 catch 处都可以放心调用。
+String describeStoreError(Object error) {
+  if (error is MinioS3Error) {
+    final code = error.error?.code;
+    final message = error.error?.message;
+    final parts = <String>[
+      if (error.response != null) 'HTTP ${error.response!.statusCode}',
+      if (code != null && code.isNotEmpty) '错误码 $code',
+      if (message != null && message.isNotEmpty && message != code) message,
+    ];
+    // 请求 ID：OSS 是 x-oss-request-id，AWS 系是 x-amz-request-id
+    if (error.response != null) {
+      final headers = error.response!.headers;
+      for (final name in const ['x-oss-request-id', 'x-amz-request-id']) {
+        for (final key in headers.keys) {
+          if (key.toLowerCase() == name && headers[key]?.isNotEmpty == true) {
+            parts.add('请求 ID ${headers[key]}');
+          }
+        }
+      }
+    }
+    if (parts.isEmpty) return '$error';
+    return '存储服务返回错误：${parts.join('，')}';
+  }
+  return '$error';
 }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_book_progress_name">最近阅读</string>
+    <string name="widget_book_progress_description">正在读的书：封面与阅读进度</string>
+    <string name="widget_today_reading_name">今日阅读</string>
+    <string name="widget_today_reading_description">今天读了多久、离每日目标还有多远</string>
+    <string name="widget_shelf_name">最近读的书</string>
+    <string name="widget_shelf_description">最近阅读的三本书</string>
+</resources>

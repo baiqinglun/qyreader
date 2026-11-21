@@ -8,13 +8,19 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/providers.dart';
 import '../../../app/router.dart';
+import '../../../app/theme/layout.dart';
 import '../../../app/theme/motion.dart';
+import '../../../core/stats_revision.dart';
 import '../../../domain/entities/reading_stats.dart';
+import 'stats_prefs.dart';
 import 'widgets/stats_period_header.dart';
 
 /// 统计页。
 class StatsPage extends ConsumerStatefulWidget {
-  const StatsPage({super.key});
+  const StatsPage({this.active = true, super.key});
+
+  /// 当前是否选中「统计」Tab（切回来时重新拉一次统计）。
+  final bool active;
 
   @override
   ConsumerState<StatsPage> createState() => _StatsPageState();
@@ -32,6 +38,27 @@ class _StatsPageState extends ConsumerState<StatsPage> {
   void initState() {
     super.initState();
     _load();
+    // 统计有写入（会话落库 / 同步合并）就重拉——本 Tab 可见时数字即时跟上
+    statsRevision.addListener(_onStatsRevision);
+  }
+
+  void _onStatsRevision() {
+    if (widget.active && mounted) _load();
+  }
+
+  @override
+  void dispose() {
+    statsRevision.removeListener(_onStatsRevision);
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(StatsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 每次切回统计 Tab 都刷新一次（刚读完书回来数字要跟上）
+    if (widget.active && !oldWidget.active) {
+      _load();
+    }
   }
 
   Future<void> _load() async {
@@ -144,6 +171,50 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     await _load();
   }
 
+  /// 单页最长计时：一页停留超过上限的部分不计入统计
+  /// （开着书离开/睡着不会把时长灌爆）。对之后打开的书生效。
+  Future<void> _editPageCap() async {
+    final current = await loadPageCapMinutes();
+    if (!mounted) return;
+    final picked = await showDialog<int>(
+      context: context,
+      animationStyle: kSmoothSheetAnimation,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('单页最长计时'),
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+              '在一页上停留超过上限的部分不计入统计（防止开着书离开时误统计）',
+              style: TextStyle(fontSize: 13),
+            ),
+          ),
+          for (final m in kPageCapOptions)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(m),
+              child: Row(
+                children: [
+                  Expanded(child: Text(pageCapLabel(m))),
+                  if (m == current)
+                    Icon(
+                      Icons.check,
+                      size: 18,
+                      color: Theme.of(ctx).colorScheme.primary,
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || picked == current || !mounted) return;
+    await savePageCapMinutes(picked);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已保存：单页最长计时 ${pageCapLabel(picked)}，下次打开书籍生效')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = _StatsPalette.of(context);
@@ -155,6 +226,11 @@ class _StatsPageState extends ConsumerState<StatsPage> {
       appBar: AppBar(
         title: const Text('阅读统计'),
         actions: [
+          IconButton(
+            tooltip: '单页最长计时',
+            onPressed: _editPageCap,
+            icon: const Icon(Icons.timer_outlined),
+          ),
           IconButton(
             tooltip: '设置目标',
             onPressed: stats == null ? null : _editGoal,
@@ -174,10 +250,12 @@ class _StatsPageState extends ConsumerState<StatsPage> {
               child: Text('统计加载失败：$_error', style: TextStyle(color: fg)),
             )
           : stats == null || period == null
-              ? Center(
-                  child: CircularProgressIndicator(color: palette.accent),
-                )
-              : ListView(
+          ? Center(child: CircularProgressIndicator(color: palette.accent))
+          : Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: kContentMaxWidth),
+                child: ListView(
+                  key: const PageStorageKey('stats-scroll'),
                   padding: const EdgeInsets.all(16),
                   children: [
                     _PeriodTabs(
@@ -195,7 +273,8 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                       onToday: period.canGoNext ? _goToday : null,
                       onPickDate: _pickDate,
                     ),
-                    if (_granularity == StatsPeriod.day && _isToday(_anchor)) ...[
+                    if (_granularity == StatsPeriod.day &&
+                        _isToday(_anchor)) ...[
                       const SizedBox(height: 8),
                       _GoalCard(
                         stats: stats,
@@ -243,6 +322,8 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                     const SizedBox(height: 16),
                   ],
                 ),
+              ),
+            ),
     );
   }
 }
@@ -335,78 +416,80 @@ class _PeriodSummary extends StatelessWidget {
         : (period.durationMs / period.sessions / 60000).round();
     final topBook = period.books.isEmpty ? '暂无' : period.books.first.title;
     final items = <(String, String, String)>[
-      (
-        '阅读时长',
-        _humanDuration(period.durationMs),
-        '共 ${period.sessions} 段会话',
-      ),
+      ('阅读时长', _humanDuration(period.durationMs), '共 ${period.sessions} 段会话'),
       (
         '阅读字数',
         _humanChars(period.charsRead),
         '${period.charsPerMinute.round()} 字/分',
       ),
-      (
-        '阅读书籍',
-        '${period.books.length} 本',
-        topBook,
-      ),
-      (
-        '平均每次',
-        '$avgMinutes 分钟',
-        '单段会话',
-      ),
+      ('阅读书籍', '${period.books.length} 本', topBook),
+      ('平均每次', '$avgMinutes 分钟', '单段会话'),
     ];
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      mainAxisSpacing: 10,
-      crossAxisSpacing: 10,
-      childAspectRatio: 1.9,
-      children: [
-        for (final (label, value, hint) in items)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: theme.chromeSurface,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: theme.chromeForeground.withValues(alpha: 0.6),
-                    fontSize: 11,
-                  ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 宽屏按约 210dp 一格自动分列（最多 4 列）：两列在桌面上会被
+        // 拉成两张巨大的空卡片，4 列后单卡尺寸才正常。
+        final columns = (constraints.maxWidth / 210)
+            .floor()
+            .clamp(2, 4)
+            .toInt();
+        return GridView.count(
+          key: const ValueKey('stats-summary-grid'),
+          crossAxisCount: columns,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 1.9,
+          children: [
+            for (final (label, value, hint) in items)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: theme.chromeForeground,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
+                decoration: BoxDecoration(
+                  color: theme.chromeSurface,
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  hint,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: theme.chromeForeground.withValues(alpha: 0.45),
-                    fontSize: 10,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: theme.chromeForeground.withValues(alpha: 0.6),
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: theme.chromeForeground,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      hint,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: theme.chromeForeground.withValues(alpha: 0.45),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
-      ],
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -439,10 +522,8 @@ class _BucketChart extends StatelessWidget {
           show: true,
           drawVerticalLine: false,
           horizontalInterval: (maxMinutes * 1.25 / 4).clamp(1, 100000),
-          getDrawingHorizontalLine: (_) => FlLine(
-            color: fg.withValues(alpha: 0.08),
-            strokeWidth: 1,
-          ),
+          getDrawingHorizontalLine: (_) =>
+              FlLine(color: fg.withValues(alpha: 0.08), strokeWidth: 1),
         ),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
@@ -583,11 +664,7 @@ class _ReadingContentList extends StatelessWidget {
       child: Column(
         children: [
           for (var i = 0; i < books.length; i++) ...[
-            if (i > 0)
-              Divider(
-                height: 1,
-                color: fg.withValues(alpha: 0.08),
-              ),
+            if (i > 0) Divider(height: 1, color: fg.withValues(alpha: 0.08)),
             InkWell(
               onTap: books[i].exists ? () => onOpen(books[i].bookId) : null,
               child: Padding(
@@ -799,7 +876,7 @@ class _GoalCard extends StatelessWidget {
                   stats.dailyGoalMinutes <= 0
                       ? '未设置每日目标'
                       : '目标 ${stats.dailyGoalMinutes} 分钟 · '
-                          '${stats.todayChars} 字',
+                            '${stats.todayChars} 字',
                   style: TextStyle(
                     color: fg.withValues(alpha: 0.6),
                     fontSize: 12,
@@ -884,9 +961,7 @@ class _YearBooksCardState extends ConsumerState<_YearBooksCard> {
     return Card(
       elevation: 0,
       color: theme.chromeSurface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
         child: Column(

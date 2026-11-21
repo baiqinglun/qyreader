@@ -2,13 +2,16 @@
 library;
 
 import 'package:flutter/material.dart';
+import '../features/home/widgets/global_tts_bar.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../features/home_widgets/home_widget_sync.dart';
 import '../features/settings/appearance_provider.dart';
 import 'launch_reset.dart';
 import 'router.dart';
 import 'theme/app_theme.dart';
+import 'widget_action.dart';
 
 /// MaterialApp.router 装配。
 class QyReaderApp extends ConsumerWidget {
@@ -23,6 +26,9 @@ class QyReaderApp extends ConsumerWidget {
     final router = ref.watch(routerProvider);
     // 点桌面图标重新进入时归位到书架（见 LaunchReset）。
     LaunchReset.bind(router);
+    // 桌面组件：启动时绑一次点击动作，并开始把书架 / 统计推给原生。
+    WidgetActionRouter.bind(router);
+    ref.watch(homeWidgetSyncProvider);
     return MaterialApp.router(
       title: 'QYReader',
       debugShowCheckedModeBanner: false,
@@ -37,6 +43,9 @@ class QyReaderApp extends ConsumerWidget {
       supportedLocales: const [Locale('zh'), Locale('en')],
       locale: const Locale('zh'),
       routerConfig: router,
+      // 全局听书控制条：听书中在所有页面底部显示（阅读页/听书页自己声明
+      // 盖住），退出书籍后回到任意页面都可见
+      builder: (context, child) => TtsBarOverlay(child: child),
     );
   }
 }

@@ -4,7 +4,8 @@
 /// - 封面尺寸/比例五花八门，直接贴上去当书脊会花；
 /// - 竖排书名在任何主题下都能读，且一眼能扫到最近读的是哪几本。
 ///
-/// 书多时横向滚动，不挤压下面的网格。
+/// 展示几本由屏幕宽度决定：能摆几本摆几本，最多把架板横向填满；
+/// 书少时整排居中。不再横向滚动，也不再有固定本数上限。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,7 +14,40 @@ import '../../../app/transitions/book_open_transition.dart';
 import '../../../core/widgets/pressable_scale.dart';
 import '../../../domain/entities/book.dart';
 
-/// 最近在读竖排架。
+/// 书脊宽度（与 [_BookSpine] 共用同一套规则：按书名散列取 30 / 34 / 38）。
+double recentShelfSpineWidth(ShelfItem item) {
+  final title = _spineTitle(item.book.title);
+  return 30 + (title.hashCode.abs() % 3) * 4;
+}
+
+/// 最近在读的展示书目：按屏幕宽度从前往后取，放不下就停。
+///
+/// 左右各留 20dp、书间 3dp；取到下一本会超出可用宽度就停，不裁半本书。
+/// 极窄屏至少保留第一本，避免整条架空掉。
+List<ShelfItem> recentShelfVisibleItems(List<ShelfItem> items, double width) {
+  if (items.isEmpty) return const <ShelfItem>[];
+  const double sidePadding = 20;
+  const double gap = 3;
+  final available = width - sidePadding * 2;
+  final visible = <ShelfItem>[];
+  var used = 0.0;
+  for (final item in items) {
+    final spine = recentShelfSpineWidth(item);
+    final next = visible.isEmpty ? spine : used + gap + spine;
+    if (next > available) break;
+    visible.add(item);
+    used = next;
+  }
+  if (visible.isEmpty) visible.add(items.first);
+  return visible;
+}
+
+/// 书脊上展示的标题（空书名用「无题」占位）。
+String _spineTitle(String raw) {
+  return raw.trim().isEmpty ? '无题' : raw;
+}
+
+/// 最近在读（已按最近打开倒序；调用方已按屏幕宽度裁过）。
 class RecentShelf extends StatelessWidget {
   const RecentShelf({
     required this.items,
@@ -23,7 +57,7 @@ class RecentShelf extends StatelessWidget {
     super.key,
   });
 
-  /// 最近在读（已按最近打开倒序）。
+  /// 当前屏幕放得下的最近在读（顺序不变）。
   final List<ShelfItem> items;
 
   /// 点书脊打开书籍。
@@ -83,22 +117,25 @@ class RecentShelf extends StatelessWidget {
               Positioned.fill(
                 // 底部让出架板高度，书脊脚正好落在架板上沿
                 bottom: 11,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
+                child: Padding(
                   padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 3),
-                  itemBuilder: (context, index) {
-                    final item = items[index];
-                    return Align(
-                      alignment: Alignment.bottomCenter,
-                      child: PressableScale(
-                        onTap: () => onOpen(item.book),
-                        onLongPress: () => onManage(item.book),
-                        child: _BookSpine(item: item),
-                      ),
-                    );
-                  },
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        for (var i = 0; i < items.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 3),
+                          PressableScale(
+                            onTap: () => onOpen(items[i].book),
+                            onLongPress: () => onManage(items[i].book),
+                            child: _BookSpine(item: items[i]),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -207,11 +244,11 @@ class _BookSpine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final title = item.book.title.trim().isEmpty ? '无题' : item.book.title;
+    final title = _spineTitle(item.book.title);
     final seed = title.hashCode.abs();
     final base = _palette[seed % _palette.length];
-    // 宽度/高度按书名散列做小幅变化，一排书看起来才有长短厚薄
-    final width = 30.0 + (seed % 3) * 4;
+    // 宽度由 recentShelfSpineWidth 统一计算，保证「按宽度裁书」和实际书脊一致。
+    final width = recentShelfSpineWidth(item);
     final height = 128.0 + ((seed ~/ 3) % 3) * 10;
 
     const fontSize = 10.5;
@@ -289,10 +326,8 @@ class _BookSpine extends StatelessWidget {
   }
 
   /// 书脊上下两端的压印饰线。
-  Widget _spineRule() => Container(
-        height: 1,
-        color: Colors.white.withValues(alpha: 0.22),
-      );
+  Widget _spineRule() =>
+      Container(height: 1, color: Colors.white.withValues(alpha: 0.22));
 }
 
 /// 逐字竖排的书名（中文/日文/韩文）。
@@ -325,18 +360,12 @@ class _VerticalTitle extends StatelessWidget {
       fontWeight: FontWeight.w600,
       color: Colors.white.withValues(alpha: 0.94),
       shadows: const [
-        Shadow(
-          color: Color(0x40000000),
-          blurRadius: 1,
-          offset: Offset(0, 0.5),
-        ),
+        Shadow(color: Color(0x40000000), blurRadius: 1, offset: Offset(0, 0.5)),
       ],
     );
     return Column(
       mainAxisSize: MainAxisSize.min,
-      children: [
-        for (final ch in clipped) Text(ch, style: style),
-      ],
+      children: [for (final ch in clipped) Text(ch, style: style)],
     );
   }
 }

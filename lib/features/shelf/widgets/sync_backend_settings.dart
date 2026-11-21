@@ -1,4 +1,5 @@
-/// 同步后端设置：本地桶 / 阿里云 OSS（端点、桶、前缀、地域、密钥、连接测试）。
+/// 同步设置：自动同步间隔 + 阿里云 OSS 存储（端点、桶、前缀、地域、密钥、
+/// 连接测试）。
 ///
 /// 只支持阿里云 OSS：走 S3 兼容接口，必须用虚拟主机风格（桶名拼在域名前），
 /// 所以界面上没有服务商选择、也没有「路径风格」开关。
@@ -6,14 +7,16 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../app/providers.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../../../data/sync/s3_object_store.dart';
 import '../../../data/sync/sync_backend_store.dart';
+import '../auto_sync.dart';
 
 
-/// 打开同步后端设置页。
+/// 打开同步设置页。
 Future<void> showSyncBackendSettings(BuildContext context) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
@@ -22,7 +25,7 @@ Future<void> showSyncBackendSettings(BuildContext context) {
   );
 }
 
-/// 同步后端设置页。
+/// 同步设置页。
 class SyncBackendSettingsPage extends ConsumerStatefulWidget {
   const SyncBackendSettingsPage({super.key});
 
@@ -47,6 +50,9 @@ class _SyncBackendSettingsPageState
   bool _testing = false;
   String? _message;
 
+  /// 自动同步间隔（分钟；0 = 关闭）。
+  int _autoMinutes = 0;
+
   @override
   void initState() {
     super.initState();
@@ -57,6 +63,7 @@ class _SyncBackendSettingsPageState
     final store = ref.read(syncBackendStoreProvider);
     final config = await store.loadConfig();
     final creds = await store.loadCredentials();
+    final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
       _type = config.type;
@@ -68,7 +75,18 @@ class _SyncBackendSettingsPageState
       _accessKey.text = creds.accessKey;
       _secretKey.text = creds.secretKey;
       _useSSL = config.useSSL;
+      _autoMinutes = prefs.getInt(kAutoSyncPrefsKey) ?? 0;
       _loading = false;
+    });
+  }
+
+  /// 切换自动同步间隔：立即落盘并重排定时器。
+  Future<void> _setAutoMinutes(int minutes) async {
+    await ref.read(autoSyncProvider).setMinutes(minutes);
+    if (!mounted) return;
+    setState(() {
+      _autoMinutes = minutes;
+      _message = '已保存：${kAutoSyncOptions[minutes]}';
     });
   }
 
@@ -153,7 +171,7 @@ class _SyncBackendSettingsPageState
       appBar: AppBar(
         backgroundColor: reading.chromeSurface,
         foregroundColor: fg,
-        title: const Text('同步存储'),
+        title: const Text('同步设置'),
         actions: [
           TextButton(
             onPressed: _loading ? null : _save,
@@ -171,8 +189,49 @@ class _SyncBackendSettingsPageState
               padding: const EdgeInsets.all(16),
               children: [
                 const SizedBox(height: 12),
+                // 自动同步：按间隔在后台静默跑 syncNow（前台才执行）
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Text(
+                        '自动同步',
+                        style: TextStyle(color: fg, fontSize: 15),
+                      ),
+                      const Spacer(),
+                      DropdownButton<int>(
+                        value: _autoMinutes,
+                        underline: const SizedBox.shrink(),
+                        dropdownColor: reading.chromeSurface,
+                        style: TextStyle(color: fg, fontSize: 15),
+                        icon: Icon(
+                          Icons.keyboard_arrow_down,
+                          color: fg.withValues(alpha: 0.6),
+                        ),
+                        items: [
+                          for (final entry in kAutoSyncOptions.entries)
+                            DropdownMenuItem<int>(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            ),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) _setAutoMinutes(v);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
                 Text(
-                  '对象存阿里云 OSS（S3 兼容接口，走「桶名.端点」）',
+                  '到点后在前台静默同步一次；手动同步不受影响',
+                  style: TextStyle(
+                    color: fg.withValues(alpha: 0.5),
+                    fontSize: 11,
+                  ),
+                ),
+                const Divider(height: 32),
+                Text(
+                  '存储：阿里云 OSS（S3 兼容接口，走「桶名.端点」）',
                   style: TextStyle(
                     color: fg.withValues(alpha: 0.6),
                     fontSize: 12,

@@ -4,10 +4,12 @@ library;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
+import 'package:path/path.dart' as p;
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../app/providers.dart';
 import '../../domain/entities/book.dart';
+import 'import_history.dart';
 import 'shelf_prefs.dart';
 
 part 'shelf_controller.freezed.dart';
@@ -26,10 +28,18 @@ sealed class ImportState with _$ImportState {
   const factory ImportState.done(
     List<Book> books, {
     @Default(<String>[]) List<String> failures,
+
+    /// 本次导入的逐文件结果（用于导入结果弹窗；打开方式导入不放这里）。
+    @Default(<ImportRecord>[]) List<ImportRecord> records,
   }) = ImportDone;
 
   /// 导入失败（含重复导入提示）。
-  const factory ImportState.error(String message) = ImportError;
+  const factory ImportState.error(
+    String message, {
+
+    /// 本次导入的逐文件结果（用于导入结果弹窗）。
+    @Default(<ImportRecord>[]) List<ImportRecord> records,
+  }) = ImportError;
 }
 
 /// 书架书籍流（未删除、按最近打开排序）。
@@ -62,9 +72,12 @@ List<ShelfItem> filterShelfByCategory(List<ShelfItem> items, String filter) {
 
 /// 书架「根目录」的书：没有分类的书（分类里的书不算根目录）。
 List<ShelfItem> rootShelfItems(List<ShelfItem> items) => [
-      for (final item in items)
-        if ((item.book.category?.trim() ?? '').isEmpty) item,
-    ];
+  for (final item in items)
+    if ((item.book.category?.trim() ?? '').isEmpty) item,
+];
+
+/// 虚拟收藏分类标识，不与用户分类名冲突。
+const String kFavoritesShelf = '__qyreader_favorites__';
 
 /// 书架首屏的一格：分类卡，或一本没有分类的书。
 sealed class ShelfCell {
@@ -94,45 +107,62 @@ final class ShelfBookCell extends ShelfCell {
 ///
 /// 有分类的书只出现在分类格里（点开分类才看得到），不单独占格；这样
 /// 分类和书是同一套格子里的内容，一行三个一路排下去。
-List<ShelfCell> shelfCells(List<ShelfItem> items) {
-  final cells = <ShelfCell>[
-    for (final category in shelfCategories(items))
-      ShelfCategoryCell(
-        title: category,
-        books: filterShelfByCategory(items, category),
-      ),
-  ];
-  for (final item in items) {
-    if ((item.book.category?.trim() ?? '').isEmpty) {
-      cells.add(ShelfBookCell(item));
-    }
+List<ShelfCell> shelfCells(
+  List<ShelfItem> items, {
+  String parent = '',
+  Iterable<String> extraPaths = const [],
+}) {
+  final paths = <String>{};
+  for (final category in {...shelfCategories(items), ...extraPaths}) {
+    final prefix = parent.isEmpty ? '' : '$parent/';
+    if (!category.startsWith(prefix) || category == parent) continue;
+    final rest = category.substring(prefix.length);
+    paths.add('$prefix${rest.split('/').first}');
   }
-  return cells;
+  final sortedPaths = paths.toList()..sort();
+  final favorites = items.where((item) => item.book.isFavorite).toList();
+  return [
+    if (parent.isEmpty && favorites.isNotEmpty)
+      ShelfCategoryCell(title: kFavoritesShelf, books: favorites),
+    for (final path in sortedPaths)
+      ShelfCategoryCell(
+        title: path,
+        books: items.where((item) {
+          final category = item.book.category?.trim() ?? '';
+          return category == path || category.startsWith('$path/');
+        }).toList(),
+      ),
+    for (final item in items)
+      if ((item.book.category?.trim() ?? '') == parent) ShelfBookCell(item),
+  ];
 }
 
 /// 书架一行摆几格：默认自动（手机 3 格，宽屏每格约 140dp 加列），
 /// 也可以在书架设置里固定 3/4/5 格。
-int shelfColumns(double width, {ShelfColumnCount columns = ShelfColumnCount.auto}) {
+int shelfColumns(
+  double width, {
+  ShelfColumnCount columns = ShelfColumnCount.auto,
+}) {
   return columns.resolve(width);
 }
 
-/// 最近在读：打开过的书，置顶优先，再按最近打开时间倒序，最多 [limit] 本。
+/// 最近在读：打开过的书，置顶优先，再按最近打开时间倒序。
 ///
-/// 书架上「刚打开的」要排到最上面，但置顶书的优先级更高；从没打开过的
-/// 书（lastOpenedAt 为空）不进入竖排架。
-List<ShelfItem> recentlyReadItems(List<ShelfItem> items, {int limit = 20}) {
-  final read = <ShelfItem>[
-    for (final item in items)
-      if (item.book.lastOpenedAt != null) item,
-  ]..sort(
-      (a, b) {
+/// 展示几本不再写死：由 `RecentShelf` 按屏幕宽度裁切（见
+/// `recentShelfVisibleItems`），宽屏能多摆几本、窄屏少摆几本。
+/// [limit] 只留给单测 / 特殊场景，正常展示不传。
+List<ShelfItem> recentlyReadItems(List<ShelfItem> items, {int? limit}) {
+  final read =
+      <ShelfItem>[
+        for (final item in items)
+          if (item.book.lastOpenedAt != null) item,
+      ]..sort((a, b) {
         final aPin = a.book.pinnedAt ?? 0;
         final bPin = b.book.pinnedAt ?? 0;
         if (aPin != bPin) return bPin - aPin;
         return b.book.lastOpenedAt!.compareTo(a.book.lastOpenedAt!);
-      },
-    );
-  if (read.length <= limit) return read;
+      });
+  if (limit == null || read.length <= limit) return read;
   return read.sublist(0, limit);
 }
 
@@ -147,15 +177,13 @@ List<ShelfItem> sortShelfItems(
   int primary(ShelfItem a, ShelfItem b) {
     switch (field) {
       case ShelfSortField.title:
-        return a.book.title
-            .trim()
-            .toLowerCase()
-            .compareTo(b.book.title.trim().toLowerCase());
+        return a.book.title.trim().toLowerCase().compareTo(
+          b.book.title.trim().toLowerCase(),
+        );
       case ShelfSortField.added:
         return a.book.addedAt.compareTo(b.book.addedAt);
       case ShelfSortField.lastOpened:
-        return (a.book.lastOpenedAt ?? 0)
-            .compareTo(b.book.lastOpenedAt ?? 0);
+        return (a.book.lastOpenedAt ?? 0).compareTo(b.book.lastOpenedAt ?? 0);
     }
   }
 
@@ -179,12 +207,19 @@ class ImportController extends _$ImportController {
   @override
   ImportState build() => const ImportState.idle();
 
-  /// 弹出文件选择器并导入（支持多选 EPUB / TXT / Markdown）。
+  /// 弹出文件选择器并导入（支持多选 EPUB / AZW3 / MOBI / TXT / Markdown）。
   Future<void> importFromPicker() async {
     if (state is ImportLoading) return;
     final picked = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: const ['epub', 'txt', 'md', 'markdown'],
+      allowedExtensions: const [
+        'epub',
+        'azw3',
+        'mobi',
+        'txt',
+        'md',
+        'markdown',
+      ],
       allowMultiple: true,
       withData: false,
     );
@@ -205,16 +240,46 @@ class ImportController extends _$ImportController {
     state = const ImportState.loading();
     final books = <Book>[];
     final failures = <String>[];
+    final records = <ImportRecord>[];
     try {
       final repo = await ref.read(bookRepositoryProvider.future);
-      final result = await repo.importFromFile(path, returnExistingOnDuplicate: true);
+      final result = await repo.importFromFile(
+        path,
+        returnExistingOnDuplicate: true,
+      );
       result.when(
-        ok: books.add,
-        failure: (e) => failures.add(e.message),
+        ok: (book) {
+          books.add(book);
+          records.add(
+            _importRecord(
+              path,
+              ImportRecordStatus.success,
+              title: book.title,
+              message: '已加入书架',
+            ),
+          );
+        },
+        failure: (e) {
+          failures.add(e.message);
+          records.add(
+            _importRecord(
+              path,
+              e.code == 'import.duplicate'
+                  ? ImportRecordStatus.duplicate
+                  : ImportRecordStatus.failure,
+              message: e.message,
+            ),
+          );
+        },
       );
     } catch (e) {
       failures.add('导入失败：$e');
+      records.add(
+        _importRecord(path, ImportRecordStatus.failure, message: '导入失败：$e'),
+      );
     }
+    // 打开方式导入会立刻进阅读器，不弹结果弹窗；记录仍写进历史。
+    await ref.read(importHistoryControllerProvider.notifier).addAll(records);
     state = books.isEmpty
         ? ImportState.error(failures.join('\n'))
         : ImportState.done(books, failures: failures);
@@ -227,26 +292,76 @@ class ImportController extends _$ImportController {
     state = const ImportState.loading();
     final books = <Book>[];
     final failures = <String>[];
+    final records = <ImportRecord>[];
     try {
       final repo = await ref.read(bookRepositoryProvider.future);
       for (final path in paths) {
         try {
           final result = await repo.importFromFile(path);
           result.when(
-            ok: books.add,
-            failure: (e) => failures.add(e.message),
+            ok: (book) {
+              books.add(book);
+              records.add(
+                _importRecord(
+                  path,
+                  ImportRecordStatus.success,
+                  title: book.title,
+                  message: '已加入书架',
+                ),
+              );
+            },
+            failure: (e) {
+              failures.add(e.message);
+              records.add(
+                _importRecord(
+                  path,
+                  e.code == 'import.duplicate'
+                      ? ImportRecordStatus.duplicate
+                      : ImportRecordStatus.failure,
+                  message: e.message,
+                ),
+              );
+            },
           );
         } catch (e) {
           failures.add('导入失败：$e');
+          records.add(
+            _importRecord(path, ImportRecordStatus.failure, message: '导入失败：$e'),
+          );
         }
       }
     } catch (e) {
       failures.add('导入失败：$e');
+      records.add(
+        _importRecord(
+          paths.length == 1 ? paths.first : '导入',
+          ImportRecordStatus.failure,
+          message: '导入失败：$e',
+        ),
+      );
     }
+    await ref.read(importHistoryControllerProvider.notifier).addAll(records);
     state = books.isEmpty
-        ? ImportState.error(failures.join('\n'))
-        : ImportState.done(books, failures: failures);
+        ? ImportState.error(failures.join('\n'), records: records)
+        : ImportState.done(books, failures: failures, records: records);
     return books;
+  }
+
+  ImportRecord _importRecord(
+    String path,
+    ImportRecordStatus status, {
+    String? title,
+    String message = '',
+  }) {
+    final fileName = p.basename(path);
+    final fallback = p.basenameWithoutExtension(path);
+    return ImportRecord(
+      fileName: fileName.isEmpty ? path : fileName,
+      title: (title ?? fallback).trim(),
+      status: status,
+      message: message,
+      at: DateTime.now().millisecondsSinceEpoch,
+    );
   }
 
   /// UI 消费完 done/error 状态后回到 idle。

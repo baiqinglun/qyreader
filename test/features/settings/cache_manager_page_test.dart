@@ -70,6 +70,10 @@ class _FakeBookRepository implements BookRepository {
   }) => throw UnimplementedError();
 
   @override
+  Future<Result<Book>> replaceBookContent(String bookId, String sourcePath) =>
+      throw UnimplementedError();
+
+  @override
   Future<void> setPersonalization(
     String bookId, {
     int? rating,
@@ -78,6 +82,17 @@ class _FakeBookRepository implements BookRepository {
     String? category,
     BookReadStatus? readStatus,
   }) => throw UnimplementedError();
+
+  @override
+  Future<void> applyReadingState(
+    String bookId, {
+    BookReadStatus? readStatus,
+    int? lastOpenedAt,
+    int? finishedAt,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> setFavorite(String bookId, bool favorite) async {}
 
   @override
   Future<void> setPinned(String bookId, bool pinned) =>

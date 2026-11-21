@@ -36,39 +36,46 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-        onCreate: (m) async {
-          await m.createAll();
-          await _createBookFts();
-        },
-        onUpgrade: (m, from, to) async {
-          // 迁移纪律：每个版本单独处理，永不删表重建。
-          if (from < 2) {
-            // v2：book_fts 增加 href 列（检索命中跳转需要章 href）。
-            // book_fts 是派生数据（可由书籍文件重建），直接重建安全。
-            await customStatement('DROP TABLE IF EXISTS book_fts');
-            await _createBookFts();
-          }
-          if (from < 3) {
-            // v3：书籍个人化信息（评分/书评/标签/书架置顶）。
-            await m.addColumn(books, books.rating);
-            await m.addColumn(books, books.review);
-            await m.addColumn(books, books.tags);
-            await m.addColumn(books, books.pinnedAt);
-          }
-          if (from < 4) {
-            // v4：书籍分类（单值，书架按分类筛选）。
-            await m.addColumn(books, books.category);
-          }
-          if (from < 5) {
-            // v5：阅读状态（未读 / 在读 / 已读 / 弃读）。
-            await m.addColumn(books, books.readStatus);
-          }
-        },
-      );
+    onCreate: (m) async {
+      await m.createAll();
+      await _createBookFts();
+    },
+    onUpgrade: (m, from, to) async {
+      // 迁移纪律：每个版本单独处理，永不删表重建。
+      if (from < 2) {
+        // v2：book_fts 增加 href 列（检索命中跳转需要章 href）。
+        // book_fts 是派生数据（可由书籍文件重建），直接重建安全。
+        await customStatement('DROP TABLE IF EXISTS book_fts');
+        await _createBookFts();
+      }
+      if (from < 3) {
+        // v3：书籍个人化信息（评分/书评/标签/书架置顶）。
+        await m.addColumn(books, books.rating);
+        await m.addColumn(books, books.review);
+        await m.addColumn(books, books.tags);
+        await m.addColumn(books, books.pinnedAt);
+      }
+      if (from < 4) {
+        // v4：书籍分类（单值，书架按分类筛选）。
+        await m.addColumn(books, books.category);
+      }
+      if (from < 5) {
+        // v5：阅读状态（未读 / 在读 / 已读 / 弃读）。
+        await m.addColumn(books, books.readStatus);
+      }
+      if (from < 7) {
+        await m.addColumn(books, books.isFavorite);
+      }
+      if (from < 6) {
+        // v6：读完时间（微信读书 finishTime）。
+        await m.addColumn(books, books.finishedAt);
+      }
+    },
+  );
 
   /// 创建 FTS5 全文索引虚拟表。
   Future<void> _createBookFts() async {
@@ -84,9 +91,11 @@ class AppDatabase extends _$AppDatabase {
 
 /// 用应用支持目录打开生产数据库（后台线程执行 IO）。
 AppDatabase openAppDatabase() {
-  return AppDatabase(LazyDatabase(() async {
-    final dir = await getApplicationSupportDirectory();
-    final file = File(p.join(dir.path, 'qy_reader.sqlite3'));
-    return NativeDatabase.createInBackground(file);
-  }));
+  return AppDatabase(
+    LazyDatabase(() async {
+      final dir = await getApplicationSupportDirectory();
+      final file = File(p.join(dir.path, 'qy_reader.sqlite3'));
+      return NativeDatabase.createInBackground(file);
+    }),
+  );
 }

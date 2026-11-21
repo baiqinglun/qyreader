@@ -115,58 +115,57 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
   }
 
   double _valueOf(String edge) => switch (_group) {
-        MarginGroup.body => switch (edge) {
-            'top' => _draft.marginTop,
-            'bottom' => _draft.marginBottom,
-            'left' => _draft.marginLeft,
-            _ => _draft.marginRight,
-          },
-        MarginGroup.header => switch (edge) {
-            'top' => _draft.headerMarginTop,
-            'bottom' => _draft.marginTop,
-            'left' => _draft.headerMarginLeft,
-            _ => _draft.headerMarginRight,
-          },
-        MarginGroup.footer => switch (edge) {
-            'top' => _draft.marginBottom,
-            'bottom' => _draft.footerMarginBottom,
-            'left' => _draft.footerMarginLeft,
-            _ => _draft.footerMarginRight,
-          },
-      };
+    MarginGroup.body => switch (edge) {
+      'top' => _draft.marginTop,
+      'bottom' => _draft.marginBottom,
+      'left' => _draft.marginLeft,
+      _ => _draft.marginRight,
+    },
+    MarginGroup.header => switch (edge) {
+      'top' => _draft.headerMarginTop,
+      'bottom' => _draft.marginTop,
+      'left' => _draft.headerMarginLeft,
+      _ => _draft.headerMarginRight,
+    },
+    MarginGroup.footer => switch (edge) {
+      'top' => _draft.marginBottom,
+      'bottom' => _draft.footerMarginBottom,
+      'left' => _draft.footerMarginLeft,
+      _ => _draft.footerMarginRight,
+    },
+  };
 
   ReadingSettings _withValue(String edge, double raw) {
     final value = raw.clamp(0.0, 64.0).toDouble();
     return switch (_group) {
       MarginGroup.body => switch (edge) {
-          'top' => _draft.copyWith(marginTop: value),
-          'bottom' => _draft.copyWith(marginBottom: value),
-          'left' => _draft.copyWith(marginLeft: value),
-          _ => _draft.copyWith(marginRight: value),
-        },
+        'top' => _draft.copyWith(marginTop: value),
+        'bottom' => _draft.copyWith(marginBottom: value),
+        'left' => _draft.copyWith(marginLeft: value),
+        _ => _draft.copyWith(marginRight: value),
+      },
       MarginGroup.header => switch (edge) {
-          'top' => _draft.copyWith(headerMarginTop: value),
-          'bottom' => _draft.copyWith(marginTop: value),
-          'left' => _draft.copyWith(headerMarginLeft: value),
-          _ => _draft.copyWith(headerMarginRight: value),
-        },
+        'top' => _draft.copyWith(headerMarginTop: value),
+        'bottom' => _draft.copyWith(marginTop: value),
+        'left' => _draft.copyWith(headerMarginLeft: value),
+        _ => _draft.copyWith(headerMarginRight: value),
+      },
       MarginGroup.footer => switch (edge) {
-          'top' => _draft.copyWith(marginBottom: value),
-          'bottom' => _draft.copyWith(footerMarginBottom: value),
-          'left' => _draft.copyWith(footerMarginLeft: value),
-          _ => _draft.copyWith(footerMarginRight: value),
-        },
+        'top' => _draft.copyWith(marginBottom: value),
+        'bottom' => _draft.copyWith(footerMarginBottom: value),
+        'left' => _draft.copyWith(footerMarginLeft: value),
+        _ => _draft.copyWith(footerMarginRight: value),
+      },
     };
   }
 
   /// 拖动方向 → 边距增量的符号（正文上边距往下的拖动是「变大」）。
   double _dragSign(String edge) => switch (_group) {
-        MarginGroup.body => edge == 'top' || edge == 'left' ? 1 : -1,
-        MarginGroup.header =>
-          edge == 'right' ? -1 : 1, // 顶部/底部/左边都是越往右/下越大
-        MarginGroup.footer =>
-          edge == 'top' || edge == 'bottom' ? -1 : (edge == 'left' ? 1 : -1),
-      };
+    MarginGroup.body => edge == 'top' || edge == 'left' ? 1 : -1,
+    MarginGroup.header => edge == 'right' ? -1 : 1, // 顶部/底部/左边都是越往右/下越大
+    MarginGroup.footer =>
+      edge == 'top' || edge == 'bottom' ? -1 : (edge == 'left' ? 1 : -1),
+  };
 
   void _apply(ReadingSettings next, {bool commit = false}) {
     setState(() => _draft = next);
@@ -198,21 +197,21 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
   void _resetGroup() {
     final next = switch (_group) {
       MarginGroup.body => _draft.copyWith(
-          marginLeft: 16,
-          marginRight: 16,
-          marginTop: 12,
-          marginBottom: 12,
-        ),
+        marginLeft: 16,
+        marginRight: 16,
+        marginTop: 12,
+        marginBottom: 12,
+      ),
       MarginGroup.header => _draft.copyWith(
-          headerMarginTop: 6,
-          headerMarginLeft: 16,
-          headerMarginRight: 16,
-        ),
+        headerMarginTop: 6,
+        headerMarginLeft: 16,
+        headerMarginRight: 16,
+      ),
       MarginGroup.footer => _draft.copyWith(
-          footerMarginLeft: 16,
-          footerMarginRight: 16,
-          footerMarginBottom: 6,
-        ),
+        footerMarginLeft: 16,
+        footerMarginRight: 16,
+        footerMarginBottom: 6,
+      ),
     };
     _apply(next, commit: true);
   }
@@ -255,9 +254,7 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
               if (_guidesVisible)
                 for (final chip in chips)
                   _chip(context, chip, fg, accent, size),
-              Center(
-                child: _toolbar(context, fg, surface, accent),
-              ),
+              Center(child: _toolbar(context, fg, surface, accent)),
             ],
           );
         },
@@ -269,56 +266,48 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
     final cx = size.width / 2;
     return switch (_group) {
       MarginGroup.body => [
-          _ChipData('top', Offset(cx, geo.body.top), false),
-          _ChipData('bottom', Offset(cx, geo.body.bottom), false),
-          _ChipData(
-            'left',
-            // 侧边数字放 38% 高度：正中间会和悬浮工具栏撞在一起。
-            Offset(geo.body.left, geo.body.top + geo.body.height * 0.38),
-            true,
-          ),
-          _ChipData(
-            'right',
-            Offset(geo.body.right, geo.body.top + geo.body.height * 0.38),
-            true,
-          ),
-        ],
+        _ChipData('top', Offset(cx, geo.body.top), false),
+        _ChipData('bottom', Offset(cx, geo.body.bottom), false),
+        _ChipData(
+          'left',
+          // 侧边数字放 38% 高度：正中间会和悬浮工具栏撞在一起。
+          Offset(geo.body.left, geo.body.top + geo.body.height * 0.38),
+          true,
+        ),
+        _ChipData(
+          'right',
+          Offset(geo.body.right, geo.body.top + geo.body.height * 0.38),
+          true,
+        ),
+      ],
       MarginGroup.header => [
-          _ChipData('top', Offset(cx, geo.header.top), false),
-          _ChipData(
-            'bottom',
-            Offset(cx, (geo.headerTextBottom + geo.body.top) / 2),
-            false,
-          ),
-          _ChipData(
-            'left',
-            Offset(geo.header.left, geo.header.center.dy),
-            true,
-          ),
-          _ChipData(
-            'right',
-            Offset(geo.header.right, geo.header.center.dy),
-            true,
-          ),
-        ],
+        _ChipData('top', Offset(cx, geo.header.top), false),
+        _ChipData(
+          'bottom',
+          Offset(cx, (geo.headerTextBottom + geo.body.top) / 2),
+          false,
+        ),
+        _ChipData('left', Offset(geo.header.left, geo.header.center.dy), true),
+        _ChipData(
+          'right',
+          Offset(geo.header.right, geo.header.center.dy),
+          true,
+        ),
+      ],
       MarginGroup.footer => [
-          _ChipData(
-            'top',
-            Offset(cx, (geo.body.bottom + geo.footerTextTop) / 2),
-            false,
-          ),
-          _ChipData('bottom', Offset(cx, geo.footer.bottom), false),
-          _ChipData(
-            'left',
-            Offset(geo.footer.left, geo.footer.center.dy),
-            true,
-          ),
-          _ChipData(
-            'right',
-            Offset(geo.footer.right, geo.footer.center.dy),
-            true,
-          ),
-        ],
+        _ChipData(
+          'top',
+          Offset(cx, (geo.body.bottom + geo.footerTextTop) / 2),
+          false,
+        ),
+        _ChipData('bottom', Offset(cx, geo.footer.bottom), false),
+        _ChipData('left', Offset(geo.footer.left, geo.footer.center.dy), true),
+        _ChipData(
+          'right',
+          Offset(geo.footer.right, geo.footer.center.dy),
+          true,
+        ),
+      ],
     };
   }
 
@@ -425,12 +414,7 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
     );
   }
 
-  Widget _toolbar(
-    BuildContext context,
-    Color fg,
-    Color surface,
-    Color accent,
-  ) {
+  Widget _toolbar(BuildContext context, Color fg, Color surface, Color accent) {
     return Container(
       key: const ValueKey('margin-toolbar'),
       padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
@@ -463,10 +447,7 @@ class _MarginEditorOverlayState extends State<MarginEditorOverlay> {
               ),
               items: [
                 for (final g in MarginGroup.values)
-                  DropdownMenuItem(
-                    value: g,
-                    child: Text(g.title),
-                  ),
+                  DropdownMenuItem(value: g, child: Text(g.title)),
               ],
               onChanged: _switchGroup,
             ),

@@ -11,7 +11,7 @@
 ///
 /// 对齐与选择：Flutter 的一段文本只能有一个 `TextAlign`，所以一页里按
 /// 「连续同对齐的段落」拆成若干段（run）分别渲染。正文段落之间仍然共享
-/// 同一个 run，跨段选择照常；只有跨标题（居中）这种对齐变化处选择会断开。
+/// 同一个 run。选区由阅读视口保存，可跨越版式分段和分页边界。
 library;
 
 import 'dart:async';
@@ -19,7 +19,9 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../../app/theme/reading_theme.dart';
@@ -42,6 +44,7 @@ class NativeMark {
     required this.start,
     required this.end,
     required this.color,
+    this.underline = false,
   });
 
   /// 标注 id（点按/编辑用）。
@@ -56,8 +59,11 @@ class NativeMark {
   /// 终点（不含）。
   final int end;
 
-  /// 底色（已含透明度）。
+  /// 底色（已含透明度）；下划线类型时作为下划线颜色。
   final Color color;
+
+  /// true = 下划线（只画线、不铺底色）。
+  final bool underline;
 }
 
 /// 原生正文的文本选择（长按选字）。
@@ -66,9 +72,10 @@ class NativeSelection {
     required this.chapterIndex,
     required this.start,
     required this.end,
+    int? endChapterIndex,
     required this.text,
     required this.anchor,
-  });
+  }) : endChapterIndex = endChapterIndex ?? chapterIndex;
 
   /// 章序号。
   final int chapterIndex;
@@ -76,8 +83,13 @@ class NativeSelection {
   /// 起点（章内字符偏移）。
   final int start;
 
-  /// 终点（不含）。
+  /// 终点所在章。
+  final int endChapterIndex;
+
+  /// 终点（终点章内的字符偏移，不含）。
   final int end;
+
+  bool get spansChapters => chapterIndex != endChapterIndex;
 
   /// 选中文字。
   final String text;
@@ -86,8 +98,12 @@ class NativeSelection {
   final Offset anchor;
 }
 
-/// 压掉 EditableText 自动派生 strut 的显式 strut（见 _runWidget）。
-const StrutStyle _noStrut = StrutStyle(fontSize: 0.1, height: 0.1);
+typedef _SelectionPoint = ({int chapter, int offset});
+
+int _comparePoints(_SelectionPoint a, _SelectionPoint b) =>
+    a.chapter == b.chapter
+    ? a.offset.compareTo(b.offset)
+    : a.chapter.compareTo(b.chapter);
 
 /// 阅读位置（原生模式）。
 class NativePosition {
@@ -148,6 +164,57 @@ class PreviewPageData {
   final double stretch;
 }
 
+/// 全书进度按**内容字符量**算（v2.48.0）。
+///
+/// 旧口径按「章序号 / 章数」均摊：长章短章一视同仁，进度与实际读到的
+/// 内容对不上（一章顶半本书的书，读完整章进度才走 10%）。这里统一用
+/// 字符量：前面章节的字符 + 当前章内偏移，除以全书字符。
+/// 章内偏移是章内字符坐标（`ChapterLayout.chapterOfDisplay`）。
+
+/// 全书字符总量。
+int bookCharTotal(List<NativeChapter> chapters) {
+  var total = 0;
+  for (final c in chapters) {
+    total += c.text.length;
+  }
+  return total;
+}
+
+/// 全书进度（0..1）：按内容字符量。越界坐标按章长钳制。
+double bookContentPercent(
+  List<NativeChapter> chapters,
+  int chapterIdx,
+  int chapterOffset,
+) {
+  if (chapters.isEmpty || chapterIdx < 0 || chapterIdx >= chapters.length) {
+    return 0;
+  }
+  var before = 0;
+  for (var i = 0; i < chapterIdx; i++) {
+    before += chapters[i].text.length;
+  }
+  final total = bookCharTotal(chapters);
+  if (total <= 0) return 0;
+  final local = chapterOffset.clamp(0, chapters[chapterIdx].text.length);
+  return ((before + local) / total).clamp(0.0, 1.0);
+}
+
+/// 全书进度 → 落点（章索引, 章内字符偏移）：进度拖动跳转与
+/// [bookContentPercent] 同口径，拖到哪就落在内容对应的位置。
+(int, int) chapterForContentPercent(List<NativeChapter> chapters, double v) {
+  final target = (v.clamp(0.0, 1.0) * bookCharTotal(chapters)).round();
+  var before = 0;
+  for (var i = 0; i < chapters.length; i++) {
+    final len = chapters[i].text.length;
+    if (before + len >= target || i == chapters.length - 1) {
+      final local = (target - before).clamp(0, len);
+      return (i, local);
+    }
+    before += len;
+  }
+  return (0, 0);
+}
+
 /// 原生文本阅读视图。
 class NativeReaderView extends StatefulWidget {
   const NativeReaderView({
@@ -159,6 +226,7 @@ class NativeReaderView extends StatefulWidget {
     required this.padding,
     required this.theme,
     this.backgroundImage = '',
+    this.backgroundFit = BackgroundImageFit.cover,
     required this.initialChapterIndex,
     required this.initialOffset,
     required this.onPosition,
@@ -206,6 +274,9 @@ class NativeReaderView extends StatefulWidget {
   /// 自定义阅读背景图（应用内文件路径）；空 = 纯色纸面。
   final String backgroundImage;
 
+  /// 背景图的缩放 / 拉伸方式。
+  final BackgroundImageFit backgroundFit;
+
   /// 打开时的章序号。
   final int initialChapterIndex;
 
@@ -233,7 +304,7 @@ class NativeReaderView extends StatefulWidget {
   /// 选字完成回调（停顿后才触发，避免拖手柄时菜单乱跳）。
   final ValueChanged<NativeSelection>? onSelection;
 
-  /// 选字进行中（拖手柄/重新长按）→ 先收起菜单。
+  /// 选字进行中或正文取消选中时先收起菜单。
   final VoidCallback? onSelectionClear;
 
   /// 点击已有划线（弹操作面板：改颜色 / 加想法 / 删除）。
@@ -345,7 +416,8 @@ class NativeReaderViewState extends State<NativeReaderView>
     double columnWidth,
     double bodyHeight,
     double scale,
-  })? _turnCtx;
+  })?
+  _turnCtx;
 
   /// 最近上报过的页索引（-1 = 尚未初始化）。
   int _lastReportedPage = -1;
@@ -364,20 +436,27 @@ class NativeReaderViewState extends State<NativeReaderView>
   int _lastOffset = 0;
   bool _everReported = false;
 
-  /// 最近一次按下的全局坐标（选字菜单锚点；SelectableText 不给位置）。
-  Offset _lastPress = Offset.zero;
+  // 选区生命周期属于整个视口，翻页不销毁正在拖动的手柄。
+  final _selectionViewport = GlobalKey();
+  final _selectionRuns = <_SelectionRunState>{};
+  final _selectionHandles = ValueNotifier<(Offset?, Offset?)>((null, null));
+  _SelectionPoint? _selectionStart;
+  _SelectionPoint? _selectionEnd;
+  bool _selectingFromBody = false;
+  bool _mouseSelecting = false;
+  _SelectionPoint? _bodySelectionStart;
+  _SelectionPoint? _bodySelectionEnd;
+  int? _handlePointer;
+  bool _draggingStart = false;
+  Offset _handleDragOffset = Offset.zero;
+  Offset? _handlePointerPosition;
+  Timer? _selectionTurnTimer;
+  int _selectionEdge = 0;
 
-  /// 选字菜单防抖：拖动手柄时选区每帧都在变，立刻弹菜单会盖住手柄、
-  /// 还会让手柄跳位（用户体感就是“只能一个字一个字挪”）。
-  Timer? _selTimer;
+  bool get _hasSelection => _selectionStart != null;
 
-  /// 当前有选区的 run（某个 run 清空不影响别的 run）。
-  final Set<Key> _selectedRuns = <Key>{};
-
-  bool get _hasSelection => _selectedRuns.isNotEmpty;
-
-  /// 选区代次：换值重建 SelectableText，可清掉系统选区。
-  int _selectionEpoch = 0;
+  /// 选字时暂停朗读跟页，防止正文跳转中断手势。
+  bool get isSelectingText => _hasSelection;
 
   /// 点击判定：按下位置与时间（区分点击 / 拖动翻页）。
   Offset _downAt = Offset.zero;
@@ -408,22 +487,60 @@ class NativeReaderViewState extends State<NativeReaderView>
     return layout.chapterOfDisplay(start);
   }
 
-  /// 清掉正文里的系统选区（创建/取消划线后调用）。
+  /// 章内偏移是否落在当前可见页（双页取同屏两页；TTS「定位」按钮用）。
+  bool isOffsetVisible(int chapterIdx, int offset) {
+    if (chapterIdx != _chapterIdx) return false;
+    final pag = _pagination;
+    final layout = _layout;
+    if (pag == null || layout == null || pag.starts.isEmpty) return false;
+    if (!_pc.hasClients) return false;
+    final raw = _pc.page?.round() ?? 0;
+    final spread = (raw - _leadingSentinels).clamp(0, _spreadCount(pag) - 1);
+    final display = layout.displayOfChapter(offset);
+    for (var k = 0; k < _pagesPerView; k++) {
+      final page = (spread * _pagesPerView + k).clamp(0, pag.pageCount - 1);
+      final (start, end) = pag.rangeOf(page);
+      if (display >= start && display < end) return true;
+    }
+    return false;
+  }
+
+  /// 清掉正文选区（创建或取消划线后调用）。
   void clearTextSelection() {
-    _selectedRuns.clear();
-    _selTimer?.cancel();
-    if (mounted) setState(() => _selectionEpoch++);
+    if (!_hasSelection) return;
+    _selectionStart = null;
+    _selectionEnd = null;
+    _selectingFromBody = false;
+    _bodySelectionStart = null;
+    _bodySelectionEnd = null;
+    _handlePointer = null;
+    _handlePointerPosition = null;
+    _cancelSelectionTurn();
+    _selectionHandles.value = (null, null);
+    _bumpPage();
+  }
+
+  void _dismissTextSelection() {
+    if (!_hasSelection) return;
+    clearTextSelection();
+    widget.onSelectionClear?.call();
   }
 
   /// 下一页（键盘/无障碍/外部按钮用）。
-  void nextPage() => _animateTo((_pc.hasClients ? _pc.page!.round() : 0) + 1);
+  void nextPage() {
+    _dismissTextSelection();
+    _animateTo((_pc.hasClients ? _pc.page!.round() : 0) + 1);
+  }
 
   /// 上一页。
-  void previousPage() =>
-      _animateTo((_pc.hasClients ? _pc.page!.round() : 0) - 1);
+  void previousPage() {
+    _dismissTextSelection();
+    _animateTo((_pc.hasClients ? _pc.page!.round() : 0) - 1);
+  }
 
   /// 跳到本章指定字符偏移所在页（TTS 跟读 / 精确恢复用）。
   void jumpToOffset(int offset) {
+    _dismissTextSelection();
     final pag = _pagination;
     final layout = _layout;
     if (pag == null || layout == null || !_pc.hasClients) return;
@@ -437,6 +554,7 @@ class NativeReaderViewState extends State<NativeReaderView>
 
   /// 跳到指定章（目录/进度用）。[offset] 为章内字符偏移。
   void jumpToChapter(int chapterIdx, {int offset = 0}) {
+    _dismissTextSelection();
     final maxIdx = math.max(0, widget.chapters.length - 1);
     final idx = chapterIdx.clamp(0, maxIdx).toInt();
     _cancelReflow();
@@ -469,18 +587,23 @@ class NativeReaderViewState extends State<NativeReaderView>
     final maxIdx = math.max(0, widget.chapters.length - 1);
     _chapterIdx = widget.initialChapterIndex.clamp(0, maxIdx).toInt();
     _offsetForPending = widget.initialOffset;
+    if (widget.initialOffset > 0) {
+      _pendingJump = true;
+      _pendingPage = -1;
+    }
     _clockTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       if (!mounted) return;
       if (_needsClock || _needsBattery) setState(() {});
       if (_needsBattery) unawaited(_refreshBattery());
     });
     unawaited(_refreshBattery());
-    _freeCurlSettle = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 190),
-    )
-      ..addListener(_onFreeCurlSettleTick)
-      ..addStatusListener(_onFreeCurlSettleStatus);
+    _freeCurlSettle =
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 190),
+          )
+          ..addListener(_onFreeCurlSettleTick)
+          ..addStatusListener(_onFreeCurlSettleStatus);
   }
 
   bool get _needsClock => _anySlot(widget.settings, RunningContent.time);
@@ -491,7 +614,8 @@ class NativeReaderViewState extends State<NativeReaderView>
   void dispose() {
     widget.previewListenable?.removeListener(_onLivePreviewChanged);
     widget.marginPreviewListenable?.removeListener(_onMarginPreviewChanged);
-    _selTimer?.cancel();
+    _selectionTurnTimer?.cancel();
+    _selectionHandles.dispose();
     _clockTimer?.cancel();
     _reflowDebounce?.cancel();
     _reflowToken++;
@@ -506,8 +630,9 @@ class NativeReaderViewState extends State<NativeReaderView>
   Future<void> _refreshBattery() async {
     if (!_needsBattery) return;
     try {
-      final level = await const MethodChannel('qyreader/battery')
-          .invokeMethod<int>('level');
+      final level = await const MethodChannel(
+        'qyreader/battery',
+      ).invokeMethod<int>('level');
       if (!mounted) return;
       if (level != _battery) setState(() => _battery = level);
     } on MissingPluginException {
@@ -646,7 +771,9 @@ class NativeReaderViewState extends State<NativeReaderView>
       _onLivePreviewSourceChanged();
     }
     if (oldWidget.marginPreviewListenable != widget.marginPreviewListenable) {
-      oldWidget.marginPreviewListenable?.removeListener(_onMarginPreviewChanged);
+      oldWidget.marginPreviewListenable?.removeListener(
+        _onMarginPreviewChanged,
+      );
       widget.marginPreviewListenable?.addListener(_onMarginPreviewChanged);
       _liveMarginPreview = widget.marginPreviewListenable?.value;
       // 预览通道换绑后按新值重算版心。
@@ -728,15 +855,21 @@ class NativeReaderViewState extends State<NativeReaderView>
     // 渲染取整误差按设备像素密度走（逐行向上取整到物理像素，
     // 平均 ~0.5~0.7 物理 px/行），拉伸与装箱余量都要用它。
     _dpr = View.of(context).devicePixelRatio;
-    final headerH =
-        _runningHeight(header: true, scale: scale, settings: effective);
-    final footerH =
-        _runningHeight(header: false, scale: scale, settings: effective);
+    final headerH = _runningHeight(
+      header: true,
+      scale: scale,
+      settings: effective,
+    );
+    final footerH = _runningHeight(
+      header: false,
+      scale: scale,
+      settings: effective,
+    );
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final contentWidth =
-            (constraints.maxWidth - widget.padding.horizontal).clamp(1.0, 1e6);
+        final contentWidth = (constraints.maxWidth - widget.padding.horizontal)
+            .clamp(1.0, 1e6);
         final gutter = effective.doublePage ? 20.0 : 0.0;
         final columnWidth = effective.doublePage
             ? ((contentWidth - gutter) / 2).clamp(80.0, 1e6)
@@ -750,12 +883,13 @@ class NativeReaderViewState extends State<NativeReaderView>
         // （实测《十扇窗》页尾孤行被裁）。
         final lineHeight =
             (spec.bodyStyle.fontSize ?? 16) * (spec.bodyStyle.height ?? 1.2);
-        final textAreaH = (constraints.maxHeight -
-                headerH -
-                footerH -
-                effective.marginTop -
-                effective.marginBottom)
-            .clamp(40.0, 1e6);
+        final textAreaH =
+            (constraints.maxHeight -
+                    headerH -
+                    footerH -
+                    effective.marginTop -
+                    effective.marginBottom)
+                .clamp(40.0, 1e6);
         final renderSlack =
             textAreaH / lineHeight * 0.75 * _dpr + lineHeight * 0.5;
         final bodyHeight = (textAreaH - renderSlack).clamp(40.0, 1e6);
@@ -768,18 +902,33 @@ class NativeReaderViewState extends State<NativeReaderView>
         // 拖动滑杆 / 边距直调：只排当前页（预览），不触发全章。
         final previewForPage = preview ?? marginPreview;
         if (previewForPage != null) {
-          _schedulePreview(previewForPage, spec, size, scale, headerH, footerH,
-              textAreaH);
+          _schedulePreview(
+            previewForPage,
+            spec,
+            size,
+            scale,
+            headerH,
+            footerH,
+            textAreaH,
+          );
         } else {
-          final stale = _pagination == null ||
+          final stale =
+              _pagination == null ||
               _paginationChapter != _chapterIdx ||
               _layoutSize != size ||
               _layoutScale != scale ||
               _paginationSignature != spec.metricsSignature;
           if (stale) {
             // 先把当前页按新设置画出来，再防抖后全章分帧重排。
-            _schedulePreview(widget.settings, spec, size, scale, headerH,
-                footerH, textAreaH);
+            _schedulePreview(
+              widget.settings,
+              spec,
+              size,
+              scale,
+              headerH,
+              footerH,
+              textAreaH,
+            );
             _scheduleReflow(
               widget.settings,
               spec,
@@ -799,6 +948,44 @@ class NativeReaderViewState extends State<NativeReaderView>
           builder: (context, _, __) {
             final previewPage = _previewPage;
             if (previewPage != null) {
+              // 双页模式只预览左栏，右栏留白（版心宽度按单栏算）；
+              // 页眉页脚整屏一份（页码按预览页口径）。
+              if (previewPage.settings.doublePage) {
+                final ctx = _PageCtx(
+                  chapterIndex: previewPage.chapterIdx,
+                  page: previewPage.page,
+                  pages: previewPage.pages,
+                  chapterTitle: previewPage.layout.chapter.title,
+                  bookPercent: widget.bookPercent,
+                );
+                return _spreadFrame(
+                  left: _pageBody(
+                    previewPage.chapterIdx,
+                    previewPage.layout,
+                    previewPage.start,
+                    previewPage.end,
+                    previewPage.page,
+                    previewPage.width,
+                    previewPage.scale,
+                    previewPage.settings,
+                    stretch: previewPage.stretch,
+                  ),
+                  right: _blankPage(),
+                  gutter: 20,
+                  headerBand: _runningBand(
+                    header: true,
+                    ctx: ctx,
+                    settings: previewPage.settings,
+                    height: previewPage.headerH,
+                  ),
+                  footerBand: _runningBand(
+                    header: false,
+                    ctx: ctx,
+                    settings: previewPage.settings,
+                    height: previewPage.footerH,
+                  ),
+                );
+              }
               final content = _pageContent(
                 previewPage.chapterIdx,
                 previewPage.layout,
@@ -813,14 +1000,7 @@ class NativeReaderViewState extends State<NativeReaderView>
                 previewPage.settings,
                 stretch: previewPage.stretch,
               );
-              // 双页模式只预览左栏，右栏留白（版心宽度按单栏算）。
-              return previewPage.settings.doublePage
-                  ? _spreadFrame(
-                      left: content,
-                      right: _blankPage(),
-                      gutter: 20,
-                    )
-                  : _spreadFrame(left: content, right: null, gutter: 0);
+              return _spreadFrame(left: content, right: null, gutter: 0);
             }
 
             final pag = _pagination;
@@ -828,11 +1008,11 @@ class NativeReaderViewState extends State<NativeReaderView>
               return _PageBackground(
                 color: widget.theme.background,
                 imagePath: widget.backgroundImage,
+                fit: widget.backgroundFit,
               );
             }
             final spreads = _spreadCount(pag);
-            final itemCount =
-                spreads + (_hasPrev ? 1 : 0) + (_hasNext ? 1 : 0);
+            final itemCount = spreads + (_hasPrev ? 1 : 0) + (_hasNext ? 1 : 0);
             if (_pendingJump) _scheduleJump(pag);
 
             final mode = effective.pageTurnMode;
@@ -850,30 +1030,70 @@ class NativeReaderViewState extends State<NativeReaderView>
             _curlPageSize = Size(constraints.maxWidth, constraints.maxHeight);
             // 随手仿真：手指开始拖时现场构建当前页/下一页，盖在滚动区上。
             _spreadBuilder = (index) => _buildSpread(
-                  index,
-                  pag,
-                  spec,
-                  columnWidth,
-                  bodyHeight,
-                  scale,
-                  gutter,
-                  headerH,
-                  footerH,
-                  textAreaH,
-                );
+              index,
+              pag,
+              spec,
+              columnWidth,
+              bodyHeight,
+              scale,
+              gutter,
+              headerH,
+              footerH,
+              textAreaH,
+            );
+            if (_hasSelection) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _syncSelectionHandles();
+              });
+            }
             return Stack(
+              key: _selectionViewport,
               fit: StackFit.expand,
               children: [
                 Listener(
                   onPointerDown: (e) {
                     _downAt = e.position;
                     _downTime = DateTime.now();
-                    _onFreeCurlDown(e);
+                    _selectingFromBody = false;
+                    _mouseSelecting = false;
+                    if (!_hasSelection) _onFreeCurlDown(e);
                   },
-                  onPointerMove: _onFreeCurlMove,
-                  onPointerCancel: (_) => _resetFreeCurl(),
+                  onPointerMove: (e) {
+                    if (widget.onSelection != null &&
+                        e.kind == PointerDeviceKind.mouse &&
+                        e.buttons == kPrimaryMouseButton &&
+                        (e.position - _downAt).distance >= 6) {
+                      if (!_selectingFromBody) _startTextSelection(_downAt);
+                      if (_selectingFromBody) {
+                        _mouseSelecting = true;
+                        _extendBodySelection(e.position);
+                        return;
+                      }
+                    }
+                    _onFreeCurlMove(e);
+                  },
+                  onPointerCancel: (_) {
+                    _resetFreeCurl();
+                    if (_selectingFromBody) _dismissTextSelection();
+                  },
                   onPointerUp: (e) {
                     _endFreeCurl();
+                    if (_selectingFromBody) {
+                      if (_mouseSelecting) _publishTextSelection(e.position);
+                      return;
+                    }
+                    final delta = e.position - _downAt;
+                    if (mode == PageTurnMode.none &&
+                        !_hasSelection &&
+                        delta.dx.abs() > 50 &&
+                        delta.dx.abs() > delta.dy.abs()) {
+                      if (delta.dx < 0) {
+                        nextPage();
+                      } else {
+                        previousPage();
+                      }
+                      return;
+                    }
                     final moved = (e.position - _downAt).distance;
                     final dt = DateTime.now().difference(_downTime);
                     if (moved > 14 || dt > const Duration(milliseconds: 450)) {
@@ -885,38 +1105,65 @@ class NativeReaderViewState extends State<NativeReaderView>
                   // 相邻页在空闲帧就完成构建（分页/排版/对齐补偿），翻页拖动
                   // 全程只有滚动合成，不再有「拖到一半才建新页」的掉帧尖峰
                   // （实测 build P95 12ms 来自拖动中途的整页构建）。
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: _onScrollNotification,
-                    child: Scrollable(
-                      controller: _pc,
-                      axisDirection: AxisDirection.right,
-                      // 滑动翻页在任何翻页效果下都可用；「无」只是点击时
-                      // 瞬间跳跳，不阻止手指拖动。有文本选区时必须禁掉滚动：
-                      // 拖选框手柄会被 PageScrollPhysics 抢走当翻页拖动，
-                      // 选区刚拖一个字就被取消（用户体感「只能一个字一个字挪」）。
-                      physics: mode == PageTurnMode.freeCurl ||
-                              _freeCurlArmed ||
-                              _freeCurlSettling ||
-                              _hasSelection
-                          ? const NeverScrollableScrollPhysics()
-                          : const PageScrollPhysics(
-                              parent: ClampingScrollPhysics()),
-                      viewportBuilder: (context, position) => Viewport(
-                        // 视口主轴必须和 Scrollable 显式对齐：Viewport 的
-                        // axisDirection 默认是 AxisDirection.down，漏掉它
-                        // sliver 会竖向排列、而滚动手势走横向——表现就是
-                        // 「左右滑，页面上下翻」。
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onLongPressStart: widget.onSelection == null
+                        ? null
+                        : (details) {
+                            if (!_selectingFromBody) {
+                              _startTextSelection(details.globalPosition);
+                            }
+                          },
+                    onLongPressMoveUpdate: widget.onSelection == null
+                        ? null
+                        : (details) =>
+                              _extendBodySelection(details.globalPosition),
+                    onLongPressEnd: widget.onSelection == null
+                        ? null
+                        : (details) {
+                            if (_selectingFromBody && !_mouseSelecting) {
+                              _publishTextSelection(details.globalPosition);
+                            }
+                          },
+                    child: NotificationListener<ScrollNotification>(
+                      onNotification: _onScrollNotification,
+                      child: Scrollable(
+                        controller: _pc,
                         axisDirection: AxisDirection.right,
-                        // 预构建前后两页：翻页目标页在空闲时已就绪，拖动全程
-                        // 纯滚动合成（单页缓存会让「下一页的下一页」在拖动
-                        // 开始的帧里现建）。
-                        cacheExtent: constraints.maxWidth * 2,
-                        offset: position,
-                        slivers: [
-                          SliverFillViewport(
-                            viewportFraction: 1,
-                            delegate: SliverChildBuilderDelegate(
-                              (context, index) {
+                        // 长按与横滑竞争时，滚动仍从按下的位置开始。
+                        dragStartBehavior: widget.onSelection == null
+                            ? DragStartBehavior.start
+                            : DragStartBehavior.down,
+                        // 「无」通过抬手手势瞬间翻页，不让页面跟手滑动。
+                        // 有选区时，只有手柄到达边缘才推进分页。
+                        physics:
+                            mode == PageTurnMode.freeCurl ||
+                                mode == PageTurnMode.none ||
+                                _freeCurlArmed ||
+                                _freeCurlSettling ||
+                                _hasSelection
+                            ? const NeverScrollableScrollPhysics()
+                            : const PageScrollPhysics(
+                                parent: ClampingScrollPhysics(),
+                              ),
+                        viewportBuilder: (context, position) => Viewport(
+                          // 视口主轴必须和 Scrollable 显式对齐：Viewport 的
+                          // axisDirection 默认是 AxisDirection.down，漏掉它
+                          // sliver 会竖向排列、而滚动手势走横向——表现就是
+                          // 「左右滑，页面上下翻」。
+                          axisDirection: AxisDirection.right,
+                          // 预构建前后两页：翻页目标页在空闲时已就绪，拖动全程
+                          // 纯滚动合成（单页缓存会让「下一页的下一页」在拖动
+                          // 开始的帧里现建）。
+                          cacheExtent: constraints.maxWidth * 2,
+                          offset: position,
+                          slivers: [
+                            SliverFillViewport(
+                              viewportFraction: 1,
+                              delegate: SliverChildBuilderDelegate((
+                                context,
+                                index,
+                              ) {
                                 final content = _buildSpread(
                                   index,
                                   pag,
@@ -932,18 +1179,16 @@ class NativeReaderViewState extends State<NativeReaderView>
                                 return AnimatedBuilder(
                                   animation: _pc,
                                   child: content,
-                                  builder: (context, child) =>
-                                      _applyTurnEffect(
+                                  builder: (context, child) => _applyTurnEffect(
                                     index,
                                     constraints.maxWidth,
                                     child!,
                                   ),
                                 );
-                              },
-                              childCount: itemCount,
+                              }, childCount: itemCount),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -971,6 +1216,34 @@ class NativeReaderViewState extends State<NativeReaderView>
                       background: widget.theme.background,
                     ),
                   ),
+                Positioned.fill(
+                  child: Listener(
+                    onPointerDown: _beginSelectionHandle,
+                    onPointerMove: _moveSelectionHandle,
+                    onPointerUp: _endSelectionHandle,
+                    onPointerCancel: _endSelectionHandle,
+                    child: ValueListenableBuilder<(Offset?, Offset?)>(
+                      valueListenable: _selectionHandles,
+                      builder: (context, handles, _) => Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          if (handles.$1 case final start?)
+                            _selectionHandle(
+                              start,
+                              leading: true,
+                              size: _curlPageSize!,
+                            ),
+                          if (handles.$2 case final end?)
+                            _selectionHandle(
+                              end,
+                              leading: false,
+                              size: _curlPageSize!,
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ],
             );
           },
@@ -995,7 +1268,8 @@ class NativeReaderViewState extends State<NativeReaderView>
     double headerH,
     double footerH,
     double bodyExpanded,
-  })? _previewRequest;
+  })?
+  _previewRequest;
   bool _previewScheduled = false;
   int? _previewKey;
 
@@ -1009,7 +1283,12 @@ class NativeReaderViewState extends State<NativeReaderView>
     double bodyExpanded,
   ) {
     final key = Object.hash(
-        settings, size, scale, _chapterIdx, _anchorChapterOffset());
+      settings,
+      size,
+      scale,
+      _chapterIdx,
+      _anchorChapterOffset(),
+    );
     if (_previewKey == key && _previewPage != null) return;
     _previewKey = key;
     _previewRequest = (
@@ -1125,8 +1404,10 @@ class NativeReaderViewState extends State<NativeReaderView>
     }
     // 行首以缩进起点为基准（测量已带上缩进字符，见
     // ParagraphMeasurement.lineStarts）。
-    final local = (display - paragraph.indentStart)
-        .clamp(0, paragraph.displayEnd - paragraph.indentStart);
+    final local = (display - paragraph.indentStart).clamp(
+      0,
+      paragraph.displayEnd - paragraph.indentStart,
+    );
     final m = measurement.ensure(layout, index);
     final line = m.lineIndexOf(local);
     // 首行同样从缩进起点起页。
@@ -1191,8 +1472,7 @@ class NativeReaderViewState extends State<NativeReaderView>
     if (immediate) {
       WidgetsBinding.instance.addPostFrameCallback((_) => start());
     } else {
-      _reflowDebounce =
-          Timer(const Duration(milliseconds: 120), () => start());
+      _reflowDebounce = Timer(const Duration(milliseconds: 120), () => start());
     }
   }
 
@@ -1320,6 +1600,7 @@ class NativeReaderViewState extends State<NativeReaderView>
   ) {
     final spreads = _spreadCount(pag);
     final leading = _leadingSentinels;
+    final dual = widget.settings.doublePage;
 
     if (_hasPrev && index == 0) {
       final prev = _pageOfChapter(
@@ -1330,13 +1611,44 @@ class NativeReaderViewState extends State<NativeReaderView>
         scale,
       );
       final last = prev.pagination.pageCount - 1;
-      return _spreadFrame(
-        left: _pageWidget(_chapterIdx - 1, prev.layout, prev.pagination, last,
-            headerH, footerH, columnWidth, scale, bodyExpanded),
-        right: widget.settings.doublePage
-            ? _blankPage()
-            : null,
+      if (!dual) {
+        return _spreadFrame(
+          left: _pageWidget(
+            _chapterIdx - 1,
+            prev.layout,
+            prev.pagination,
+            last,
+            headerH,
+            footerH,
+            columnWidth,
+            scale,
+            bodyExpanded,
+          ),
+          right: null,
+          gutter: 0,
+        );
+      }
+      return _dualSpread(
         gutter: gutter,
+        headerH: headerH,
+        footerH: footerH,
+        ctx: _PageCtx(
+          chapterIndex: _chapterIdx - 1,
+          page: last,
+          pages: prev.pagination.pageCount,
+          chapterTitle: prev.layout.chapter.title,
+          bookPercent: widget.bookPercent,
+        ),
+        left: _pageBodyFor(
+          _chapterIdx - 1,
+          prev.layout,
+          prev.pagination,
+          last,
+          columnWidth,
+          scale,
+          bodyExpanded,
+        ),
+        right: _blankPage(),
       );
     }
     if (_hasNext && index == spreads + leading) {
@@ -1347,38 +1659,99 @@ class NativeReaderViewState extends State<NativeReaderView>
         bodyHeight,
         scale,
       );
-      return _spreadFrame(
-        left: widget.settings.doublePage
-            ? _blankPage()
-            : _pageWidget(_chapterIdx + 1, next.layout, next.pagination, 0,
-                headerH, footerH, columnWidth, scale, bodyExpanded),
-        right: widget.settings.doublePage
-            ? _pageWidget(_chapterIdx + 1, next.layout, next.pagination, 0,
-                headerH, footerH, columnWidth, scale, bodyExpanded)
-            : null,
+      if (!dual) {
+        return _spreadFrame(
+          left: _pageWidget(
+            _chapterIdx + 1,
+            next.layout,
+            next.pagination,
+            0,
+            headerH,
+            footerH,
+            columnWidth,
+            scale,
+            bodyExpanded,
+          ),
+          right: null,
+          gutter: 0,
+        );
+      }
+      // 左栏留白，内容在右栏：页眉页脚按右栏（本屏第一张内容页）解析。
+      return _dualSpread(
         gutter: gutter,
+        headerH: headerH,
+        footerH: footerH,
+        ctx: _PageCtx(
+          chapterIndex: _chapterIdx + 1,
+          page: 0,
+          pages: next.pagination.pageCount,
+          chapterTitle: next.layout.chapter.title,
+          bookPercent: widget.bookPercent,
+        ),
+        left: _blankPage(),
+        right: _pageBodyFor(
+          _chapterIdx + 1,
+          next.layout,
+          next.pagination,
+          0,
+          columnWidth,
+          scale,
+          bodyExpanded,
+        ),
       );
     }
 
     final spread = (index - leading).clamp(0, spreads - 1);
-    if (!widget.settings.doublePage) {
+    if (!dual) {
       return _spreadFrame(
-        left: _pageWidget(_chapterIdx, _layout!, pag, spread, headerH, footerH,
-            columnWidth, scale, bodyExpanded),
+        left: _pageWidget(
+          _chapterIdx,
+          _layout!,
+          pag,
+          spread,
+          headerH,
+          footerH,
+          columnWidth,
+          scale,
+          bodyExpanded,
+        ),
         right: null,
         gutter: 0,
       );
     }
     final first = spread * 2;
     final second = first + 1;
-    return _spreadFrame(
-      left: _pageWidget(_chapterIdx, _layout!, pag, first, headerH, footerH,
-          columnWidth, scale, bodyExpanded),
-      right: second < pag.pageCount
-          ? _pageWidget(_chapterIdx, _layout!, pag, second, headerH, footerH,
-              columnWidth, scale, bodyExpanded)
-          : _blankPage(),
+    return _dualSpread(
       gutter: gutter,
+      headerH: headerH,
+      footerH: footerH,
+      ctx: _PageCtx(
+        chapterIndex: _chapterIdx,
+        page: first,
+        pages: pag.pageCount,
+        chapterTitle: _layout!.chapter.title,
+        bookPercent: widget.bookPercent,
+      ),
+      left: _pageBodyFor(
+        _chapterIdx,
+        _layout!,
+        pag,
+        first,
+        columnWidth,
+        scale,
+        bodyExpanded,
+      ),
+      right: second < pag.pageCount
+          ? _pageBodyFor(
+              _chapterIdx,
+              _layout!,
+              pag,
+              second,
+              columnWidth,
+              scale,
+              bodyExpanded,
+            )
+          : _blankPage(),
     );
   }
 
@@ -1386,29 +1759,58 @@ class NativeReaderViewState extends State<NativeReaderView>
     required Widget left,
     required Widget? right,
     required double gutter,
+    Widget? headerBand,
+    Widget? footerBand,
   }) {
     // 每一页都要自带不透明白底：覆盖/仿真翻页时旧页被钉住、新页滑到它
     // 上面，页面若透明，两页正文会叠在一起（仿真翻页截图里的重影）。
     // 垂直留白并入页眉/页脚带（见 _pageContent），这里只保留左右留白，
     // 三段才能各占满整屏宽度。版心高度见 build 里的 textAreaH。
+    Widget content;
+    if (headerBand != null) {
+      // 双页：页眉/页脚整屏只有一份（页码等按左页口径，与翻页锚点
+      // _report(spread * pagesPerView) 一致），两栏正文并排夹在中间。
+      content = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          headerBand,
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: left),
+                if (right != null) ...[
+                  SizedBox(width: gutter),
+                  Expanded(child: right),
+                ],
+              ],
+            ),
+          ),
+          footerBand!,
+        ],
+      );
+    } else {
+      content = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: left),
+          if (right != null) ...[
+            SizedBox(width: gutter),
+            Expanded(child: right),
+          ],
+        ],
+      );
+    }
     return _PageBackground(
       color: widget.theme.background,
       imagePath: widget.backgroundImage,
+      fit: widget.backgroundFit,
       child: Padding(
         padding: EdgeInsets.only(
           left: widget.padding.left,
           right: widget.padding.right,
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(child: left),
-            if (right != null) ...[
-              SizedBox(width: gutter),
-              Expanded(child: right),
-            ],
-          ],
-        ),
+        child: content,
       ),
     );
   }
@@ -1475,7 +1877,10 @@ class NativeReaderViewState extends State<NativeReaderView>
         // 两页都抵消滚动位移（原地），交叉淡入淡出
         return Transform.translate(
           offset: Offset(-rel * width, 0),
-          child: Opacity(opacity: (1 - rel.abs()).clamp(0.0, 1.0), child: child),
+          child: Opacity(
+            opacity: (1 - rel.abs()).clamp(0.0, 1.0),
+            child: child,
+          ),
         );
       case PageTurnMode.curl:
       case PageTurnMode.freeCurl:
@@ -1529,7 +1934,70 @@ class NativeReaderViewState extends State<NativeReaderView>
     return content;
   }
 
+  /// 双页用：一栏正文（不带页眉页脚——带由 [_spreadFrame] 整屏画一份）。
+  Widget _pageBodyFor(
+    int chapterIdx,
+    ChapterLayout layout,
+    Pagination pag,
+    int page,
+    double width,
+    double scale,
+    double bodyExpanded, [
+    ReadingSettings? settings,
+  ]) {
+    final (start, end) = pag.rangeOf(page);
+    return _pageBody(
+      chapterIdx,
+      layout,
+      start,
+      end,
+      page,
+      width,
+      scale,
+      settings ?? widget.settings,
+      stretch: _stretchFor(
+        pag.heightOf(page),
+        bodyExpanded,
+        (layout.spec.bodyStyle.fontSize ?? 16) *
+            (layout.spec.bodyStyle.height ?? 1.2),
+      ),
+    );
+  }
+
+  /// 双页翻页项：整屏页眉/页脚 + 左右两栏正文。
+  ///
+  /// 页眉页脚的内容按 [ctx]（本屏第一张可见内容页）解析。
+  Widget _dualSpread({
+    required double gutter,
+    required double headerH,
+    required double footerH,
+    required _PageCtx ctx,
+    required Widget left,
+    required Widget? right,
+  }) {
+    return _spreadFrame(
+      left: left,
+      right: right,
+      gutter: gutter,
+      headerBand: _runningBand(
+        header: true,
+        ctx: ctx,
+        settings: widget.settings,
+        height: headerH,
+      ),
+      footerBand: _runningBand(
+        header: false,
+        ctx: ctx,
+        settings: widget.settings,
+        height: footerH,
+      ),
+    );
+  }
+
   /// 指定起止的一页（预览页也走这里，保证与正式排版同一套渲染）。
+  ///
+  /// 单页模式/预览单栏用：页眉页脚每页自带。双页模式的整屏单份带
+  /// 由 [_spreadFrame] 组装（见 [_buildSpread]）。
   Widget _pageContent(
     int chapterIdx,
     ChapterLayout layout,
@@ -1544,7 +2012,6 @@ class NativeReaderViewState extends State<NativeReaderView>
     ReadingSettings settings, {
     double stretch = 1,
   }) {
-    final runs = _buildRuns(layout, start, end, stretch: stretch);
     final pageCtx = _PageCtx(
       chapterIndex: chapterIdx,
       page: page,
@@ -1558,72 +2025,114 @@ class NativeReaderViewState extends State<NativeReaderView>
         // 页眉带：从屏幕最上沿开始，高度 = max(页眉上边距, 安全区) +
         // 页眉文字；带底 = 页眉文字底部，正文的顶边与它同一条线。
         // 页眉三槽全关时只留同高透明占位（安全区仍要扣）。
-        SizedBox(
+        _runningBand(
+          header: true,
+          ctx: pageCtx,
+          settings: settings,
           height: headerH,
-          child: _headerVisible(settings)
-              ? Padding(
-                  padding: EdgeInsets.only(
-                    top: settings.headerMarginTop,
-                  ),
-                  child: _runningBlock(
-                      header: true, ctx: pageCtx, settings: settings),
-                )
-              : null,
         ),
+        // 正文上/下边距：分别是「正文文字顶部距页眉文字底部」「正文
+        // 文字底部距页脚文字顶部」。
         Expanded(
-          // 正文上/下边距：分别是「正文文字顶部距页眉文字底部」「正文
-          // 文字底部距页脚文字顶部」。
-          child: Padding(
-            padding: EdgeInsets.only(
-              top: settings.marginTop,
-              bottom: settings.marginBottom,
-            ),
-            child: Listener(
-              onPointerDown: (e) => _lastPress = e.position,
-              child: ClipRect(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (var i = 0; i < runs.length; i++) ...[
-                      if (runs[i].gapBefore > 0.5)
-                        SizedBox(height: runs[i].gapBefore),
-                      // 按自然高度渲染，不再用「排版器量出的高度」定死：
-                      // 真机字体逐行取整会让实际渲染略高于 TextPainter
-                      // 测量，定高盒子会把最后一行裁掉半个字（实测）。
-                      // 分页时已在页底留了半行安全余量吸收这部分误差。
-                      // stretch 把装箱零头摊进行距/段距。
-                      _runWidget(
-                        chapterIdx: chapterIdx,
-                        layout: layout,
-                        run: runs[i],
-                        runIndex: i,
-                        page: page,
-                        width: width,
-                        scale: scale,
-                        stretch: stretch,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
+          child: _pageBody(
+            chapterIdx,
+            layout,
+            start,
+            end,
+            page,
+            width,
+            scale,
+            settings,
+            stretch: stretch,
           ),
         ),
         // 页脚带：高度 = 页脚文字 + max(页脚下边距, 安全区)，带顶 =
         // 页脚文字顶部（与正文底边同一条线），贯到屏幕最下沿。
-        SizedBox(
+        _runningBand(
+          header: false,
+          ctx: pageCtx,
+          settings: settings,
           height: footerH,
-          child: _footerVisible(settings)
-              ? Padding(
-                  padding: EdgeInsets.only(
-                    bottom: settings.footerMarginBottom,
-                  ),
-                  child: _runningBlock(
-                      header: false, ctx: pageCtx, settings: settings),
-                )
-              : null,
         ),
       ],
+    );
+  }
+
+  /// 页眉/页脚带：几何与 [_runningHeight] 一致（带高 = 边距 + 文字）。
+  ///
+  /// 槽位全关时只留同高透明占位（安全区仍要扣）。
+  Widget _runningBand({
+    required bool header,
+    required _PageCtx ctx,
+    required ReadingSettings settings,
+    required double height,
+  }) {
+    final visible = header
+        ? _headerVisible(settings)
+        : _footerVisible(settings);
+    return SizedBox(
+      height: height,
+      child: visible
+          ? Padding(
+              padding: EdgeInsets.only(
+                top: header ? settings.headerMarginTop : 0,
+                bottom: header ? 0 : settings.footerMarginBottom,
+              ),
+              child: _runningBlock(
+                header: header,
+                ctx: ctx,
+                settings: settings,
+              ),
+            )
+          : null,
+    );
+  }
+
+  /// 正文区（页眉/页脚带之间的部分），不带 Expanded，由调用方包进
+  /// Flex：单页在页 Column 里包 Expanded；双页由 [_spreadFrame] 的
+  /// Row 包 Expanded（两栏正文并排，页眉页脚整屏一份）。
+  Widget _pageBody(
+    int chapterIdx,
+    ChapterLayout layout,
+    int start,
+    int end,
+    int page,
+    double width,
+    double scale,
+    ReadingSettings settings, {
+    double stretch = 1,
+  }) {
+    final runs = _buildRuns(layout, start, end, stretch: stretch);
+    return Padding(
+      padding: EdgeInsets.only(
+        top: settings.marginTop,
+        bottom: settings.marginBottom,
+      ),
+      child: ClipRect(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < runs.length; i++) ...[
+              if (runs[i].gapBefore > 0.5) SizedBox(height: runs[i].gapBefore),
+              // 按自然高度渲染，不再用「排版器量出的高度」定死：
+              // 真机字体逐行取整会让实际渲染略高于 TextPainter
+              // 测量，定高盒子会把最后一行裁掉半个字（实测）。
+              // 分页时已在页底留了半行安全余量吸收这部分误差。
+              // stretch 把装箱零头摊进行距/段距。
+              _runWidget(
+                chapterIdx: chapterIdx,
+                layout: layout,
+                run: runs[i],
+                runIndex: i,
+                page: page,
+                width: width,
+                scale: scale,
+                stretch: stretch,
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -1656,16 +2165,19 @@ class NativeReaderViewState extends State<NativeReaderView>
           runs.last.rangeEnd = to;
           runs.last.paragraphs.add(p);
         } else {
-          runs.add(_PageRun(
-            start: from,
-            rangeEnd: to,
-            align: p.align,
-            gapBefore: (runs.isEmpty || prev == null
-                    ? 0
-                    : _gapBetween(prev, p, layout.spec)) *
-                stretch,
-            paragraphs: [p],
-          ));
+          runs.add(
+            _PageRun(
+              start: from,
+              rangeEnd: to,
+              align: p.align,
+              gapBefore:
+                  (runs.isEmpty || prev == null
+                      ? 0
+                      : _gapBetween(prev, p, layout.spec)) *
+                  stretch,
+              paragraphs: [p],
+            ),
+          );
         }
       }
       prev = p;
@@ -1688,8 +2200,20 @@ class NativeReaderViewState extends State<NativeReaderView>
     LayoutParagraph next,
     ReaderTypeSpec spec,
   ) {
-    final before =
-        next.isHeading ? spec.headingMarginTop : spec.paragraphSpacing;
+    if (spec.preciseTypesetting) {
+      final n = next.source.style;
+      final p = prev.source.style;
+      final before = n != null
+          ? (n.marginTop ?? 0)
+          : (next.isHeading ? spec.headingMarginTop : spec.paragraphSpacing);
+      final after = p != null
+          ? (p.marginBottom ?? 0)
+          : (prev.isHeading ? spec.headingMarginBottom : 0.0);
+      return math.max(before, after);
+    }
+    final before = next.isHeading
+        ? spec.headingMarginTop
+        : spec.paragraphSpacing;
     final after = prev.isHeading ? spec.headingMarginBottom : 0.0;
     return math.max(before, after);
   }
@@ -1714,89 +2238,414 @@ class NativeReaderViewState extends State<NativeReaderView>
       stretch: stretch,
       justify: _justifyFor(layout, run, chapterIdx, width, scale),
     );
-    final key = ValueKey('run-$chapterIdx-$page-$runIndex-$_selectionEpoch');
-    if (widget.onSelection == null) {
-      return RichText(
-        key: key,
-        textAlign: run.align,
-        textScaler: TextScaler.linear(scale),
-        text: TextSpan(style: layout.spec.bodyStyle, children: spans),
-      );
-    }
-    return SelectableText.rich(
-      key: key,
-      TextSpan(style: layout.spec.bodyStyle, children: spans),
+    final content = RichText(
       textAlign: run.align,
       textScaler: TextScaler.linear(scale),
-      // 压掉 EditableText 自动派生的 strut：派生 strut 会把段距占位行
-      // 也撑成整行高（段距滑块失效、页底裁字、正文可滑）。显式给一个
-      // 比任何行都矮的 strut，渲染就回到与分页测量完全相同的自然高度。
-      strutStyle: _noStrut,
-      // 正文高度由分页器精确定死；禁止 TextField 内部再滚动（否则正文能上下滑）
-      scrollPhysics: const NeverScrollableScrollPhysics(),
-      // 选中文字时不要系统自带的「复制 / 全选」浮层：阅读页有自己的
-      // 四色划线菜单（SelectionMenu），两套弹窗会叠在一起。
-      contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-      onSelectionChanged: (selection, cause) => _onRunSelection(
-        run,
-        layout,
-        chapterIdx,
-        text,
-        selection,
-        key,
-        cause: cause,
+      text: TextSpan(style: layout.spec.bodyStyle, children: spans),
+    );
+    if (widget.onSelection == null || _previewPage != null) return content;
+    return _SelectionRun(
+      key: ValueKey('run-$chapterIdx-$page-$runIndex'),
+      runs: _selectionRuns,
+      chapter: chapterIdx,
+      page: page,
+      layout: layout,
+      run: run,
+      child: content,
+    );
+  }
+
+  RenderBox? get _selectionBox =>
+      _selectionViewport.currentContext?.findRenderObject() as RenderBox?;
+
+  // 相邻页提前构建，命中与手柄定位只看当前屏的真实文字。
+  Iterable<_SelectionRunState> get _visibleSelectionRuns sync* {
+    final pag = _pagination;
+    final box = _selectionBox;
+    if (pag == null || box == null || !box.hasSize) return;
+    final firstPage = _currentPage(pag);
+    for (final state in _selectionRuns) {
+      final run = state.widget;
+      if (run.chapter != _chapterIdx ||
+          run.page < firstPage ||
+          run.page >= firstPage + _pagesPerView) {
+        continue;
+      }
+      final paragraph = state.paragraph;
+      if (paragraph == null || !paragraph.hasSize) continue;
+      final origin = box.globalToLocal(paragraph.localToGlobal(Offset.zero));
+      if ((origin & paragraph.size).overlaps(Offset.zero & box.size)) {
+        yield state;
+      }
+    }
+  }
+
+  _SelectionRunState? _selectionRunAt(Offset global, {bool exact = false}) {
+    _SelectionRunState? closest;
+    var best = double.infinity;
+    for (final state in _visibleSelectionRuns) {
+      final paragraph = state.paragraph!;
+      final point = paragraph.globalToLocal(global);
+      if ((Offset.zero & paragraph.size).contains(point)) return state;
+      if (exact) continue;
+      final clamped = Offset(
+        point.dx.clamp(0.0, paragraph.size.width),
+        point.dy.clamp(0.0, paragraph.size.height),
+      );
+      final distance = (clamped - point).distanceSquared;
+      if (distance < best) {
+        closest = state;
+        best = distance;
+      }
+    }
+    return closest;
+  }
+
+  void _startTextSelection(Offset global) {
+    final hit = _selectionRunAt(global, exact: true);
+    if (hit == null) return;
+    final paragraph = hit.paragraph!;
+    final local = paragraph.globalToLocal(global);
+    final word = paragraph.getWordBoundary(
+      paragraph.getPositionForOffset(local),
+    );
+    if (!word.isValid || word.isCollapsed) return;
+    // 正文 run 占满列宽，但长按行尾的大片留白不应选中最后一个字。
+    if (!paragraph
+        .getBoxesForSelection(
+          TextSelection(baseOffset: word.start, extentOffset: word.end),
+        )
+        .any((box) => box.toRect().inflate(8).contains(local))) {
+      return;
+    }
+    final run = hit.widget;
+    final start = run.chapterOffset(word.start);
+    final end = run.chapterOffset(word.end);
+    if (start >= end ||
+        widget.chapters[run.chapter].text
+            .substring(start, end)
+            .trim()
+            .isEmpty) {
+      return;
+    }
+    _resetFreeCurl();
+    _selectingFromBody = true;
+    _bodySelectionStart = _selectionStart = (
+      chapter: run.chapter,
+      offset: start,
+    );
+    _bodySelectionEnd = _selectionEnd = (chapter: run.chapter, offset: end);
+    widget.onSelectionClear?.call();
+    _bumpPage();
+  }
+
+  Offset? _selectionHandlePosition(
+    _SelectionPoint point, {
+    required bool leading,
+  }) {
+    final box = _selectionBox;
+    if (box == null) return null;
+    Offset? fallback;
+    int? closestBoundary;
+    for (final state in _visibleSelectionRuns) {
+      final run = state.widget;
+      if (run.chapter != point.chapter) continue;
+      final display = run.layout.displayOfChapter(point.offset);
+      final (pageStart, pageEnd) = _pagination!.rangeOf(run.page);
+      if (display < pageStart || display > pageEnd) continue;
+      final offset = display - run.run.start;
+      final length = run.run.rangeEnd - run.run.start;
+      // 段间占位符可能被分页器分到页首/页尾，但没有对应的字形。
+      if ((offset < 0 && display != pageStart) ||
+          (offset > length && display != pageEnd)) {
+        continue;
+      }
+      final paragraph = state.paragraph!;
+      final caret = TextPosition(
+        offset: offset.clamp(0, length),
+        affinity: leading ? TextAffinity.downstream : TextAffinity.upstream,
+      );
+      final anchor =
+          paragraph.getOffsetForCaret(caret, Rect.zero) +
+          Offset(0, paragraph.getFullHeightForCaret(caret));
+      final local = box.globalToLocal(paragraph.localToGlobal(anchor));
+      if (leading
+          ? offset >= 0 && offset < length
+          : offset > 0 && offset <= length) {
+        return local;
+      }
+      final distance = (offset - caret.offset).abs();
+      if (closestBoundary == null || distance < closestBoundary) {
+        closestBoundary = distance;
+        fallback = local;
+      }
+    }
+    return fallback;
+  }
+
+  void _syncSelectionHandles() {
+    final start = _selectionStart;
+    final end = _selectionEnd;
+    if (start == null || end == null) return;
+    final startPos = _selectionHandlePosition(start, leading: true);
+    final endPos = _selectionHandlePosition(end, leading: false);
+    // 松手前保留当前手柄的命中对象，跨章重建期间也不会丢掉指针。
+    final dragPos = _handlePointerPosition;
+    final localDrag = dragPos == null
+        ? null
+        : _selectionBox?.globalToLocal(dragPos);
+    _selectionHandles.value = (
+      startPos ?? (_draggingStart ? localDrag : null),
+      endPos ?? (_draggingStart ? null : localDrag),
+    );
+  }
+
+  void _beginSelectionHandle(PointerDownEvent event) {
+    if (_handlePointer != null || event.buttons != kPrimaryButton) return;
+    final box = _selectionBox;
+    if (box == null) return;
+    final (start, end) = _selectionHandles.value;
+    final touch = box.globalToLocal(event.position);
+    // 单字选区的两侧触控区域会重叠，选中离手指更近的手柄。
+    final leading =
+        end == null ||
+        (start != null &&
+            (touch - start - const Offset(-9, 9)).distanceSquared <
+                (touch - end - const Offset(9, 9)).distanceSquared);
+    final anchor = leading ? start : end;
+    if (anchor == null) return;
+    _handlePointer = event.pointer;
+    _draggingStart = leading;
+    _handlePointerPosition = event.position;
+    _handleDragOffset = box.localToGlobal(anchor) - event.position;
+    widget.onSelectionClear?.call();
+  }
+
+  Widget _selectionHandle(
+    Offset anchor, {
+    required bool leading,
+    required Size size,
+  }) {
+    const hitSize = 40.0;
+    final handleX = anchor.dx + (leading ? -9 : 9);
+    final left = (handleX - hitSize / 2).clamp(
+      0.0,
+      math.max(0.0, size.width - hitSize),
+    );
+    final top = (anchor.dy - 8).clamp(
+      0.0,
+      math.max(0.0, size.height - hitSize),
+    );
+    return Positioned(
+      key: ValueKey('selection-handle-${leading ? 'start' : 'end'}'),
+      left: left.toDouble(),
+      top: top.toDouble(),
+      width: hitSize,
+      height: hitSize,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              left: handleX - left - 9,
+              top: anchor.dy - top,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: widget.theme.accent,
+                  borderRadius: BorderRadius.only(
+                    topLeft: leading ? const Radius.circular(9) : Radius.zero,
+                    topRight: leading ? Radius.zero : const Radius.circular(9),
+                    bottomLeft: const Radius.circular(9),
+                    bottomRight: const Radius.circular(9),
+                  ),
+                ),
+                child: const SizedBox(width: 18, height: 18),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  /// 选区回调：run 内局部偏移 → 章内字符偏移。
-  void _onRunSelection(
-    _PageRun run,
-    ChapterLayout layout,
-    int chapterIdx,
-    String runText,
-    TextSelection selection,
-    Key runKey, {
-    SelectionChangedCause? cause,
-  }) {
-    // 禁用双击选中单词：双击选中的区段立即清掉（长按选字不受影响）。
-    if (cause == SelectionChangedCause.doubleTap) {
-      _selectedRuns.remove(runKey);
-      _selTimer?.cancel();
-      widget.onSelectionClear?.call();
-      if (mounted) setState(() => _selectionEpoch++);
+  void _moveSelectionHandle(PointerMoveEvent event) {
+    if (event.pointer != _handlePointer) return;
+    _handlePointerPosition = event.position;
+    final box = _selectionBox;
+    if (box == null) return;
+    final local = box.globalToLocal(event.position);
+    final right = local.dx >= box.size.width - 22;
+    final left = local.dx <= 22;
+    // 双页左栏的底部应先允许用户拖进右栏；整屏右侧才是向后翻页边缘。
+    final top =
+        local.dy <= math.max(24, _lastHeaderH + widget.settings.marginTop - 4);
+    final bottom =
+        local.dy >=
+        box.size.height -
+            math.max(24, _lastFooterH + widget.settings.marginBottom - 4);
+    final edge =
+        right ||
+            (bottom && (_pagesPerView == 1 || local.dx >= box.size.width / 2))
+        ? 1
+        : left || (top && (_pagesPerView == 1 || local.dx < box.size.width / 2))
+        ? -1
+        : 0;
+    if (edge != _selectionEdge) {
+      _cancelSelectionTurn();
+      _selectionEdge = edge;
+      if (edge != 0) {
+        _selectionTurnTimer = Timer(
+          const Duration(milliseconds: 420),
+          () => _turnWhileSelecting(edge),
+        );
+      }
+    }
+    if (edge != 0) return;
+
+    final point = _selectionPointAt(event.position + _handleDragOffset);
+    if (point != null) _setDraggedEndpoint(point);
+  }
+
+  _SelectionPoint? _selectionPointAt(Offset global) {
+    final hit = _selectionRunAt(global);
+    if (hit == null) return null;
+    final paragraph = hit.paragraph!;
+    final textPosition = paragraph.getPositionForOffset(
+      paragraph.globalToLocal(global),
+    );
+    return (
+      chapter: hit.widget.chapter,
+      offset: hit.widget.chapterOffset(textPosition.offset),
+    );
+  }
+
+  void _extendBodySelection(Offset global) {
+    if (!_selectingFromBody) return;
+    final point = _selectionPointAt(global);
+    if (point == null) return;
+    final start = _bodySelectionStart!;
+    final end = _bodySelectionEnd!;
+    final expandedStart = _comparePoints(point, start) < 0 ? point : start;
+    final expandedEnd = _comparePoints(point, end) > 0 ? point : end;
+    if (_selectionStart == expandedStart && _selectionEnd == expandedEnd) {
       return;
     }
-    final a = selection.start.clamp(0, runText.length);
-    final b = selection.end.clamp(0, runText.length);
-    if (selection.isCollapsed || b <= a) {
-      _selectedRuns.remove(runKey);
-      _selTimer?.cancel();
-      widget.onSelectionClear?.call();
+    _selectionStart = expandedStart;
+    _selectionEnd = expandedEnd;
+    _bumpPage();
+  }
+
+  bool _setDraggedEndpoint(_SelectionPoint point) {
+    final start = _selectionStart;
+    final end = _selectionEnd;
+    if (start == null || end == null) return false;
+    if (_draggingStart) {
+      if (_comparePoints(point, end) >= 0) return false;
+      if (start == point) return true;
+      _selectionStart = point;
+    } else {
+      if (_comparePoints(point, start) <= 0) return false;
+      if (end == point) return true;
+      _selectionEnd = point;
+    }
+    _bumpPage();
+    return true;
+  }
+
+  void _turnWhileSelecting(int direction) {
+    final pag = _pagination;
+    final layout = _layout;
+    if (!mounted ||
+        _handlePointer == null ||
+        pag == null ||
+        layout == null ||
+        !_pc.hasClients ||
+        _pendingJump) {
       return;
     }
-    _selectedRuns.add(runKey);
-    // 先收菜单：手柄被菜单盖住就没法顺畅拖范围
-    widget.onSelectionClear?.call();
-    _selTimer?.cancel();
-    _selTimer = Timer(const Duration(milliseconds: 260), () {
-      if (!mounted) return;
-      final from = layout.chapterOfDisplay(run.start + a);
-      final to = layout.chapterOfDisplay(run.start + b);
-      final chapter = widget.chapters[chapterIdx];
-      final start = math.min(from, to).clamp(0, chapter.text.length);
-      final end = math.max(from, to).clamp(0, chapter.text.length);
-      if (end <= start) return;
-      final quote = chapter.text.substring(start, end).trim();
-      if (quote.isEmpty) return;
-      widget.onSelection?.call(NativeSelection(
-        chapterIndex: chapterIdx,
-        start: start,
-        end: end,
+    final target = _spreadOf(_currentPage(pag)) + direction;
+    final _SelectionPoint boundary;
+    if (target < 0) {
+      if (!_hasPrev) {
+        _setDraggedEndpoint((chapter: _chapterIdx, offset: 0));
+        return;
+      }
+      final chapter = _chapterIdx - 1;
+      boundary = (
+        chapter: chapter,
+        offset: widget.chapters[chapter].text.length,
+      );
+    } else if (target >= _spreadCount(pag)) {
+      if (!_hasNext) {
+        _setDraggedEndpoint((
+          chapter: _chapterIdx,
+          offset: widget.chapters[_chapterIdx].text.length,
+        ));
+        return;
+      }
+      boundary = (chapter: _chapterIdx + 1, offset: 0);
+    } else {
+      final page = direction > 0
+          ? target * _pagesPerView
+          : math.min((target + 1) * _pagesPerView, pag.pageCount) - 1;
+      final (start, end) = pag.rangeOf(page);
+      boundary = (
+        chapter: _chapterIdx,
+        offset: layout.chapterOfDisplay(direction > 0 ? start : end),
+      );
+    }
+    if (_setDraggedEndpoint(boundary)) {
+      _pc.jumpToPage(target + _leadingSentinels);
+      // 从边缘移回正文后才允许再次触发，防止停住时连跳多页。
+      _bumpPage();
+    }
+  }
+
+  void _cancelSelectionTurn() {
+    _selectionTurnTimer?.cancel();
+    _selectionTurnTimer = null;
+    _selectionEdge = 0;
+  }
+
+  void _endSelectionHandle(PointerEvent event) {
+    if (event.pointer != _handlePointer) return;
+    _handlePointer = null;
+    _handlePointerPosition = null;
+    _cancelSelectionTurn();
+    _bumpPage();
+    _publishTextSelection(event.position);
+  }
+
+  void _publishTextSelection(Offset anchor) {
+    final start = _selectionStart;
+    final end = _selectionEnd;
+    if (start == null || end == null) return;
+    final parts = <String>[];
+    for (var i = start.chapter; i <= end.chapter; i++) {
+      final text = widget.chapters[i].text;
+      parts.add(
+        text.substring(
+          i == start.chapter ? start.offset : 0,
+          i == end.chapter ? end.offset : text.length,
+        ),
+      );
+    }
+    final quote = parts.join('\n').trim();
+    if (quote.isEmpty) {
+      _dismissTextSelection();
+      return;
+    }
+    widget.onSelection?.call(
+      NativeSelection(
+        chapterIndex: start.chapter,
+        endChapterIndex: end.chapter,
+        start: start.offset,
+        end: end.offset,
         text: quote,
-        anchor: _lastPress,
-      ));
-    });
+        anchor: anchor,
+      ),
+    );
   }
 
   /// 计算 [run] 末行的两端对齐补偿（无补偿返回空表）。
@@ -1828,7 +2677,11 @@ class NativeReaderViewState extends State<NativeReaderView>
     final text = layout.displayText.substring(run.start, run.rangeEnd);
     if (text.isNotEmpty) {
       List<InlineSpan> spansOf(int from, int to) => [
-        for (final (a, b, style) in layout.segmentsOf(from, to, textScale: scale))
+        for (final (a, b, style) in layout.segmentsOf(
+          from,
+          to,
+          textScale: scale,
+        ))
           TextSpan(
             text: text.substring(a - run.start, b - run.start),
             style: style,
@@ -1850,9 +2703,7 @@ class NativeReaderViewState extends State<NativeReaderView>
         final starts = <int>[
           for (final m in metrics)
             painter
-                .getPositionForOffset(
-                  Offset(0, m.baseline - m.ascent + 0.5),
-                )
+                .getPositionForOffset(Offset(0, m.baseline - m.ascent + 0.5))
                 .offset,
         ];
         painter.dispose();
@@ -1861,7 +2712,8 @@ class NativeReaderViewState extends State<NativeReaderView>
         // 只看 run 的最后一行：段中整行由引擎 justify，段末行不补。
         // 「段落被截断」= run 终点没到所在段落的末尾（下一段内容在
         // 下一页继续）；截断处恰好在段落末尾时不补（段末行左对齐）。
-        final cutMidParagraph = run.paragraphs.isNotEmpty &&
+        final cutMidParagraph =
+            run.paragraphs.isNotEmpty &&
             run.rangeEnd < run.paragraphs.last.displayEnd;
         if (cutMidParagraph) {
           final i = starts.length - 1;
@@ -1932,49 +2784,119 @@ class NativeReaderViewState extends State<NativeReaderView>
             height: (s.height ?? layout.spec.bodyStyle.height ?? 1.0) * stretch,
           );
     final segments = <(int, int, TextStyle)>[
-      for (final (a, b, style) in layout.segmentsOf(run.start, run.rangeEnd,
-          textScale: _layoutScale))
+      for (final (a, b, style) in layout.segmentsOf(
+        run.start,
+        run.rangeEnd,
+        textScale: _layoutScale,
+      ))
         (a - run.start, b - run.start, scaled(style)),
     ];
 
     final highlights = <(int, int, Color)>[];
-    void addRange(int chapterStart, int chapterEnd, Color color) {
+    final underlines = <(int, int, Color)>[];
+    void addRange(
+      List<(int, int, Color)> target,
+      int chapterStart,
+      int chapterEnd,
+      Color color, {
+      bool skipLeadingIndent = false,
+    }) {
       if (chapterEnd <= chapterStart) return;
-      final ds = layout.displayOfChapter(chapterStart) - run.start;
+      var ds = layout.displayOfChapter(chapterStart) - run.start;
       final de = layout.displayOfChapter(chapterEnd) - run.start;
-      final a = math.max(0, math.min(ds, de));
+      var a = math.max(0, math.min(ds, de));
       final b = math.min(text.length, math.max(ds, de));
-      if (b > a) highlights.add((a, b, color));
+      if (skipLeadingIndent && b > a) {
+        // 段首缩进不参与朗读高亮：起点钳到该段正文首字（跳过零宽锚 /
+        // NBSP 补宽 / 全角半角空格等缩进字符），终点至少保持到起点之后。
+        for (final p in layout.paragraphs) {
+          if (p.displayEnd <= run.start || p.indentStart >= run.rangeEnd) {
+            continue;
+          }
+          final bodyStart = p.displayStart - run.start;
+          if (bodyStart > a && bodyStart < b) {
+            a = bodyStart;
+            ds = math.max(ds, bodyStart);
+          }
+        }
+        while (a < b && _isIndentChar(text.codeUnitAt(a))) {
+          a++;
+        }
+        if (a >= b) return;
+      }
+      if (b > a) target.add((a, b, color));
     }
 
     for (final m in widget.marks) {
       if (m.chapterIndex != chapterIdx) continue;
-      addRange(m.start, m.end, m.color);
+      addRange(m.underline ? underlines : highlights, m.start, m.end, m.color);
+    }
+    final selectionStart = _selectionStart;
+    final selectionEnd = _selectionEnd;
+    if (selectionStart != null &&
+        selectionEnd != null &&
+        chapterIdx >= selectionStart.chapter &&
+        chapterIdx <= selectionEnd.chapter) {
+      addRange(
+        highlights,
+        chapterIdx == selectionStart.chapter ? selectionStart.offset : 0,
+        chapterIdx == selectionEnd.chapter
+            ? selectionEnd.offset
+            : layout.chapter.text.length,
+        widget.theme.accent.withValues(alpha: 0.32),
+      );
     }
     final hl = widget.ttsHighlight?.value;
     if (hl != null && hl.chapterIndex == chapterIdx) {
-      addRange(hl.start, hl.end, widget.theme.accent.withValues(alpha: 0.26));
+      addRange(
+        highlights,
+        hl.start,
+        hl.end,
+        widget.theme.accent.withValues(alpha: 0.26),
+        skipLeadingIndent: true,
+      );
     }
 
-    // 统一成互不重叠的扁平片段（段样式 × 高亮背景），再一起应用末行补偿。
-    final parts = <(int, int, TextStyle, Color?)>[];
-    if (highlights.isEmpty) {
+    // 统一成互不重叠的扁平片段（段样式 × 高亮底色 / 下划线）。
+    final parts = <(int, int, TextStyle, Color?, Color?)>[];
+    if (highlights.isEmpty && underlines.isEmpty) {
       parts.addAll([
-        for (final (a, b, style) in segments) (a, b, style, null),
+        for (final (a, b, style) in segments) (a, b, style, null, null),
       ]);
     } else {
-      highlights.sort((x, y) => x.$1.compareTo(y.$1));
-      for (final (a, b, style) in segments) {
-        var pos = a;
-        for (final (ha, hb, color) in highlights) {
-          if (hb <= pos || ha >= b) continue;
-          final hs = math.max(pos, ha);
-          final he = math.min(b, hb);
-          if (hs > pos) parts.add((pos, hs, style, null));
-          parts.add((hs, he, style, color));
-          pos = he;
+      Color? colorAt(List<(int, int, Color)> ranges, int offset) {
+        for (final (a, b, color) in ranges) {
+          if (offset >= a && offset < b) return color;
         }
-        if (pos < b) parts.add((pos, b, style, null));
+        return null;
+      }
+
+      for (final (a, b, style) in segments) {
+        final cuts = <int>{a, b};
+        void addCuts(List<(int, int, Color)> ranges) {
+          for (final (ra, rb, _) in ranges) {
+            if (rb <= a || ra >= b) continue;
+            cuts.add(math.max(a, ra));
+            cuts.add(math.min(b, rb));
+          }
+        }
+
+        addCuts(highlights);
+        addCuts(underlines);
+        final sorted = cuts.toList()..sort();
+        for (var i = 0; i + 1 < sorted.length; i++) {
+          final s = sorted[i];
+          final e = sorted[i + 1];
+          if (e <= s) continue;
+          final mid = (s + e) ~/ 2;
+          parts.add((
+            s,
+            e,
+            style,
+            colorAt(highlights, mid),
+            colorAt(underlines, mid),
+          ));
+        }
       }
     }
 
@@ -1987,6 +2909,14 @@ class NativeReaderViewState extends State<NativeReaderView>
     );
   }
 
+  /// 缩进类字符：零宽锚 / NBSP / 全角空格 / 半角空格 / 制表符。
+  static bool _isIndentChar(int code) =>
+      code == 0xFEFF ||
+      code == 0x00A0 ||
+      code == 0x3000 ||
+      code == 0x20 ||
+      code == 0x09;
+
   /// 把扁平片段按端行补偿区间切成 span（区间内叶子追加字距）。
   ///
   /// 叶子 style 未显式带 letterSpacing 时继承根样式（spec.bodyStyle），
@@ -1994,14 +2924,25 @@ class NativeReaderViewState extends State<NativeReaderView>
   /// 保证两边字距口径一致。
   List<InlineSpan> _spansWithJustify(
     String text,
-    List<(int, int, TextStyle, Color?)> parts,
+    List<(int, int, TextStyle, Color?, Color?)> parts,
     List<_RunJustify> ranges,
     double baseSpacing,
   ) {
     final out = <InlineSpan>[];
-    for (final (a, b, style, bg) in parts) {
-      TextStyle plain(TextStyle s) =>
-          bg == null ? s : s.copyWith(backgroundColor: bg);
+    for (final (a, b, style, bg, underline) in parts) {
+      TextStyle plain(TextStyle s) {
+        var next = s;
+        if (bg != null) next = next.copyWith(backgroundColor: bg);
+        if (underline != null) {
+          next = next.copyWith(
+            decoration: TextDecoration.underline,
+            decorationColor: underline,
+            decorationThickness: 1.6,
+          );
+        }
+        return next;
+      }
+
       if (ranges.isEmpty) {
         out.add(TextSpan(text: text.substring(a, b), style: plain(style)));
         continue;
@@ -2012,18 +2953,18 @@ class NativeReaderViewState extends State<NativeReaderView>
         final s = math.max(pos, r.start);
         final e = math.min(b, r.end);
         if (s > pos) {
-          out.add(
-            TextSpan(text: text.substring(pos, s), style: plain(style)),
-          );
+          out.add(TextSpan(text: text.substring(pos, s), style: plain(style)));
         }
-        out.add(TextSpan(
-          text: text.substring(s, e),
-          style: plain(
-            style.copyWith(
-              letterSpacing: (style.letterSpacing ?? baseSpacing) + r.delta,
+        out.add(
+          TextSpan(
+            text: text.substring(s, e),
+            style: plain(
+              style.copyWith(
+                letterSpacing: (style.letterSpacing ?? baseSpacing) + r.delta,
+              ),
             ),
           ),
-        ));
+        );
         pos = e;
       }
       if (pos < b) {
@@ -2053,14 +2994,14 @@ class NativeReaderViewState extends State<NativeReaderView>
     final marginRight = header ? s.headerMarginRight : s.footerMarginRight;
 
     Widget slot(RunningContent c, TextAlign align) => Expanded(
-          child: Text(
-            _runningText(c, ctx),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: align,
-            style: style,
-          ),
-        );
+      child: Text(
+        _runningText(c, ctx),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: align,
+        style: style,
+      ),
+    );
 
     // 上下边距不在这里：页眉上边距由页眉带承担，正文上下边距由正文区
     // 内部留白承担，页脚下边距由页脚带承担（见 _pageContent 与 _runningHeight）。
@@ -2164,11 +3105,7 @@ class NativeReaderViewState extends State<NativeReaderView>
     final size = _curlPageSize;
     final forward = _freeCurlForward;
     if (size == null || forward == null) return;
-    final corner = _freeCurlCorner ??= _freeCurlCornerFor(
-      size,
-      forward,
-      down,
-    );
+    final corner = _freeCurlCorner ??= _freeCurlCornerFor(size, forward, down);
     _freeCurlLastX = e.localPosition.dx;
     _freeCurlFrame.value = FreeCurlGeometry(
       page: size,
@@ -2229,17 +3166,12 @@ class NativeReaderViewState extends State<NativeReaderView>
 
     final dx = _freeCurlLastX - down.dx;
     // 横向拖过约 18% 页宽（或速度很快）就翻过去，否则弹回。
-    final commit = forward
-        ? dx < -size.width * 0.18
-        : dx > size.width * 0.18;
+    final commit = forward ? dx < -size.width * 0.18 : dx > size.width * 0.18;
     _freeCurlSettling = true;
     _freeCurlCommit = commit;
     _freeCurlSettleFrom = geometry.finger;
     _freeCurlSettleTo = commit
-        ? Offset(
-            forward ? -size.width : size.width * 2,
-            geometry.finger.dy,
-          )
+        ? Offset(forward ? -size.width : size.width * 2, geometry.finger.dy)
         : (_freeCurlCorner ?? geometry.corner);
     _freeCurlSettle.forward(from: 0);
     if (mounted) setState(() {});
@@ -2279,8 +3211,7 @@ class NativeReaderViewState extends State<NativeReaderView>
   }
 
   void _resetFreeCurl() {
-    final hadOverlay =
-        _freeCurlOldPage != null || _freeCurlNewPage != null;
+    final hadOverlay = _freeCurlOldPage != null || _freeCurlNewPage != null;
     final wasSettling = _freeCurlSettling;
     _freeCurlSettle.stop();
     _freeCurlArmed = false;
@@ -2341,10 +3272,7 @@ class NativeReaderViewState extends State<NativeReaderView>
       if (_curlFrame.value != null) _curlFrame.value = null;
       return;
     }
-    final geometry = CurlGeometry(
-      page: size,
-      progress: delta.clamp(0.0, 1.0),
-    );
+    final geometry = CurlGeometry(page: size, progress: delta.clamp(0.0, 1.0));
     if (!geometry.isActive) {
       if (_curlFrame.value != null) _curlFrame.value = null;
       return;
@@ -2452,21 +3380,24 @@ class NativeReaderViewState extends State<NativeReaderView>
     _lastOffset = offset;
     _everReported = true;
     final pages = pag.pageCount;
-    final chapterCount = widget.chapters.length;
-    final percent = chapterCount == 0
-        ? 0.0
-        : ((_chapterIdx + p / pages) / chapterCount).clamp(0.0, 1.0);
-    widget.onPosition(NativePosition(
-      chapterIndex: _chapterIdx,
-      page: p + 1,
-      pages: pages,
-      offset: offset,
-      percent: percent.toDouble(),
-    ));
+    // 全书进度按内容字符量算（每章等权会失真，见 bookContentPercent）
+    final percent = bookContentPercent(widget.chapters, _chapterIdx, offset);
+    widget.onPosition(
+      NativePosition(
+        chapterIndex: _chapterIdx,
+        page: p + 1,
+        pages: pages,
+        offset: offset,
+        percent: percent,
+      ),
+    );
   }
 
   void _handleTap(Offset local, BoxConstraints c, Pagination pag) {
-    if (_hasSelection) return;
+    if (_hasSelection) {
+      _dismissTextSelection();
+      return;
+    }
     final mark = _markAt(local, pag);
     if (mark != null) {
       widget.onMarkTap?.call(mark);
@@ -2534,7 +3465,8 @@ class NativeReaderViewState extends State<NativeReaderView>
     }
     final (start, end) = pag.rangeOf(slotPage);
     // 与渲染同一撑满系数：命中坐标才对得上被拉伸的行距/段距。
-    final lineHeight = (layout.spec.bodyStyle.fontSize ?? 16) *
+    final lineHeight =
+        (layout.spec.bodyStyle.fontSize ?? 16) *
         (layout.spec.bodyStyle.height ?? 1.2);
     final stretch = _stretchFor(
       pag.heightOf(slotPage),
@@ -2659,6 +3591,51 @@ class NativeReaderViewState extends State<NativeReaderView>
   }
 }
 
+/// 注册已挂载的正文段，直接用渲染对象做字符命中及手柄定位。
+class _SelectionRun extends StatefulWidget {
+  const _SelectionRun({
+    required super.key,
+    required this.runs,
+    required this.chapter,
+    required this.page,
+    required this.layout,
+    required this.run,
+    required this.child,
+  });
+
+  final Set<_SelectionRunState> runs;
+  final int chapter;
+  final int page;
+  final ChapterLayout layout;
+  final _PageRun run;
+  final RichText child;
+
+  int chapterOffset(int offset) => layout.chapterOfDisplay(run.start + offset);
+
+  @override
+  State<_SelectionRun> createState() => _SelectionRunState();
+}
+
+class _SelectionRunState extends State<_SelectionRun> {
+  RenderParagraph? get paragraph =>
+      context.findRenderObject() as RenderParagraph?;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.runs.add(this);
+  }
+
+  @override
+  void dispose() {
+    widget.runs.remove(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 /// 一页内「连续同对齐」的段落组。
 class _PageRun {
   _PageRun({
@@ -2721,17 +3698,28 @@ class _PageCtx {
   final String chapterTitle;
   final double bookPercent;
 }
+
 /// 阅读页纸面：纯色，或「背景图 + 纸色蒙层」保证文字可读。
 class _PageBackground extends StatelessWidget {
   const _PageBackground({
     required this.color,
     required this.imagePath,
+    this.fit = BackgroundImageFit.cover,
     this.child,
   });
 
   final Color color;
   final String imagePath;
+  final BackgroundImageFit fit;
   final Widget? child;
+
+  BoxFit get _boxFit => switch (fit) {
+    BackgroundImageFit.cover => BoxFit.cover,
+    BackgroundImageFit.contain => BoxFit.contain,
+    BackgroundImageFit.fill => BoxFit.fill,
+    BackgroundImageFit.fitWidth => BoxFit.fitWidth,
+    BackgroundImageFit.fitHeight => BoxFit.fitHeight,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -2741,7 +3729,7 @@ class _PageBackground extends StatelessWidget {
       children: [
         Image.file(
           File(imagePath),
-          fit: BoxFit.cover,
+          fit: _boxFit,
           errorBuilder: (_, __, ___) => ColoredBox(color: color),
         ),
         ColoredBox(color: color.withValues(alpha: 0.35)),

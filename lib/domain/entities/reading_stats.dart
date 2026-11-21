@@ -21,7 +21,25 @@ enum StatsPeriod {
   final String label;
 }
 
-/// 周期内的一个时间桶（小时/天/月）。
+/// 单本书的累计阅读数据（「我的阅读」用）。
+class BookReadingTotal {
+  const BookReadingTotal({
+    required this.bookId,
+    required this.durationMs,
+    required this.charsRead,
+  });
+
+  /// 书籍 id。
+  final String bookId;
+
+  /// 累计阅读时长（ms）。
+  final int durationMs;
+
+  /// 累计读过的字符数。
+  final int charsRead;
+}
+
+/// 时间桶（小时/天/月）。
 class StatsBucket {
   const StatsBucket({
     required this.label,

@@ -106,10 +106,8 @@ class TypesettingPanel extends ConsumerWidget {
                             IconButton(
                               key: const ValueKey('typeset-theme-add'),
                               tooltip: '复制当前主题为副本',
-                              onPressed: () => _ThemeLibraryRow.addTheme(
-                                context,
-                                ref,
-                              ),
+                              onPressed: () =>
+                                  _ThemeLibraryRow.addTheme(context, ref),
                               icon: const Icon(
                                 Icons.add_circle_outline,
                                 size: 20,
@@ -125,10 +123,10 @@ class TypesettingPanel extends ConsumerWidget {
                               onPressed: themesState.active.builtIn
                                   ? null
                                   : () => _ThemeLibraryRow.removeTheme(
-                                        context,
-                                        ref,
-                                        themesState.active,
-                                      ),
+                                      context,
+                                      ref,
+                                      themesState.active,
+                                    ),
                               icon: const Icon(
                                 Icons.remove_circle_outline,
                                 size: 20,
@@ -161,10 +159,10 @@ class TypesettingPanel extends ConsumerWidget {
                                 onLongPress: preset.builtIn
                                     ? null
                                     : () => _ThemeLibraryRow.changeBackground(
-                                          context,
-                                          ref,
-                                          preset,
-                                        ),
+                                        context,
+                                        ref,
+                                        preset,
+                                      ),
                               ),
                           ],
                         ),
@@ -230,8 +228,7 @@ class TypesettingPanel extends ConsumerWidget {
                           min: 0,
                           max: 2,
                           divisions: 20,
-                          display:
-                              settings.paragraphSpacing.toStringAsFixed(1),
+                          display: settings.paragraphSpacing.toStringAsFixed(1),
                           onPreview: (v) => liveReaderTypesetPreview.value =
                               settings.copyWith(paragraphSpacing: v),
                           onCommit: (v) {
@@ -305,7 +302,8 @@ class TypesettingPanel extends ConsumerWidget {
                         _MarginEntry(
                           key: const ValueKey('margin-entry-body'),
                           label: '正文边距',
-                          value: '${settings.marginLeft.round()} / '
+                          value:
+                              '${settings.marginLeft.round()} / '
                               '${settings.marginTop.round()} / '
                               '${settings.marginRight.round()} / '
                               '${settings.marginBottom.round()}',
@@ -334,13 +332,13 @@ class TypesettingPanel extends ConsumerWidget {
                           fg: fg,
                           onMinus: settings.headingFontSize > 16
                               ? () => controller.patch(
-                                    headingFontSize: settings.headingFontSize - 1,
-                                  )
+                                  headingFontSize: settings.headingFontSize - 1,
+                                )
                               : null,
                           onPlus: settings.headingFontSize < 40
                               ? () => controller.patch(
-                                    headingFontSize: settings.headingFontSize + 1,
-                                  )
+                                  headingFontSize: settings.headingFontSize + 1,
+                                )
                               : null,
                         ),
                         _SwitchRow(
@@ -365,13 +363,15 @@ class TypesettingPanel extends ConsumerWidget {
                           label: '上边距',
                           value: settings.headingMarginTop,
                           fg: fg,
-                          onCommit: (v) => controller.patch(headingMarginTop: v),
+                          onCommit: (v) =>
+                              controller.patch(headingMarginTop: v),
                         ),
                         _ValueSlider(
                           label: '下边距',
                           value: settings.headingMarginBottom,
                           fg: fg,
-                          onCommit: (v) => controller.patch(headingMarginBottom: v),
+                          onCommit: (v) =>
+                              controller.patch(headingMarginBottom: v),
                         ),
                       ],
                     ),
@@ -386,6 +386,18 @@ class TypesettingPanel extends ConsumerWidget {
                           selected: settings.doublePage,
                           onSelect: (v) => controller.patch(doublePage: v),
                         ),
+                        if (settings.backgroundImage.isNotEmpty)
+                          _SelectRow<BackgroundImageFit>(
+                            label: '背景图显示',
+                            fg: fg,
+                            bg: bg,
+                            options: {
+                              for (final f in BackgroundImageFit.values)
+                                f: f.label,
+                            },
+                            selected: settings.backgroundFit,
+                            onSelect: (v) => controller.patch(backgroundFit: v),
+                          ),
                         _SelectRow<PageTurnMode>(
                           label: '翻页',
                           fg: fg,
@@ -433,12 +445,13 @@ class TypesettingPanel extends ConsumerWidget {
                         _SwitchRow(
                           label: '精排',
                           hint: settings.preciseTypesetting
-                              ? '保留书籍原样式（字号/行距/缩进由书决定）'
+                              ? '保留书籍原样式（字号/行距/缩进/对齐由书决定）'
                               : '统一字号行距，各家书观感一致',
                           fg: fg,
                           accent: settings.theme.accent,
                           value: settings.preciseTypesetting,
-                          onChanged: (v) => controller.patch(preciseTypesetting: v),
+                          onChanged: (v) =>
+                              controller.patch(preciseTypesetting: v),
                         ),
                       ],
                     ),
@@ -449,7 +462,8 @@ class TypesettingPanel extends ConsumerWidget {
                         _MarginEntry(
                           key: const ValueKey('margin-entry-body-2'),
                           label: '正文边距',
-                          value: '${settings.marginLeft.round()} / '
+                          value:
+                              '${settings.marginLeft.round()} / '
                               '${settings.marginTop.round()} / '
                               '${settings.marginRight.round()} / '
                               '${settings.marginBottom.round()}',
@@ -460,7 +474,8 @@ class TypesettingPanel extends ConsumerWidget {
                         _MarginEntry(
                           key: const ValueKey('margin-entry-header'),
                           label: '页眉边距',
-                          value: '${settings.headerMarginLeft.round()} / '
+                          value:
+                              '${settings.headerMarginLeft.round()} / '
                               '${settings.headerMarginTop.round()} / '
                               '${settings.headerMarginRight.round()}',
                           fg: fg,
@@ -470,7 +485,8 @@ class TypesettingPanel extends ConsumerWidget {
                         _MarginEntry(
                           key: const ValueKey('margin-entry-footer'),
                           label: '页脚边距',
-                          value: '${settings.footerMarginLeft.round()} / '
+                          value:
+                              '${settings.footerMarginLeft.round()} / '
                               '${settings.footerMarginBottom.round()} / '
                               '${settings.footerMarginRight.round()}',
                           fg: fg,
@@ -496,11 +512,13 @@ class TypesettingPanel extends ConsumerWidget {
                           fg: fg,
                           onMinus: settings.headerFontSize > 8
                               ? () => controller.patch(
-                                    headerFontSize: settings.headerFontSize - 1)
+                                  headerFontSize: settings.headerFontSize - 1,
+                                )
                               : null,
                           onPlus: settings.headerFontSize < 16
                               ? () => controller.patch(
-                                    headerFontSize: settings.headerFontSize + 1)
+                                  headerFontSize: settings.headerFontSize + 1,
+                                )
                               : null,
                         ),
                         const SizedBox(height: 10),
@@ -537,12 +555,12 @@ class TypesettingPanel extends ConsumerWidget {
 
   /// 单个 Tab 的内容：统一内边距 + 可滚动（内容多时不会溢出）。
   Widget _tab({required List<Widget> children}) => SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: children,
-        ),
-      );
+    padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    ),
+  );
 }
 
 /// 页眉/页脚三槽内容编辑。
@@ -621,9 +639,9 @@ class _ThemeLibraryRow {
     );
     if (!context.mounted) return;
     final name = ref.read(readerThemesControllerProvider).active.name;
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(content: Text('已复制为「$name」，之后的排版调整会存进它')),
-    );
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text('已复制为「$name」，之后的排版调整会存进它')));
   }
 
   /// 「−」：删除当前自定义主题（需确认），内置主题禁用。
@@ -747,9 +765,9 @@ class _ThemeLibraryRow {
       );
     } on Exception catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text('背景图导入失败：$e')),
-      );
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text('背景图导入失败：$e')));
     }
   }
 }
@@ -790,13 +808,12 @@ Future<String?> showBackgroundLibrarySheet(BuildContext context) async {
               Flexible(
                 child: GridView.builder(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  gridDelegate:
-                      const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        mainAxisSpacing: 10,
-                        crossAxisSpacing: 10,
-                        childAspectRatio: 0.72,
-                      ),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: 0.72,
+                  ),
                   itemCount: files.length,
                   itemBuilder: (_, index) {
                     final file = files[index];
@@ -859,6 +876,7 @@ Future<void> showThemeRenameDialog(
   if (ok != true) return;
   await ref.read(readerThemesControllerProvider.notifier).rename(id, name);
 }
+
 /// 主题块：背景色 / 背景图 + 名称（名称用该主题的字体色）。
 class _ThemeTile extends ConsumerWidget {
   const _ThemeTile({
@@ -937,9 +955,17 @@ class _ThemeTile extends ConsumerWidget {
             Row(
               children: [
                 if (preset.builtIn)
-                  Icon(Icons.lock_outline, size: 10, color: fg.withValues(alpha: 0.5)),
+                  Icon(
+                    Icons.lock_outline,
+                    size: 10,
+                    color: fg.withValues(alpha: 0.5),
+                  ),
                 if (!preset.builtIn)
-                  Icon(Icons.edit_outlined, size: 10, color: fg.withValues(alpha: 0.5)),
+                  Icon(
+                    Icons.edit_outlined,
+                    size: 10,
+                    color: fg.withValues(alpha: 0.5),
+                  ),
               ],
             ),
           ],
@@ -948,12 +974,9 @@ class _ThemeTile extends ConsumerWidget {
     );
   }
 }
+
 class _FontRow extends StatelessWidget {
-  const _FontRow({
-    required this.label,
-    required this.fg,
-    required this.onTap,
-  });
+  const _FontRow({required this.label, required this.fg, required this.onTap});
 
   final String label;
   final Color fg;
@@ -968,18 +991,28 @@ class _FontRow extends StatelessWidget {
         onTap: onTap,
         child: Row(
           children: [
-            SizedBox(width: 64, child: Text('字体', style: TextStyle(color: fg))),
+            SizedBox(
+              width: 64,
+              child: Text('字体', style: TextStyle(color: fg)),
+            ),
             Expanded(
               child: Text(
                 label,
                 textAlign: TextAlign.right,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: fg.withValues(alpha: 0.75), fontSize: 14),
+                style: TextStyle(
+                  color: fg.withValues(alpha: 0.75),
+                  fontSize: 14,
+                ),
               ),
             ),
             const SizedBox(width: 4),
-            Icon(Icons.chevron_right, size: 20, color: fg.withValues(alpha: 0.6)),
+            Icon(
+              Icons.chevron_right,
+              size: 20,
+              color: fg.withValues(alpha: 0.6),
+            ),
           ],
         ),
       ),
@@ -1021,7 +1054,9 @@ class _StepperRow extends StatelessWidget {
             icon: Icon(Icons.remove, color: fg),
           ),
           Expanded(
-            child: Center(child: Text(value, style: TextStyle(color: fg))),
+            child: Center(
+              child: Text(value, style: TextStyle(color: fg)),
+            ),
           ),
           IconButton(
             onPressed: onPlus,
@@ -1421,10 +1456,7 @@ class _MarginEntry extends StatelessWidget {
           children: [
             Text(
               label,
-              style: TextStyle(
-                color: fg.withValues(alpha: 0.85),
-                fontSize: 13,
-              ),
+              style: TextStyle(color: fg.withValues(alpha: 0.85), fontSize: 13),
             ),
             const Spacer(),
             Text(

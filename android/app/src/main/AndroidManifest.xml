@@ -2,11 +2,23 @@
     <!-- 阅读器本地资源服务（127.0.0.1）与 WebView 回环请求必需；
          模板只在 debug 构建声明，release 必须显式声明（M4 S3 同步也需要） -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 保存阅读分享图到相册（Android 10 及以下） -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"/>
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="QYReader"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:networkSecurityConfig="@xml/network_security_config">
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:enableOnBackInvokedCallback="false">
+        <!-- enableOnBackInvokedCallback=false 显式关闭预测性返回
+             （targetSdk 35 在 Android 15+ 默认开启）：系统会在手势开始
+             瞬间抢先播「回桌面」预览动画并吞掉事件，书架分类这类
+             PopScope 页内层级要按两次返回才生效。关掉后走传统按键
+             分发：手势结束才派发，PopScope 回调必达。本应用未实现
+             任何预测性返回动画，Android 14 及以下行为不变。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -59,6 +71,43 @@
                 <data android:mimeType="text/x-markdown"/>
             </intent-filter>
         </activity>
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_paths"/>
+        </provider>
+        <!-- 桌面组件：2×2 最近阅读 / 2×2 今日阅读 / 4×2 最近读的书 -->
+        <receiver
+            android:name=".widgets.BookProgressWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_book_progress_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_book_progress_info"/>
+        </receiver>
+        <receiver
+            android:name=".widgets.TodayReadingWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_today_reading_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_today_reading_info"/>
+        </receiver>
+        <receiver
+            android:name=".widgets.ShelfWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_shelf_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_shelf_info"/>
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

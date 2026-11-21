@@ -188,6 +188,17 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _finishedAtMeta = const VerificationMeta(
+    'finishedAt',
+  );
+  @override
+  late final GeneratedColumn<int> finishedAt = GeneratedColumn<int>(
+    'finished_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _isFinishedMeta = const VerificationMeta(
     'isFinished',
   );
@@ -279,6 +290,21 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _isFavoriteMeta = const VerificationMeta(
+    'isFavorite',
+  );
+  @override
+  late final GeneratedColumn<bool> isFavorite = GeneratedColumn<bool>(
+    'is_favorite',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_favorite" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   static const VerificationMeta _deletedAtMeta = const VerificationMeta(
     'deletedAt',
   );
@@ -340,6 +366,7 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     addedAt,
     updatedAt,
     lastOpenedAt,
+    finishedAt,
     isFinished,
     readStatus,
     isArchived,
@@ -348,6 +375,7 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
     tags,
     category,
     pinnedAt,
+    isFavorite,
     deletedAt,
     metaJson,
     hlc,
@@ -492,6 +520,12 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
         ),
       );
     }
+    if (data.containsKey('finished_at')) {
+      context.handle(
+        _finishedAtMeta,
+        finishedAt.isAcceptableOrUnknown(data['finished_at']!, _finishedAtMeta),
+      );
+    }
     if (data.containsKey('is_finished')) {
       context.handle(
         _isFinishedMeta,
@@ -538,6 +572,12 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
       context.handle(
         _pinnedAtMeta,
         pinnedAt.isAcceptableOrUnknown(data['pinned_at']!, _pinnedAtMeta),
+      );
+    }
+    if (data.containsKey('is_favorite')) {
+      context.handle(
+        _isFavoriteMeta,
+        isFavorite.isAcceptableOrUnknown(data['is_favorite']!, _isFavoriteMeta),
       );
     }
     if (data.containsKey('deleted_at')) {
@@ -645,6 +685,10 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
         DriftSqlType.int,
         data['${effectivePrefix}last_opened_at'],
       ),
+      finishedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}finished_at'],
+      ),
       isFinished: attachedDatabase.typeMapping.read(
         DriftSqlType.bool,
         data['${effectivePrefix}is_finished'],
@@ -677,6 +721,10 @@ class $BooksTable extends Books with TableInfo<$BooksTable, BookRow> {
         DriftSqlType.int,
         data['${effectivePrefix}pinned_at'],
       ),
+      isFavorite: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_favorite'],
+      )!,
       deletedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}deleted_at'],
@@ -754,6 +802,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
   /// 最近打开时间（epoch ms）。
   final int? lastOpenedAt;
 
+  /// 读完时间（epoch ms）；微信读书同步写入。
+  final int? finishedAt;
+
   /// 是否标记读完。
   final bool isFinished;
 
@@ -777,6 +828,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
 
   /// 书架置顶时间（epoch ms）；NULL = 未置顶。
   final int? pinnedAt;
+
+  /// 是否收藏。
+  final bool isFavorite;
 
   /// 墓碑：删除时间（epoch ms），参与同步合并。
   final int? deletedAt;
@@ -807,6 +861,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     required this.addedAt,
     required this.updatedAt,
     this.lastOpenedAt,
+    this.finishedAt,
     required this.isFinished,
     required this.readStatus,
     required this.isArchived,
@@ -815,6 +870,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     this.tags,
     this.category,
     this.pinnedAt,
+    required this.isFavorite,
     this.deletedAt,
     this.metaJson,
     required this.hlc,
@@ -852,6 +908,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     if (!nullToAbsent || lastOpenedAt != null) {
       map['last_opened_at'] = Variable<int>(lastOpenedAt);
     }
+    if (!nullToAbsent || finishedAt != null) {
+      map['finished_at'] = Variable<int>(finishedAt);
+    }
     map['is_finished'] = Variable<bool>(isFinished);
     map['read_status'] = Variable<String>(readStatus);
     map['is_archived'] = Variable<bool>(isArchived);
@@ -870,6 +929,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     if (!nullToAbsent || pinnedAt != null) {
       map['pinned_at'] = Variable<int>(pinnedAt);
     }
+    map['is_favorite'] = Variable<bool>(isFavorite);
     if (!nullToAbsent || deletedAt != null) {
       map['deleted_at'] = Variable<int>(deletedAt);
     }
@@ -912,6 +972,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       lastOpenedAt: lastOpenedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(lastOpenedAt),
+      finishedAt: finishedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(finishedAt),
       isFinished: Value(isFinished),
       readStatus: Value(readStatus),
       isArchived: Value(isArchived),
@@ -928,6 +991,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       pinnedAt: pinnedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(pinnedAt),
+      isFavorite: Value(isFavorite),
       deletedAt: deletedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(deletedAt),
@@ -962,6 +1026,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       addedAt: serializer.fromJson<int>(json['addedAt']),
       updatedAt: serializer.fromJson<int>(json['updatedAt']),
       lastOpenedAt: serializer.fromJson<int?>(json['lastOpenedAt']),
+      finishedAt: serializer.fromJson<int?>(json['finishedAt']),
       isFinished: serializer.fromJson<bool>(json['isFinished']),
       readStatus: serializer.fromJson<String>(json['readStatus']),
       isArchived: serializer.fromJson<bool>(json['isArchived']),
@@ -970,6 +1035,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       tags: serializer.fromJson<String?>(json['tags']),
       category: serializer.fromJson<String?>(json['category']),
       pinnedAt: serializer.fromJson<int?>(json['pinnedAt']),
+      isFavorite: serializer.fromJson<bool>(json['isFavorite']),
       deletedAt: serializer.fromJson<int?>(json['deletedAt']),
       metaJson: serializer.fromJson<String?>(json['metaJson']),
       hlc: serializer.fromJson<String>(json['hlc']),
@@ -997,6 +1063,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       'addedAt': serializer.toJson<int>(addedAt),
       'updatedAt': serializer.toJson<int>(updatedAt),
       'lastOpenedAt': serializer.toJson<int?>(lastOpenedAt),
+      'finishedAt': serializer.toJson<int?>(finishedAt),
       'isFinished': serializer.toJson<bool>(isFinished),
       'readStatus': serializer.toJson<String>(readStatus),
       'isArchived': serializer.toJson<bool>(isArchived),
@@ -1005,6 +1072,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       'tags': serializer.toJson<String?>(tags),
       'category': serializer.toJson<String?>(category),
       'pinnedAt': serializer.toJson<int?>(pinnedAt),
+      'isFavorite': serializer.toJson<bool>(isFavorite),
       'deletedAt': serializer.toJson<int?>(deletedAt),
       'metaJson': serializer.toJson<String?>(metaJson),
       'hlc': serializer.toJson<String>(hlc),
@@ -1030,6 +1098,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     int? addedAt,
     int? updatedAt,
     Value<int?> lastOpenedAt = const Value.absent(),
+    Value<int?> finishedAt = const Value.absent(),
     bool? isFinished,
     String? readStatus,
     bool? isArchived,
@@ -1038,6 +1107,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     Value<String?> tags = const Value.absent(),
     Value<String?> category = const Value.absent(),
     Value<int?> pinnedAt = const Value.absent(),
+    bool? isFavorite,
     Value<int?> deletedAt = const Value.absent(),
     Value<String?> metaJson = const Value.absent(),
     String? hlc,
@@ -1060,6 +1130,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     addedAt: addedAt ?? this.addedAt,
     updatedAt: updatedAt ?? this.updatedAt,
     lastOpenedAt: lastOpenedAt.present ? lastOpenedAt.value : this.lastOpenedAt,
+    finishedAt: finishedAt.present ? finishedAt.value : this.finishedAt,
     isFinished: isFinished ?? this.isFinished,
     readStatus: readStatus ?? this.readStatus,
     isArchived: isArchived ?? this.isArchived,
@@ -1068,6 +1139,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     tags: tags.present ? tags.value : this.tags,
     category: category.present ? category.value : this.category,
     pinnedAt: pinnedAt.present ? pinnedAt.value : this.pinnedAt,
+    isFavorite: isFavorite ?? this.isFavorite,
     deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
     metaJson: metaJson.present ? metaJson.value : this.metaJson,
     hlc: hlc ?? this.hlc,
@@ -1102,6 +1174,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       lastOpenedAt: data.lastOpenedAt.present
           ? data.lastOpenedAt.value
           : this.lastOpenedAt,
+      finishedAt: data.finishedAt.present
+          ? data.finishedAt.value
+          : this.finishedAt,
       isFinished: data.isFinished.present
           ? data.isFinished.value
           : this.isFinished,
@@ -1116,6 +1191,9 @@ class BookRow extends DataClass implements Insertable<BookRow> {
       tags: data.tags.present ? data.tags.value : this.tags,
       category: data.category.present ? data.category.value : this.category,
       pinnedAt: data.pinnedAt.present ? data.pinnedAt.value : this.pinnedAt,
+      isFavorite: data.isFavorite.present
+          ? data.isFavorite.value
+          : this.isFavorite,
       deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
       metaJson: data.metaJson.present ? data.metaJson.value : this.metaJson,
       hlc: data.hlc.present ? data.hlc.value : this.hlc,
@@ -1143,6 +1221,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           ..write('addedAt: $addedAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('lastOpenedAt: $lastOpenedAt, ')
+          ..write('finishedAt: $finishedAt, ')
           ..write('isFinished: $isFinished, ')
           ..write('readStatus: $readStatus, ')
           ..write('isArchived: $isArchived, ')
@@ -1151,6 +1230,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           ..write('tags: $tags, ')
           ..write('category: $category, ')
           ..write('pinnedAt: $pinnedAt, ')
+          ..write('isFavorite: $isFavorite, ')
           ..write('deletedAt: $deletedAt, ')
           ..write('metaJson: $metaJson, ')
           ..write('hlc: $hlc, ')
@@ -1178,6 +1258,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     addedAt,
     updatedAt,
     lastOpenedAt,
+    finishedAt,
     isFinished,
     readStatus,
     isArchived,
@@ -1186,6 +1267,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
     tags,
     category,
     pinnedAt,
+    isFavorite,
     deletedAt,
     metaJson,
     hlc,
@@ -1212,6 +1294,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           other.addedAt == this.addedAt &&
           other.updatedAt == this.updatedAt &&
           other.lastOpenedAt == this.lastOpenedAt &&
+          other.finishedAt == this.finishedAt &&
           other.isFinished == this.isFinished &&
           other.readStatus == this.readStatus &&
           other.isArchived == this.isArchived &&
@@ -1220,6 +1303,7 @@ class BookRow extends DataClass implements Insertable<BookRow> {
           other.tags == this.tags &&
           other.category == this.category &&
           other.pinnedAt == this.pinnedAt &&
+          other.isFavorite == this.isFavorite &&
           other.deletedAt == this.deletedAt &&
           other.metaJson == this.metaJson &&
           other.hlc == this.hlc &&
@@ -1244,6 +1328,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
   final Value<int> addedAt;
   final Value<int> updatedAt;
   final Value<int?> lastOpenedAt;
+  final Value<int?> finishedAt;
   final Value<bool> isFinished;
   final Value<String> readStatus;
   final Value<bool> isArchived;
@@ -1252,6 +1337,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
   final Value<String?> tags;
   final Value<String?> category;
   final Value<int?> pinnedAt;
+  final Value<bool> isFavorite;
   final Value<int?> deletedAt;
   final Value<String?> metaJson;
   final Value<String> hlc;
@@ -1275,6 +1361,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     this.addedAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.lastOpenedAt = const Value.absent(),
+    this.finishedAt = const Value.absent(),
     this.isFinished = const Value.absent(),
     this.readStatus = const Value.absent(),
     this.isArchived = const Value.absent(),
@@ -1283,6 +1370,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     this.tags = const Value.absent(),
     this.category = const Value.absent(),
     this.pinnedAt = const Value.absent(),
+    this.isFavorite = const Value.absent(),
     this.deletedAt = const Value.absent(),
     this.metaJson = const Value.absent(),
     this.hlc = const Value.absent(),
@@ -1307,6 +1395,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     required int addedAt,
     required int updatedAt,
     this.lastOpenedAt = const Value.absent(),
+    this.finishedAt = const Value.absent(),
     this.isFinished = const Value.absent(),
     this.readStatus = const Value.absent(),
     this.isArchived = const Value.absent(),
@@ -1315,6 +1404,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     this.tags = const Value.absent(),
     this.category = const Value.absent(),
     this.pinnedAt = const Value.absent(),
+    this.isFavorite = const Value.absent(),
     this.deletedAt = const Value.absent(),
     this.metaJson = const Value.absent(),
     required String hlc,
@@ -1348,6 +1438,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Expression<int>? addedAt,
     Expression<int>? updatedAt,
     Expression<int>? lastOpenedAt,
+    Expression<int>? finishedAt,
     Expression<bool>? isFinished,
     Expression<String>? readStatus,
     Expression<bool>? isArchived,
@@ -1356,6 +1447,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Expression<String>? tags,
     Expression<String>? category,
     Expression<int>? pinnedAt,
+    Expression<bool>? isFavorite,
     Expression<int>? deletedAt,
     Expression<String>? metaJson,
     Expression<String>? hlc,
@@ -1380,6 +1472,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       if (addedAt != null) 'added_at': addedAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (lastOpenedAt != null) 'last_opened_at': lastOpenedAt,
+      if (finishedAt != null) 'finished_at': finishedAt,
       if (isFinished != null) 'is_finished': isFinished,
       if (readStatus != null) 'read_status': readStatus,
       if (isArchived != null) 'is_archived': isArchived,
@@ -1388,6 +1481,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       if (tags != null) 'tags': tags,
       if (category != null) 'category': category,
       if (pinnedAt != null) 'pinned_at': pinnedAt,
+      if (isFavorite != null) 'is_favorite': isFavorite,
       if (deletedAt != null) 'deleted_at': deletedAt,
       if (metaJson != null) 'meta_json': metaJson,
       if (hlc != null) 'hlc': hlc,
@@ -1414,6 +1508,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Value<int>? addedAt,
     Value<int>? updatedAt,
     Value<int?>? lastOpenedAt,
+    Value<int?>? finishedAt,
     Value<bool>? isFinished,
     Value<String>? readStatus,
     Value<bool>? isArchived,
@@ -1422,6 +1517,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     Value<String?>? tags,
     Value<String?>? category,
     Value<int?>? pinnedAt,
+    Value<bool>? isFavorite,
     Value<int?>? deletedAt,
     Value<String?>? metaJson,
     Value<String>? hlc,
@@ -1446,6 +1542,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       addedAt: addedAt ?? this.addedAt,
       updatedAt: updatedAt ?? this.updatedAt,
       lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
+      finishedAt: finishedAt ?? this.finishedAt,
       isFinished: isFinished ?? this.isFinished,
       readStatus: readStatus ?? this.readStatus,
       isArchived: isArchived ?? this.isArchived,
@@ -1454,6 +1551,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
       tags: tags ?? this.tags,
       category: category ?? this.category,
       pinnedAt: pinnedAt ?? this.pinnedAt,
+      isFavorite: isFavorite ?? this.isFavorite,
       deletedAt: deletedAt ?? this.deletedAt,
       metaJson: metaJson ?? this.metaJson,
       hlc: hlc ?? this.hlc,
@@ -1516,6 +1614,9 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     if (lastOpenedAt.present) {
       map['last_opened_at'] = Variable<int>(lastOpenedAt.value);
     }
+    if (finishedAt.present) {
+      map['finished_at'] = Variable<int>(finishedAt.value);
+    }
     if (isFinished.present) {
       map['is_finished'] = Variable<bool>(isFinished.value);
     }
@@ -1539,6 +1640,9 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
     }
     if (pinnedAt.present) {
       map['pinned_at'] = Variable<int>(pinnedAt.value);
+    }
+    if (isFavorite.present) {
+      map['is_favorite'] = Variable<bool>(isFavorite.value);
     }
     if (deletedAt.present) {
       map['deleted_at'] = Variable<int>(deletedAt.value);
@@ -1578,6 +1682,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
           ..write('addedAt: $addedAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('lastOpenedAt: $lastOpenedAt, ')
+          ..write('finishedAt: $finishedAt, ')
           ..write('isFinished: $isFinished, ')
           ..write('readStatus: $readStatus, ')
           ..write('isArchived: $isArchived, ')
@@ -1586,6 +1691,7 @@ class BooksCompanion extends UpdateCompanion<BookRow> {
           ..write('tags: $tags, ')
           ..write('category: $category, ')
           ..write('pinnedAt: $pinnedAt, ')
+          ..write('isFavorite: $isFavorite, ')
           ..write('deletedAt: $deletedAt, ')
           ..write('metaJson: $metaJson, ')
           ..write('hlc: $hlc, ')
@@ -5635,6 +5741,7 @@ typedef $$BooksTableCreateCompanionBuilder =
       required int addedAt,
       required int updatedAt,
       Value<int?> lastOpenedAt,
+      Value<int?> finishedAt,
       Value<bool> isFinished,
       Value<String> readStatus,
       Value<bool> isArchived,
@@ -5643,6 +5750,7 @@ typedef $$BooksTableCreateCompanionBuilder =
       Value<String?> tags,
       Value<String?> category,
       Value<int?> pinnedAt,
+      Value<bool> isFavorite,
       Value<int?> deletedAt,
       Value<String?> metaJson,
       required String hlc,
@@ -5668,6 +5776,7 @@ typedef $$BooksTableUpdateCompanionBuilder =
       Value<int> addedAt,
       Value<int> updatedAt,
       Value<int?> lastOpenedAt,
+      Value<int?> finishedAt,
       Value<bool> isFinished,
       Value<String> readStatus,
       Value<bool> isArchived,
@@ -5676,6 +5785,7 @@ typedef $$BooksTableUpdateCompanionBuilder =
       Value<String?> tags,
       Value<String?> category,
       Value<int?> pinnedAt,
+      Value<bool> isFavorite,
       Value<int?> deletedAt,
       Value<String?> metaJson,
       Value<String> hlc,
@@ -5855,6 +5965,11 @@ class $$BooksTableFilterComposer extends Composer<_$AppDatabase, $BooksTable> {
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<int> get finishedAt => $composableBuilder(
+    column: $table.finishedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<bool> get isFinished => $composableBuilder(
     column: $table.isFinished,
     builder: (column) => ColumnFilters(column),
@@ -5892,6 +6007,11 @@ class $$BooksTableFilterComposer extends Composer<_$AppDatabase, $BooksTable> {
 
   ColumnFilters<int> get pinnedAt => $composableBuilder(
     column: $table.pinnedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isFavorite => $composableBuilder(
+    column: $table.isFavorite,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6110,6 +6230,11 @@ class $$BooksTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get finishedAt => $composableBuilder(
+    column: $table.finishedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<bool> get isFinished => $composableBuilder(
     column: $table.isFinished,
     builder: (column) => ColumnOrderings(column),
@@ -6147,6 +6272,11 @@ class $$BooksTableOrderingComposer
 
   ColumnOrderings<int> get pinnedAt => $composableBuilder(
     column: $table.pinnedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isFavorite => $composableBuilder(
+    column: $table.isFavorite,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -6241,6 +6371,11 @@ class $$BooksTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<int> get finishedAt => $composableBuilder(
+    column: $table.finishedAt,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<bool> get isFinished => $composableBuilder(
     column: $table.isFinished,
     builder: (column) => column,
@@ -6270,6 +6405,11 @@ class $$BooksTableAnnotationComposer
 
   GeneratedColumn<int> get pinnedAt =>
       $composableBuilder(column: $table.pinnedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get isFavorite => $composableBuilder(
+    column: $table.isFavorite,
+    builder: (column) => column,
+  );
 
   GeneratedColumn<int> get deletedAt =>
       $composableBuilder(column: $table.deletedAt, builder: (column) => column);
@@ -6434,6 +6574,7 @@ class $$BooksTableTableManager
                 Value<int> addedAt = const Value.absent(),
                 Value<int> updatedAt = const Value.absent(),
                 Value<int?> lastOpenedAt = const Value.absent(),
+                Value<int?> finishedAt = const Value.absent(),
                 Value<bool> isFinished = const Value.absent(),
                 Value<String> readStatus = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
@@ -6442,6 +6583,7 @@ class $$BooksTableTableManager
                 Value<String?> tags = const Value.absent(),
                 Value<String?> category = const Value.absent(),
                 Value<int?> pinnedAt = const Value.absent(),
+                Value<bool> isFavorite = const Value.absent(),
                 Value<int?> deletedAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
                 Value<String> hlc = const Value.absent(),
@@ -6465,6 +6607,7 @@ class $$BooksTableTableManager
                 addedAt: addedAt,
                 updatedAt: updatedAt,
                 lastOpenedAt: lastOpenedAt,
+                finishedAt: finishedAt,
                 isFinished: isFinished,
                 readStatus: readStatus,
                 isArchived: isArchived,
@@ -6473,6 +6616,7 @@ class $$BooksTableTableManager
                 tags: tags,
                 category: category,
                 pinnedAt: pinnedAt,
+                isFavorite: isFavorite,
                 deletedAt: deletedAt,
                 metaJson: metaJson,
                 hlc: hlc,
@@ -6498,6 +6642,7 @@ class $$BooksTableTableManager
                 required int addedAt,
                 required int updatedAt,
                 Value<int?> lastOpenedAt = const Value.absent(),
+                Value<int?> finishedAt = const Value.absent(),
                 Value<bool> isFinished = const Value.absent(),
                 Value<String> readStatus = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
@@ -6506,6 +6651,7 @@ class $$BooksTableTableManager
                 Value<String?> tags = const Value.absent(),
                 Value<String?> category = const Value.absent(),
                 Value<int?> pinnedAt = const Value.absent(),
+                Value<bool> isFavorite = const Value.absent(),
                 Value<int?> deletedAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
                 required String hlc,
@@ -6529,6 +6675,7 @@ class $$BooksTableTableManager
                 addedAt: addedAt,
                 updatedAt: updatedAt,
                 lastOpenedAt: lastOpenedAt,
+                finishedAt: finishedAt,
                 isFinished: isFinished,
                 readStatus: readStatus,
                 isArchived: isArchived,
@@ -6537,6 +6684,7 @@ class $$BooksTableTableManager
                 tags: tags,
                 category: category,
                 pinnedAt: pinnedAt,
+                isFavorite: isFavorite,
                 deletedAt: deletedAt,
                 metaJson: metaJson,
                 hlc: hlc,

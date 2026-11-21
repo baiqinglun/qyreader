@@ -63,6 +63,9 @@ class Books extends Table {
   /// 最近打开时间（epoch ms）。
   IntColumn? get lastOpenedAt => integer().nullable()();
 
+  /// 读完时间（epoch ms）；微信读书同步写入。
+  IntColumn? get finishedAt => integer().nullable()();
+
   /// 是否标记读完。
   BoolColumn get isFinished => boolean().withDefault(const Constant(false))();
 
@@ -86,6 +89,9 @@ class Books extends Table {
 
   /// 书架置顶时间（epoch ms）；NULL = 未置顶。
   IntColumn? get pinnedAt => integer().nullable()();
+
+  /// 是否收藏。
+  BoolColumn get isFavorite => boolean().withDefault(const Constant(false))();
 
   /// 墓碑：删除时间（epoch ms），参与同步合并。
   IntColumn? get deletedAt => integer().nullable()();

@@ -1,4 +1,4 @@
-/// 缓存中心：三个页签（书籍 / 字体 / 背景）与背景空态。
+/// 缓存中心：四个页签（书籍 / 字体 / 背景 / 音频）与背景空态。
 library;
 
 import 'package:flutter/material.dart';
@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
-  testWidgets('缓存中心有三个页签，背景页签有空态提示', (tester) async {
+  testWidgets('缓存中心有四个页签（书籍 / 字体 / 背景 / 音频）', (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: CacheCenterPage())),
     );
@@ -21,6 +21,7 @@ void main() {
     expect(find.text('书籍'), findsOneWidget);
     expect(find.text('字体'), findsOneWidget);
     expect(find.text('背景'), findsOneWidget);
+    expect(find.text('音频'), findsOneWidget);
 
     // 背景页签的空态由下一个用例（initialTab: 2）验证
   });

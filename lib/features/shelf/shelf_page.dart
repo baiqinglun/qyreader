@@ -2,11 +2,14 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'widgets/category_actions.dart';
 
 import '../../app/providers.dart';
 import '../../app/router.dart';
@@ -15,13 +18,22 @@ import '../../core/widgets/empty_state.dart';
 import '../../core/widgets/skeleton.dart';
 import '../../domain/entities/book.dart';
 import '../../features/reader/fonts/reader_fonts.dart';
+import '../../features/reader/reader_themes.dart';
+import '../../features/reader/tts/audio_library.dart';
 import '../../features/settings/appearance_provider.dart';
+import '../../features/settings/category_tree.dart';
+import '../../features/settings/reading_data_export.dart';
+import '../../features/settings/reading_data_import.dart';
 import '../tags/tag_library.dart';
+import 'import_history.dart';
 import 'shelf_controller.dart';
 import 'shelf_filter.dart';
 import 'shelf_prefs.dart';
 import 'widgets/book_actions_sheet.dart';
+import 'widgets/book_file_share.dart';
 import 'widgets/batch_actions.dart';
+import 'widgets/import_result_dialog.dart';
+import 'widgets/overwrite_import_dialog.dart';
 import 'widgets/recent_shelf.dart';
 import 'widgets/shelf_filter_sheet.dart';
 import 'widgets/shelf_flow.dart';
@@ -50,13 +62,206 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
 
   /// 右上角快捷同步进行中（按钮显示小菊花，防重复点击）。
   bool _syncing = false;
+  bool _customView = false;
+  String _tabGroup = 'category';
+  String? _selectedTab;
+  final Map<String, GlobalKey> _tabKeys = {};
+
+  Future<void> _loadTabGroup() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(
+        () => _tabGroup = prefs.getString('shelf.tabGroup') ?? 'category',
+      );
+    }
+  }
+
+  void _selectShelfTab(String? value) {
+    setState(() {
+      _selectedTab = value;
+      _customView = value == '\u0000custom';
+    });
+    if (_shelfScroll.hasClients) _shelfScroll.jumpTo(0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = _tabKeys[value ?? '\u0000root']?.currentContext;
+      if (target != null) {
+        unawaited(
+          Scrollable.ensureVisible(
+            target,
+            duration: const Duration(milliseconds: 200),
+            alignment: 0.5,
+          ),
+        );
+      }
+    });
+  }
+
+  Future<void> _chooseTabGroup() async {
+    const labels = {
+      'category': '分类',
+      'tag': '标签',
+      'rating': '评分',
+      'status': '阅读状态',
+    };
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择页签分组'),
+        children: [
+          for (final entry in labels.entries)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, entry.key),
+              child: Text(
+                '${entry.value}${entry.key == _tabGroup ? ' ✓' : ''}',
+              ),
+            ),
+        ],
+      ),
+    );
+    if (choice == null || !mounted) return;
+    setState(() {
+      _tabGroup = choice;
+      _selectedTab = null;
+      _customView = false;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('shelf.tabGroup', choice);
+  }
+
+  String _customCategory = '';
+  ShelfFilter _customFilter = const ShelfFilter();
+
+  Future<void> _loadCustomView() async {
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      final json =
+          jsonDecode(prefs.getString('shelf.customView') ?? '{}')
+              as Map<String, dynamic>;
+      final statuses = (json['statuses'] as List? ?? [])
+          .whereType<String>()
+          .toSet();
+      if (mounted) {
+        setState(() {
+          _customCategory = json['category'] as String? ?? '';
+          _customFilter = ShelfFilter(
+            minRating: (json['rating'] as int?) ?? 0,
+            tags: (json['tags'] as List? ?? []).whereType<String>().toSet(),
+            statuses: BookReadStatus.values
+                .where((v) => statuses.contains(v.name))
+                .toSet(),
+          );
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _configureCustomView(List<ShelfItem> items) async {
+    final categories = shelfCategories(items);
+    var category = categories.contains(_customCategory) ? _customCategory : '';
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: const Text('选择分类'),
+          content: DropdownButtonFormField<String>(
+            value: category,
+            items: [
+              const DropdownMenuItem(value: '', child: Text('全部分类')),
+              for (final c in categories)
+                DropdownMenuItem(
+                  value: c,
+                  child: Text(c, overflow: TextOverflow.ellipsis),
+                ),
+            ],
+            onChanged: (value) => update(() => category = value ?? ''),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, category),
+              child: const Text('下一步'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    final tags = ref.read(tagSummariesProvider).map((t) => t.name).toList();
+    final filter = await showShelfFilterSheet(
+      context,
+      initial: _customFilter,
+      tags: tags,
+    );
+    if (filter == null || !mounted) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'shelf.customView',
+      jsonEncode({
+        'category': chosen,
+        'rating': filter.minRating,
+        'tags': filter.tags.toList(),
+        'statuses': filter.statuses.map((s) => s.name).toList(),
+      }),
+    );
+    if (mounted) {
+      setState(() {
+        _customCategory = chosen;
+        _customFilter = filter;
+      });
+    }
+  }
 
   final TextEditingController _searchController = TextEditingController();
+
+  /// 首屏 / 分类共用的滚动位：进分类前记住首屏位置，返回时恢复到原处。
+  final ScrollController _shelfScroll = ScrollController();
+
+  List<String> _extraPaths = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadCategories());
+    unawaited(_loadCustomView());
+    unawaited(_loadTabGroup());
+  }
+
+  Future<void> _loadCategories() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(
+        () =>
+            _extraPaths = prefs.getStringList(kExtraCategoriesKey) ?? const [],
+      );
+    }
+  }
+
+  /// 进入分类前的首屏滚动位置（返回首屏时恢复到这里）。
+  double _shelfRootOffset = 0;
 
   @override
   void dispose() {
     _searchController.dispose();
+    _shelfScroll.dispose();
     super.dispose();
+  }
+
+  /// 分类筛选切换：进分类记住首屏位置（分类页从顶部开始），
+  /// 返回首屏恢复到进入前的位置。jumpTo 在内容重排的同一帧生效，
+  /// 不会闪一帧旧位置。
+  void _onCategoryFilterChanged(String? prev, String next) {
+    if (prev == null || prev == next || !_shelfScroll.hasClients) return;
+    if (prev.isEmpty) {
+      _shelfRootOffset = _shelfScroll.offset;
+      _shelfScroll.jumpTo(0);
+    } else if (next.isEmpty) {
+      _shelfScroll.jumpTo(_shelfRootOffset);
+    } else {
+      _shelfScroll.jumpTo(0);
+    }
   }
 
   /// 右上角「同步」按钮：不打开面板，直接同步一次并给出结果提示。
@@ -67,8 +272,10 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
     try {
       final repo = await ref.read(syncRepositoryProvider.future);
       final result = await repo.syncNow();
-      // 字体也参与同步：拉回来的字体立刻出现在字体列表里（不用重启）
+      // 字体 / 音频 / 主题也参与同步：拉回来的资源立刻出现在列表里（不用重启）
       unawaited(ref.read(readerFontsControllerProvider.notifier).reload());
+      unawaited(ref.read(audioLibraryControllerProvider.notifier).reload());
+      unawaited(ref.read(readerThemesControllerProvider.notifier).reload());
       messenger.showSnackBar(
         SnackBar(content: Text(syncResultSummary(result))),
       );
@@ -85,13 +292,54 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
     final importing = ref.watch(importControllerProvider) is ImportLoading;
     final rawFilter = ref.watch(shelfCategoryFilterProvider);
     final categories = items.valueOrNull == null
-        ? const <String>[]
-        : shelfCategories(items.valueOrNull!);
-    final filter = _effectiveCategory(rawFilter, categories);
+        ? _extraPaths
+        : [...shelfCategories(items.valueOrNull!), ..._extraPaths];
+    final filter = rawFilter == kFavoritesShelf
+        ? rawFilter
+        : _effectiveCategory(rawFilter, categories);
+    final allItems = items.valueOrNull ?? <ShelfItem>[];
+    final tabs = <String>[
+      '\u0000custom',
+      ...switch (_tabGroup) {
+        'tag' => ref.watch(tagSummariesProvider).map((t) => t.name),
+        'rating' => ['未评分', '1 星', '2 星', '3 星', '4 星', '5 星'],
+        'status' => BookReadStatus.values.map((s) => s.label),
+        _ => {...categories}.where((c) => c.isNotEmpty),
+      },
+    ];
+    final selectedTab = tabs.contains(_selectedTab) ? _selectedTab : null;
+    bool matchesTab(ShelfItem item) {
+      if (selectedTab == null || selectedTab == '\u0000custom') return true;
+      final book = item.book;
+      return switch (_tabGroup) {
+        'tag' => book.tags.contains(selectedTab),
+        'rating' =>
+          (book.rating ?? 0) ==
+              (selectedTab == '未评分'
+                  ? 0
+                  : int.parse(selectedTab.substring(0, 1))),
+        'status' => book.readStatus.label == selectedTab,
+        _ => categoryUnderPath(book.category?.trim() ?? '', selectedTab),
+      };
+    }
+
     final scheme = Theme.of(context).colorScheme;
 
+    ref.listen<String>(shelfCategoryFilterProvider, _onCategoryFilterChanged);
     ref.listen<ImportState>(importControllerProvider, (prev, next) {
       final messenger = ScaffoldMessenger.of(context);
+      // 选择器导入：弹「导入完成」弹窗（成功 / 重复 / 失败 + 逐文件记录）。
+      // 打开方式导入不经过这里（records 为空），仍用原来的 SnackBar。
+      final records = switch (next) {
+        ImportDone(:final records) => records,
+        ImportError(:final records) => records,
+        _ => const <ImportRecord>[],
+      };
+      if (records.isNotEmpty) {
+        unawaited(showImportResultDialog(context, batch: records));
+        ref.read(importControllerProvider.notifier).consume();
+        return;
+      }
       if (next case ImportDone(:final books, :final failures)) {
         final base = books.length == 1
             ? '已导入《${books.first.title}》'
@@ -123,14 +371,19 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
             ? null
             : IconButton(
                 tooltip: '返回书架',
-                onPressed: () =>
-                    ref.read(shelfCategoryFilterProvider.notifier).set(''),
+                onPressed: () => ref
+                    .read(shelfCategoryFilterProvider.notifier)
+                    .set(parentCategoryOf(filter)),
                 icon: const Icon(Icons.arrow_back),
               ),
         title: Text(
           _selectionMode
               ? '已选择 ${_selectedBookIds.length} 本'
-              : (filter.isEmpty ? '书架' : filter),
+              : (filter.isEmpty
+                    ? '书架'
+                    : filter == kFavoritesShelf
+                    ? '收藏'
+                    : filter),
         ),
         // 右上角：直接同步 / 亮暗切换 / 「⋯」菜单（书架设置 + 导入）。
         actions: _selectionMode
@@ -170,6 +423,8 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
                       ref
                           .read(importControllerProvider.notifier)
                           .importFromPicker();
+                    } else if (value == 'importHistory') {
+                      unawaited(showImportResultDialog(context));
                     } else if (value == 'shelfSettings') {
                       unawaited(showShelfSettingsSheet(context));
                     } else if (value == 'select') {
@@ -184,6 +439,17 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
                           const Icon(Icons.checklist, size: 18),
                           const SizedBox(width: 10),
                           const Text('多选'),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem<String>(
+                      key: const ValueKey('shelf-import-history'),
+                      value: 'importHistory',
+                      child: Row(
+                        children: [
+                          const Icon(Icons.history, size: 18),
+                          const SizedBox(width: 10),
+                          const Text('导入记录'),
                         ],
                       ),
                     ),
@@ -236,6 +502,8 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
                               height: 44,
                               child: TextField(
                                 controller: _searchController,
+                                onTapOutside: (_) =>
+                                    FocusScope.of(context).unfocus(),
                                 onChanged: (value) =>
                                     setState(() => _query = value.trim()),
                                 textInputAction: TextInputAction.search,
@@ -323,42 +591,174 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
                 ),
               ),
       ),
-      body: items.when(
-        loading: () => const _SkeletonGrid(),
-        error: (error, stack) => EmptyState(
-          icon: Icons.error_outline,
-          title: '书架加载失败',
-          message: '$error',
-        ),
-        data: (list) => list.isEmpty
-            ? EmptyState(
-                icon: Icons.auto_stories_outlined,
-                title: '书架空空如也',
-                message: '导入 EPUB / TXT / Markdown，开始阅读之旅',
-                actionLabel: '选择文件（可多选）',
-                onAction: importing
-                    ? null
-                    : () => ref
-                          .read(importControllerProvider.notifier)
-                          .importFromPicker(),
-              )
-            : _BookShelf(
-                items: list,
-                filter: filter,
-                query: _query,
-                shelfFilter: _filter,
-                onClearFilter: () =>
-                    setState(() => _filter = const ShelfFilter()),
-                selectionMode: _selectionMode,
-                selectedBookIds: _selectedBookIds,
-                onToggleSelect: _toggleSelect,
-                onExitSelection: _exitSelection,
+      body: Column(
+        children: [
+          if (!_selectionMode && filter.isEmpty)
+            Row(
+              children: [
+                TextButton(
+                  onPressed: () => _selectShelfTab(null),
+                  child: Text(
+                    '书架',
+                    style: TextStyle(
+                      fontWeight: selectedTab == null
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final value in tabs)
+                          TextButton(
+                            key: _tabKeys.putIfAbsent(value, GlobalKey.new),
+                            onPressed: () => _selectShelfTab(value),
+                            child: Text(
+                              value == '\u0000custom' ? '自定义' : value,
+                              style: TextStyle(
+                                fontWeight: selectedTab == value
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (_customView)
+                  TextButton.icon(
+                    onPressed: () => _configureCustomView(allItems),
+                    icon: const Icon(Icons.tune),
+                    label: const Text('设置筛选'),
+                  ),
+                IconButton(
+                  tooltip: '展开书架页签',
+                  icon: const Icon(Icons.expand_more),
+                  onPressed: () {
+                    showModalBottomSheet<void>(
+                      context: context,
+                      showDragHandle: true,
+                      builder: (sheetContext) => SafeArea(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ListTile(
+                              title: const Text('页签分组'),
+                              subtitle: Text(switch (_tabGroup) {
+                                'tag' => '标签',
+                                'rating' => '评分',
+                                'status' => '阅读状态',
+                                _ => '分类',
+                              }),
+                              trailing: const Icon(Icons.tune),
+                              onTap: () {
+                                Navigator.pop(sheetContext);
+                                unawaited(_chooseTabGroup());
+                              },
+                            ),
+                            Flexible(
+                              child: SingleChildScrollView(
+                                child: Wrap(
+                                  children: [
+                                    for (final value in <String?>[
+                                      null,
+                                      ...tabs,
+                                    ])
+                                      Padding(
+                                        padding: const EdgeInsets.all(4),
+                                        child: ChoiceChip(
+                                          label: Text(
+                                            value == null
+                                                ? '书架'
+                                                : value == '\u0000custom'
+                                                ? '自定义'
+                                                : value,
+                                          ),
+                                          selected: selectedTab == value,
+                                          onSelected: (_) {
+                                            Navigator.pop(sheetContext);
+                                            _selectShelfTab(value);
+                                          },
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          Expanded(
+            child: items.when(
+              loading: () => const _SkeletonGrid(),
+              error: (error, stack) => EmptyState(
+                icon: Icons.error_outline,
+                title: '书架加载失败',
+                message: '$error',
               ),
+              data: (list) => list.isEmpty && _extraPaths.isEmpty
+                  ? EmptyState(
+                      icon: Icons.auto_stories_outlined,
+                      title: '书架空空如也',
+                      message: '导入 EPUB / AZW3 / MOBI / TXT / Markdown，开始阅读之旅',
+                      actionLabel: '选择文件（可多选）',
+                      onAction: importing
+                          ? null
+                          : () => ref
+                                .read(importControllerProvider.notifier)
+                                .importFromPicker(),
+                    )
+                  : _BookShelf(
+                      items: _customView
+                          ? list
+                                .where(
+                                  (item) =>
+                                      (_customCategory.isEmpty ||
+                                          categoryUnderPath(
+                                            item.book.category?.trim() ?? '',
+                                            _customCategory,
+                                          )) &&
+                                      _customFilter.matches(item.book),
+                                )
+                                .toList()
+                          : selectedTab == null
+                          ? list
+                          : list.where(matchesTab).toList(),
+                      customView: _customView || selectedTab != null,
+                      extraPaths: _extraPaths,
+                      onManageCategory: (category) async {
+                        await manageCategory(context, ref, category: category);
+                        await _loadCategories();
+                      },
+                      controller: _shelfScroll,
+                      filter: filter,
+                      query: _query,
+                      shelfFilter: _filter,
+                      onClearFilter: () =>
+                          setState(() => _filter = const ShelfFilter()),
+                      selectionMode: _selectionMode,
+                      selectedBookIds: _selectedBookIds,
+                      onToggleSelect: _toggleSelect,
+                      onExitSelection: _exitSelection,
+                    ),
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: _selectionMode
           ? _SelectionBar(
               count: _selectedBookIds.length,
               busy: _batchBusy,
+              onShare: _shareSelected,
               onDelete: _deleteSelected,
               onAddTags: _addTagsSelected,
               onMoveToShelf: _moveSelectedToShelf,
@@ -411,6 +811,14 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
       for (final item in all)
         if (_selectedBookIds.contains(item.book.id)) item,
     ];
+  }
+
+  Future<void> _shareSelected() async {
+    final selected = _selectedItems();
+    if (selected.isEmpty || _batchBusy) return;
+    await shareOrExportBooks(context, ref, [
+      for (final item in selected) item.book,
+    ]);
   }
 
   Future<void> _deleteSelected() async {
@@ -559,6 +967,10 @@ class _ShelfPageState extends ConsumerState<ShelfPage> {
 class _BookShelf extends ConsumerWidget {
   const _BookShelf({
     required this.items,
+    required this.customView,
+    required this.extraPaths,
+    required this.onManageCategory,
+    required this.controller,
     required this.filter,
     required this.query,
     required this.shelfFilter,
@@ -570,6 +982,12 @@ class _BookShelf extends ConsumerWidget {
   });
 
   final List<ShelfItem> items;
+  final bool customView;
+  final List<String> extraPaths;
+  final ValueChanged<String> onManageCategory;
+
+  /// 首屏 / 分类共用的滚动位（ShelfPage 持有：分类切换时记忆 / 恢复位置）。
+  final ScrollController controller;
 
   /// 正在看的分类（'' = 书架首屏：分类格 + 没有分类的书）。
   final String filter;
@@ -605,17 +1023,37 @@ class _BookShelf extends ConsumerWidget {
       ascending: prefs.sortAscending,
     );
     // 多选只在「当前目录」里选：根目录 = 没有分类的书；分类里 = 该分类的书。
-    final selectionScoped = filter.isEmpty
+    final selectionScoped = customView
+        ? sorted
+        : filter == kFavoritesShelf
+        ? sorted.where((i) => i.book.isFavorite).toList()
+        : filter.isEmpty
         ? rootShelfItems(sorted)
         : filterShelfByCategory(sorted, filter);
     final scoped = selectionMode
         ? selectionScoped
-        : (filter.isEmpty ? sorted : filterShelfByCategory(sorted, filter));
+        : (filter == kFavoritesShelf
+              ? sorted.where((i) => i.book.isFavorite).toList()
+              : filter.isEmpty
+              ? sorted
+              : sorted
+                    .where(
+                      (item) => categoryUnderPath(
+                        item.book.category?.trim() ?? '',
+                        filter,
+                      ),
+                    )
+                    .toList());
     final searching = query.isNotEmpty;
     final filtering = shelfFilter.active;
     // 筛选、搜索或多选时压平成书格：分类卡不参与筛选结果，多选时
     // 也直接铺开所有书（分类里的书也能一起选）。
-    final flatMode = searching || filtering || selectionMode;
+    final flatMode =
+        searching ||
+        filtering ||
+        selectionMode ||
+        customView ||
+        filter == kFavoritesShelf;
     final lowerQuery = query.toLowerCase();
     final matches = <ShelfItem>[
       for (final item in scoped)
@@ -628,11 +1066,15 @@ class _BookShelf extends ConsumerWidget {
     final cells = flatMode
         ? <ShelfCell>[for (final book in matches) ShelfBookCell(book)]
         : filter.isEmpty
-        ? shelfCells(sorted)
-        : <ShelfCell>[for (final book in scoped) ShelfBookCell(book)];
+        ? shelfCells(sorted, extraPaths: extraPaths)
+        : shelfCells(sorted, parent: filter, extraPaths: extraPaths);
     // 「最近在读」只在书架首屏、且没在搜索 / 筛选时出现。
+    // 展示几本按屏幕宽度算：能摆几本摆几本，放不满时整排居中。
     final recent = !flatMode && filter.isEmpty
-        ? recentlyReadItems(items)
+        ? recentShelfVisibleItems(
+            recentlyReadItems(items),
+            MediaQuery.sizeOf(context).width,
+          )
         : const <ShelfItem>[];
     final recentVisible = ref.watch(recentShelfVisibleProvider);
     final hasRecent = recent.isNotEmpty;
@@ -651,33 +1093,41 @@ class _BookShelf extends ConsumerWidget {
         if (selectionMode) {
           onExitSelection();
         } else {
-          ref.read(shelfCategoryFilterProvider.notifier).set('');
+          ref
+              .read(shelfCategoryFilterProvider.notifier)
+              .set(parentCategoryOf(filter));
         }
       },
       child: CustomScrollView(
+        key: const PageStorageKey('shelf-scroll'),
+        controller: controller,
         slivers: [
           if (hasRecent)
             SliverToBoxAdapter(
-              child: recentVisible
-                  ? RecentShelf(
-                      items: recent,
-                      onOpen: (book) => _openBook(
-                        context,
-                        ref,
-                        book.id,
-                        kind: BookLaunchKind.spine,
+              // 独立图层：竖向滚动时最近在读整条只需要平移，不必每帧重画
+              // 书脊渐变 / 投影（书多时这是滑动掉帧的来源之一）。
+              child: RepaintBoundary(
+                child: recentVisible
+                    ? RecentShelf(
+                        items: recent,
+                        onOpen: (book) => _openBook(
+                          context,
+                          ref,
+                          book.id,
+                          kind: BookLaunchKind.spine,
+                        ),
+                        onManage: (book) => _manageBook(context, ref, book),
+                        onHide: () => ref
+                            .read(recentShelfVisibleProvider.notifier)
+                            .set(false),
+                      )
+                    : CollapsedRecentShelf(
+                        count: recent.length,
+                        onShow: () => ref
+                            .read(recentShelfVisibleProvider.notifier)
+                            .set(true),
                       ),
-                      onManage: (book) => _manageBook(context, ref, book),
-                      onHide: () => ref
-                          .read(recentShelfVisibleProvider.notifier)
-                          .set(false),
-                    )
-                  : CollapsedRecentShelf(
-                      count: recent.length,
-                      onShow: () => ref
-                          .read(recentShelfVisibleProvider.notifier)
-                          .set(true),
-                    ),
+              ),
             ),
           if (flatMode && matches.isEmpty)
             SliverFillRemaining(
@@ -731,6 +1181,7 @@ class _BookShelf extends ConsumerWidget {
                 coverRadius: prefs.coverRadius.toDouble(),
                 plankStyle: prefs.plankStyle,
                 showProgress: prefs.showGridProgress,
+                showTitle: prefs.showGridTitle,
                 showRating: prefs.showRating,
                 showTags: prefs.showTags,
                 showDescription: prefs.showDescription,
@@ -747,6 +1198,9 @@ class _BookShelf extends ConsumerWidget {
                   coverPath: item.book.coverPath,
                 ),
                 onManageBook: (item) => _manageBook(context, ref, item.book),
+                onManageCategory: (category) {
+                  if (category != kFavoritesShelf) onManageCategory(category);
+                },
                 onOpenCategory: (category) => ref
                     .read(shelfCategoryFilterProvider.notifier)
                     .set(category),
@@ -757,7 +1211,7 @@ class _BookShelf extends ConsumerWidget {
     );
   }
 
-  /// 长按书籍：先弹操作菜单（继续阅读 / 编辑信息 / 置顶 / 删除），
+  /// 长按书籍：先弹操作菜单（继续阅读 / 编辑信息 / 覆盖导入 / 置顶 / 删除），
   /// 编辑进书籍详情页，删除走「笔记处置」确认。
   Future<void> _manageBook(
     BuildContext context,
@@ -773,6 +1227,12 @@ class _BookShelf extends ConsumerWidget {
         if (context.mounted) {
           unawaited(context.push(bookDetailPath(book.id)));
         }
+      case BookShelfAction.overwriteImport:
+        await startOverwriteImport(context, ref, book);
+      case BookShelfAction.exportData:
+        await exportBookReadingData(context, ref, book);
+      case BookShelfAction.importData:
+        await importBookReadingData(context, ref, book);
       case BookShelfAction.moveToShelf:
         final repo = await ref.read(bookRepositoryProvider.future);
         final shelf = await repo.watchShelf().first;
@@ -792,6 +1252,11 @@ class _BookShelf extends ConsumerWidget {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(target.isEmpty ? '已移出书架' : '已移动到「$target」')),
         );
+      case BookShelfAction.shareBook:
+        await shareOrExportBooks(context, ref, [book]);
+      case BookShelfAction.favorite:
+        final repo = await ref.read(bookRepositoryProvider.future);
+        await repo.setFavorite(book.id, !book.isFavorite);
       case BookShelfAction.pin:
         final repo = await ref.read(bookRepositoryProvider.future);
         await repo.setPinned(book.id, book.pinnedAt == null);
@@ -857,6 +1322,7 @@ class _SelectionBar extends StatelessWidget {
     required this.count,
     required this.busy,
     required this.onDelete,
+    required this.onShare,
     required this.onAddTags,
     required this.onMoveToShelf,
   });
@@ -864,6 +1330,7 @@ class _SelectionBar extends StatelessWidget {
   final int count;
   final bool busy;
   final VoidCallback onDelete;
+  final VoidCallback onShare;
   final VoidCallback onAddTags;
   final VoidCallback onMoveToShelf;
 
@@ -915,6 +1382,12 @@ class _SelectionBar extends StatelessWidget {
                 )
               : Row(
                   children: [
+                    action(
+                      key: const ValueKey('batch-share-button'),
+                      icon: Icons.share_outlined,
+                      label: '分享',
+                      onPressed: onShare,
+                    ),
                     action(
                       key: const ValueKey('batch-delete-button'),
                       icon: Icons.delete_outline,
@@ -968,5 +1441,5 @@ class _SkeletonGrid extends StatelessWidget {
 /// 当前生效的筛选分类：选中项已不存在（被改名/删光）时回退到首屏。
 String _effectiveCategory(String raw, List<String> categories) {
   if (raw.isEmpty) return '';
-  return categories.contains(raw) ? raw : '';
+  return categories.any((c) => c == raw || c.startsWith('$raw/')) ? raw : '';
 }

@@ -97,6 +97,32 @@ enum ProgressScope {
   final String label;
 }
 
+/// 阅读背景图的缩放 / 拉伸方式。
+///
+/// 默认「填充裁切」铺满纸面；不想裁掉图片内容时选「完整显示」，
+/// 想铺满又不变形时选「拉伸铺满」。
+enum BackgroundImageFit {
+  /// 等比放大铺满，超出部分裁掉（默认）。
+  cover('填充裁切'),
+
+  /// 等比缩放到完整可见，四周可能留纸色。
+  contain('完整显示'),
+
+  /// 不保持比例，直接拉伸铺满整页。
+  fill('拉伸铺满'),
+
+  /// 等比缩放到与页宽一致（高度可能超出并裁掉）。
+  fitWidth('适应宽度'),
+
+  /// 等比缩放到与页高一致（宽度可能超出并裁掉）。
+  fitHeight('适应高度');
+
+  const BackgroundImageFit(this.label);
+
+  /// 展示名。
+  final String label;
+}
+
 /// 正文/标题的对齐方式。
 enum TextAlignMode {
   /// 默认（正文左对齐，标题居中）。
@@ -236,6 +262,9 @@ abstract class ReadingSettings with _$ReadingSettings {
 
     /// 自定义阅读背景图（应用内文件路径）；空 = 纯色纸面。
     @Default('') String backgroundImage,
+
+    /// 背景图的缩放 / 拉伸方式（默认填充裁切，可改成完整显示）。
+    @Default(BackgroundImageFit.cover) BackgroundImageFit backgroundFit,
 
     /// 正文字号（14..28）。
     @Default(18.0) double fontSize,
@@ -380,6 +409,7 @@ extension ReadingSettingsJson on ReadingSettings {
   Map<String, dynamic> toMap() => <String, dynamic>{
     'theme': theme.name,
     'backgroundImage': backgroundImage,
+    'backgroundFit': backgroundFit.name,
     'fontSize': fontSize,
     'lineHeight': lineHeight,
     'marginLeft': marginLeft,
@@ -435,6 +465,11 @@ ReadingSettings readingSettingsFromMap(Map<String, dynamic> json) {
     backgroundImage: json['backgroundImage'] is String
         ? json['backgroundImage'] as String
         : '',
+    backgroundFit: _enumOf(
+      BackgroundImageFit.values,
+      json['backgroundFit'],
+      BackgroundImageFit.cover,
+    ),
     fontSize: _clamp((json['fontSize'] as num?)?.toDouble(), 14, 28, 18),
     lineHeight: _clamp((json['lineHeight'] as num?)?.toDouble(), 1.2, 2.4, 1.7),
     marginLeft: _clamp(
@@ -468,56 +503,137 @@ ReadingSettings readingSettingsFromMap(Map<String, dynamic> json) {
     fontFamily: json['fontFamily'] is String
         ? json['fontFamily'] as String
         : '',
-    paragraphSpacing:
-        _clamp((json['paragraphSpacing'] as num?)?.toDouble(), 0, 2, 0.4),
-    letterSpacing:
-        _clamp((json['letterSpacing'] as num?)?.toDouble(), -1, 6, 0),
+    paragraphSpacing: _clamp(
+      (json['paragraphSpacing'] as num?)?.toDouble(),
+      0,
+      2,
+      0.4,
+    ),
+    letterSpacing: _clamp(
+      (json['letterSpacing'] as num?)?.toDouble(),
+      -1,
+      6,
+      0,
+    ),
     bodyBold: json['bodyBold'] == true,
     bodyWeight: _enumOf(
-        BodyFontWeight.values, json['bodyWeight'], BodyFontWeight.normal),
-    bodyAlign:
-        _enumOf(TextAlignMode.values, json['bodyAlign'], TextAlignMode.auto),
+      BodyFontWeight.values,
+      json['bodyWeight'],
+      BodyFontWeight.normal,
+    ),
+    bodyAlign: _enumOf(
+      TextAlignMode.values,
+      json['bodyAlign'],
+      TextAlignMode.auto,
+    ),
     bodyJustify: json['bodyJustify'] != false,
     bodyIndent: _enumOf(
-        ParagraphIndent.values, json['bodyIndent'], ParagraphIndent.auto),
+      ParagraphIndent.values,
+      json['bodyIndent'],
+      ParagraphIndent.auto,
+    ),
     headingStyle: _enumOf(
-        HeadingStyle.values, json['headingStyle'], HeadingStyle.plain),
-    headingFontSize:
-        _clamp((json['headingFontSize'] as num?)?.toDouble(), 16, 40, 24),
+      HeadingStyle.values,
+      json['headingStyle'],
+      HeadingStyle.plain,
+    ),
+    headingFontSize: _clamp(
+      (json['headingFontSize'] as num?)?.toDouble(),
+      16,
+      40,
+      24,
+    ),
     headingBold: json['headingBold'] != false,
     headingAlign: _enumOf(
-        TextAlignMode.values, json['headingAlign'], TextAlignMode.center),
-    headingMarginTop:
-        _clamp((json['headingMarginTop'] as num?)?.toDouble(), 0, 64, 18),
-    headingMarginBottom:
-        _clamp((json['headingMarginBottom'] as num?)?.toDouble(), 0, 64, 12),
+      TextAlignMode.values,
+      json['headingAlign'],
+      TextAlignMode.center,
+    ),
+    headingMarginTop: _clamp(
+      (json['headingMarginTop'] as num?)?.toDouble(),
+      0,
+      64,
+      18,
+    ),
+    headingMarginBottom: _clamp(
+      (json['headingMarginBottom'] as num?)?.toDouble(),
+      0,
+      64,
+      12,
+    ),
     doublePage: json['doublePage'] == true,
     headerLeft: _enumOf(
-        RunningContent.values, json['headerLeft'], RunningContent.none),
+      RunningContent.values,
+      json['headerLeft'],
+      RunningContent.none,
+    ),
     headerCenter: _enumOf(
-        RunningContent.values, json['headerCenter'], RunningContent.none),
+      RunningContent.values,
+      json['headerCenter'],
+      RunningContent.none,
+    ),
     headerRight: _enumOf(
-        RunningContent.values, json['headerRight'], RunningContent.none),
-    headerFontSize:
-        _clamp((json['headerFontSize'] as num?)?.toDouble(), 8, 16, 10),
-    headerMarginTop:
-        _clamp((json['headerMarginTop'] as num?)?.toDouble(), 0, 64, 6),
-    headerMarginLeft:
-        _clamp((json['headerMarginLeft'] as num?)?.toDouble(), 0, 64, 16),
-    headerMarginRight:
-        _clamp((json['headerMarginRight'] as num?)?.toDouble(), 0, 64, 16),
+      RunningContent.values,
+      json['headerRight'],
+      RunningContent.none,
+    ),
+    headerFontSize: _clamp(
+      (json['headerFontSize'] as num?)?.toDouble(),
+      8,
+      16,
+      10,
+    ),
+    headerMarginTop: _clamp(
+      (json['headerMarginTop'] as num?)?.toDouble(),
+      0,
+      64,
+      6,
+    ),
+    headerMarginLeft: _clamp(
+      (json['headerMarginLeft'] as num?)?.toDouble(),
+      0,
+      64,
+      16,
+    ),
+    headerMarginRight: _clamp(
+      (json['headerMarginRight'] as num?)?.toDouble(),
+      0,
+      64,
+      16,
+    ),
     footerLeft: _enumOf(
-        RunningContent.values, json['footerLeft'], RunningContent.none),
+      RunningContent.values,
+      json['footerLeft'],
+      RunningContent.none,
+    ),
     footerCenter: _enumOf(
-        RunningContent.values, json['footerCenter'], RunningContent.none),
+      RunningContent.values,
+      json['footerCenter'],
+      RunningContent.none,
+    ),
     footerRight: _enumOf(
-        RunningContent.values, json['footerRight'], RunningContent.none),
-    footerMarginLeft:
-        _clamp((json['footerMarginLeft'] as num?)?.toDouble(), 0, 64, 16),
-    footerMarginRight:
-        _clamp((json['footerMarginRight'] as num?)?.toDouble(), 0, 64, 16),
-    footerMarginBottom:
-        _clamp((json['footerMarginBottom'] as num?)?.toDouble(), 0, 64, 6),
+      RunningContent.values,
+      json['footerRight'],
+      RunningContent.none,
+    ),
+    footerMarginLeft: _clamp(
+      (json['footerMarginLeft'] as num?)?.toDouble(),
+      0,
+      64,
+      16,
+    ),
+    footerMarginRight: _clamp(
+      (json['footerMarginRight'] as num?)?.toDouble(),
+      0,
+      64,
+      16,
+    ),
+    footerMarginBottom: _clamp(
+      (json['footerMarginBottom'] as num?)?.toDouble(),
+      0,
+      64,
+      6,
+    ),
   );
 }
 
@@ -583,6 +699,7 @@ class ReadingSettingsController extends _$ReadingSettingsController {
   Future<void> patch({
     ReadingTheme? theme,
     String? backgroundImage,
+    BackgroundImageFit? backgroundFit,
     double? fontSize,
     double? lineHeight,
     double? marginLeft,
@@ -629,6 +746,9 @@ class ReadingSettingsController extends _$ReadingSettingsController {
     if (theme != null) next = next.copyWith(theme: theme);
     if (backgroundImage != null) {
       next = next.copyWith(backgroundImage: backgroundImage);
+    }
+    if (backgroundFit != null) {
+      next = next.copyWith(backgroundFit: backgroundFit);
     }
     if (fontSize != null) next = next.copyWith(fontSize: fontSize);
     if (lineHeight != null) next = next.copyWith(lineHeight: lineHeight);

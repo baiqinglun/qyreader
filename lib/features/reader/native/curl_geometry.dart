@@ -114,10 +114,8 @@ class CurlGeometry {
   Offset get foldMid => Offset(foldX, pageSize.height / 2);
 
   /// 折线内侧（新页一侧）阴影的终点。
-  Offset get shadowTo => Offset(
-        foldX + (fromLeft ? -24 : 24),
-        pageSize.height / 2,
-      );
+  Offset get shadowTo =>
+      Offset(foldX + (fromLeft ? -24 : 24), pageSize.height / 2);
 
   /// 折页外缘（原页边折过去后的位置）。
   double get flapEdgeX => fromLeft ? flapRect.right : flapRect.left;

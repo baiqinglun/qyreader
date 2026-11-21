@@ -11,6 +11,8 @@ import '../../../app/theme/motion.dart';
 import '../../../app/theme/reading_theme.dart';
 import '../../../domain/sync/sync_status.dart';
 import '../../reader/fonts/reader_fonts.dart';
+import '../../reader/reader_themes.dart';
+import '../../reader/tts/audio_library.dart';
 import 'sync_backend_settings.dart';
 
 /// 弹出同步面板。
@@ -38,6 +40,10 @@ String syncResultSummary(SyncResult result) {
   if (result.fontsSynced > 0) parts.add('同步 ${result.fontsSynced} 个字体');
   if (result.backgroundsSynced > 0) {
     parts.add('同步 ${result.backgroundsSynced} 张背景');
+  }
+  if (result.audiosSynced > 0) parts.add('同步 ${result.audiosSynced} 个音频');
+  if (result.themesSynced > 0) {
+    parts.add('同步 ${result.themesSynced} 个主题');
   }
   final backupError = result.dbError ?? result.backupError;
   if (backupError != null) parts.add('备份失败：$backupError');
@@ -94,10 +100,10 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
       },
     );
     final status = await repo.status();
-    // 字体也参与同步：拉回来的字体立刻出现在字体列表里（不用重启）
-    unawaited(
-      ref.read(readerFontsControllerProvider.notifier).reload(),
-    );
+    // 字体 / 音频 / 主题也参与同步：拉回来的资源立刻出现在列表里（不用重启）
+    unawaited(ref.read(readerFontsControllerProvider.notifier).reload());
+    unawaited(ref.read(audioLibraryControllerProvider.notifier).reload());
+    unawaited(ref.read(readerThemesControllerProvider.notifier).reload());
     if (!mounted) return;
     setState(() {
       _running = false;
@@ -152,7 +158,7 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                       ),
                     ),
                     IconButton(
-                      tooltip: '存储设置',
+                      tooltip: '同步设置',
                       onPressed: () async {
                         await showSyncBackendSettings(context);
                         await _refreshAfterSettings();
@@ -192,11 +198,7 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                     fg: fg,
                   ),
                   const SizedBox(height: 8),
-                  _InfoRow(
-                    label: '本设备',
-                    value: status.deviceId,
-                    fg: fg,
-                  ),
+                  _InfoRow(label: '本设备', value: status.deviceId, fg: fg),
                   if (status.lastError != null &&
                       status.lastError!.isNotEmpty) ...[
                     const SizedBox(height: 12),
@@ -214,8 +216,8 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                   Text(
                     _lastResult!.ok
                         ? '完成：上传 ${_lastResult!.pushed} 条，'
-                            '拉取 ${_lastResult!.pulled} 条，'
-                            '合并 ${_lastResult!.applied} 条'
+                              '拉取 ${_lastResult!.pulled} 条，'
+                              '合并 ${_lastResult!.applied} 条'
                         : '同步失败：${_lastResult!.error}',
                     style: TextStyle(
                       color: _lastResult!.ok
@@ -241,17 +243,18 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
                   LinearProgressIndicator(
                     value: _progress?.fraction,
                     color: reading.accent,
-                    backgroundColor:
-                        reading.chromeForeground.withValues(alpha: 0.12),
+                    backgroundColor: reading.chromeForeground.withValues(
+                      alpha: 0.12,
+                    ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     _progress == null
                         ? '准备中…'
                         : (_progress!.total > 0
-                            ? '${_progress!.label}'
-                                '（${_progress!.done}/${_progress!.total}）'
-                            : _progress!.label),
+                              ? '${_progress!.label}'
+                                    '（${_progress!.done}/${_progress!.total}）'
+                              : _progress!.label),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -295,11 +298,7 @@ class _SyncSheetState extends ConsumerState<_SyncSheet> {
 }
 
 class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.label,
-    required this.value,
-    required this.fg,
-  });
+  const _InfoRow({required this.label, required this.value, required this.fg});
 
   final String label;
   final String value;
@@ -317,10 +316,7 @@ class _InfoRow extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: Text(
-            value,
-            style: TextStyle(color: fg, fontSize: 13),
-          ),
+          child: Text(value, style: TextStyle(color: fg, fontSize: 13)),
         ),
       ],
     );

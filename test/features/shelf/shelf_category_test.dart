@@ -9,20 +9,20 @@ import 'package:qy_reader/features/shelf/shelf_prefs.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 ShelfItem _item(String id, {String? category}) => ShelfItem(
-      book: Book(
-        id: id,
-        title: '书$id',
-        format: BookFormat.epub,
-        filePath: '/tmp/$id.epub',
-        fileSha256: id,
-        fileSize: 1,
-        addedAt: 0,
-        updatedAt: 0,
-        category: category,
-        hlc: '0000000000000-00000-aaaaaaaa',
-        deviceId: 'aaaaaaaa',
-      ),
-    );
+  book: Book(
+    id: id,
+    title: '书$id',
+    format: BookFormat.epub,
+    filePath: '/tmp/$id.epub',
+    fileSha256: id,
+    fileSize: 1,
+    addedAt: 0,
+    updatedAt: 0,
+    category: category,
+    hlc: '0000000000000-00000-aaaaaaaa',
+    deviceId: 'aaaaaaaa',
+  ),
+);
 
 void main() {
   final items = [
@@ -31,6 +31,38 @@ void main() {
     _item('c'),
     _item('d', category: '小说'),
   ];
+
+  test('逐级展示分类并统计后代，包含空分类', () {
+    final books = [
+      _item('a', category: '小说/科幻'),
+      _item('b', category: '小说'),
+      _item('c'),
+    ];
+    final root = shelfCells(books, extraPaths: ['小说/奇幻', '空分类']);
+    final novel = root.whereType<ShelfCategoryCell>().firstWhere(
+      (c) => c.title == '小说',
+    );
+    expect(novel.books.length, 2);
+    expect(
+      root.whereType<ShelfCategoryCell>().map((c) => c.title),
+      contains('空分类'),
+    );
+    final children = shelfCells(books, parent: '小说', extraPaths: ['小说/奇幻']);
+    expect(children.whereType<ShelfCategoryCell>().map((c) => c.title), [
+      '小说/奇幻',
+      '小说/科幻',
+    ]);
+    expect(children.whereType<ShelfBookCell>().single.item.book.id, 'b');
+  });
+
+  test('收藏分类排在最前且不移除原分类', () {
+    final original = _item('a', category: '小说');
+    final favorite = ShelfItem(book: original.book.copyWith(isFavorite: true));
+    final cells = shelfCells([favorite]);
+    expect((cells.first as ShelfCategoryCell).title, kFavoritesShelf);
+    expect((cells[1] as ShelfCategoryCell).title, '小说');
+    expect((cells.first as ShelfCategoryCell).books.single.book.id, 'a');
+  });
 
   group('分类提取', () {
     test('去重排序，忽略空分类', () {
@@ -46,19 +78,16 @@ void main() {
     });
 
     test('按分类名过滤', () {
-      expect(
-        filterShelfByCategory(items, '小说').map((e) => e.book.id),
-        ['a', 'd'],
-      );
+      expect(filterShelfByCategory(items, '小说').map((e) => e.book.id), [
+        'a',
+        'd',
+      ]);
     });
 
     test('分类名首尾空格不影响归属', () {
       final padded = [_item('x', category: ' 小说 ')];
       expect(shelfCategories(padded), ['小说']);
-      expect(
-        filterShelfByCategory(padded, '小说').map((e) => e.book.id),
-        ['x'],
-      );
+      expect(filterShelfByCategory(padded, '小说').map((e) => e.book.id), ['x']);
     });
   });
 
@@ -69,31 +98,31 @@ void main() {
 
       final categories = cells.whereType<ShelfCategoryCell>().toList();
       expect(categories.map((c) => c.title), ['历史', '小说']);
-      expect(
-        categories[1].books.map((e) => e.book.id),
-        ['a', 'd'],
-      );
+      expect(categories[1].books.map((e) => e.book.id), ['a', 'd']);
 
       final loose = cells.whereType<ShelfBookCell>().toList();
       expect(loose.map((c) => c.item.book.id), ['c']);
       // 分类格整段排在书格前面。
-      expect(cells.indexOf(loose.first), greaterThan(cells.indexOf(categories.last)));
+      expect(
+        cells.indexOf(loose.first),
+        greaterThan(cells.indexOf(categories.last)),
+      );
     });
 
     test('有分类的书不单独占格', () {
-      final loose = shelfCells(items)
-          .whereType<ShelfBookCell>()
-          .map((c) => c.item.book.id);
+      final loose = shelfCells(
+        items,
+      ).whereType<ShelfBookCell>().map((c) => c.item.book.id);
       expect(loose, ['c']);
     });
 
     test('全都没有分类时只剩书格', () {
       final cells = shelfCells([_item('x'), _item('y')]);
       expect(cells.whereType<ShelfCategoryCell>(), isEmpty);
-      expect(
-        cells.whereType<ShelfBookCell>().map((c) => c.item.book.id),
-        ['x', 'y'],
-      );
+      expect(cells.whereType<ShelfBookCell>().map((c) => c.item.book.id), [
+        'x',
+        'y',
+      ]);
     });
   });
 
@@ -115,9 +144,7 @@ void main() {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       expect(container.read(shelfCategoryFilterProvider), '');
-      await container
-          .read(shelfCategoryFilterProvider.notifier)
-          .set('小说');
+      await container.read(shelfCategoryFilterProvider.notifier).set('小说');
       expect(container.read(shelfCategoryFilterProvider), '小说');
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('shelf.categoryFilter'), '小说');

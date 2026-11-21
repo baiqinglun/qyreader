@@ -19,25 +19,24 @@ ShelfItem _item(
   double percent = 0,
   int? rating,
   List<String> tags = const [],
-}) =>
-    ShelfItem(
-      book: Book(
-        id: id,
-        title: '书$id',
-        format: BookFormat.epub,
-        filePath: '/tmp/$id.epub',
-        fileSha256: id,
-        fileSize: 1,
-        addedAt: 0,
-        updatedAt: 0,
-        category: category,
-        rating: rating,
-        tags: tags,
-        hlc: '0000000000000-00000-aaaaaaaa',
-        deviceId: 'aaaaaaaa',
-      ),
-      percent: percent,
-    );
+}) => ShelfItem(
+  book: Book(
+    id: id,
+    title: '书$id',
+    format: BookFormat.epub,
+    filePath: '/tmp/$id.epub',
+    fileSha256: id,
+    fileSize: 1,
+    addedAt: 0,
+    updatedAt: 0,
+    category: category,
+    rating: rating,
+    tags: tags,
+    hlc: '0000000000000-00000-aaaaaaaa',
+    deviceId: 'aaaaaaaa',
+  ),
+  percent: percent,
+);
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -47,12 +46,14 @@ void main() {
     tester.view.physicalSize = const Size(400, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    await tester.pumpWidget(ProviderScope(
-      overrides: [
-        shelfItemsProvider.overrideWith((ref) => Stream.value(items)),
-      ],
-      child: const MaterialApp(home: ShelfPage()),
-    ));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          shelfItemsProvider.overrideWith((ref) => Stream.value(items)),
+        ],
+        child: const MaterialApp(home: ShelfPage()),
+      ),
+    );
     await tester.pumpAndSettle();
   }
 
@@ -74,9 +75,7 @@ void main() {
     final history = tester.getTopLeft(
       find.byKey(const ValueKey('category-历史')),
     );
-    final novel = tester.getTopLeft(
-      find.byKey(const ValueKey('category-小说')),
-    );
+    final novel = tester.getTopLeft(find.byKey(const ValueKey('category-小说')));
     final first = tester.getTopLeft(find.byKey(const ValueKey('book-c')));
 
     // 分类按名字排序，并且排在散落的书前面。
@@ -113,8 +112,118 @@ void main() {
 
     expect(find.byType(CategoryCard), findsNWidgets(2));
     expect(find.byKey(const ValueKey('book-c')), findsOneWidget);
-    expect(find.text('书架'), findsOneWidget);
+    expect(find.text('书架'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('进分类记住首屏位置，返回还在原处', (tester) async {
+    // 两个分类 + 18 本散书：首屏足够高，能滚出明显的位置。
+    await pumpShelf(tester, [
+      _item('a', category: '小说'),
+      _item('n', category: '历史'),
+      for (var i = 0; i < 18; i++) _item('b$i'),
+    ]);
+    final scrollable = find
+        .descendant(
+          of: find.byType(CustomScrollView),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    double pixels() =>
+        tester.state<ScrollableState>(scrollable).position.pixels;
+
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -400));
+    await tester.pumpAndSettle();
+    expect(pixels(), greaterThan(0));
+
+    // 分类格都在首屏顶部：滚回去让目标分类卡可见，
+    // 记录此刻的偏移作为「进入分类前的首屏位置」。
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('category-小说')),
+      -100,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    final before = pixels();
+    expect(before, greaterThan(0));
+
+    // 进分类：从顶部开始展示该分类的书。
+    await tester.tap(find.byKey(const ValueKey('category-小说')));
+    await tester.pumpAndSettle();
+    expect(find.byType(BookCard), findsOneWidget);
+    expect(pixels(), 0);
+
+    // 返回首屏：还在进分类前的位置。
+    await tester.tap(find.byTooltip('返回书架'));
+    await tester.pumpAndSettle();
+    expect(pixels(), before);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('点击搜索框外解除焦点且分类仍可打开', (tester) async {
+    await pumpShelf(tester, [_item('a', category: '小说')]);
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    final focus = tester
+        .widget<EditableText>(find.byType(EditableText))
+        .focusNode;
+    expect(focus.hasFocus, isTrue);
+    await tester.tap(find.byKey(const ValueKey('category-小说')));
+    await tester.pumpAndSettle();
+    expect(focus.hasFocus, isFalse);
+    expect(find.byKey(const ValueKey('book-a')), findsOneWidget);
+  });
+
+  testWidgets('自定义视图恢复保存的分类和标签筛选', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'shelf.customView':
+          '{"category":"小说","tags":["喜欢"],"rating":0,"statuses":[]}',
+    });
+    await pumpShelf(tester, [
+      _item('a', category: '小说', tags: ['喜欢']),
+      _item('b', category: '小说'),
+      _item('c', category: '历史', tags: ['喜欢']),
+    ]);
+    await tester.tap(find.text('自定义'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('book-a')), findsOneWidget);
+    expect(find.byKey(const ValueKey('book-b')), findsNothing);
+    expect(find.byKey(const ValueKey('book-c')), findsNothing);
+    expect(find.text('设置筛选'), findsOneWidget);
+  });
+
+  testWidgets('展开页签切换评分并筛选书籍', (tester) async {
+    await pumpShelf(tester, [
+      _item('a', category: '小说', rating: 5),
+      _item('b', category: '历史', rating: 3),
+    ]);
+    await tester.tap(find.byTooltip('展开书架页签'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('页签分组'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('评分'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('展开书架页签'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ChoiceChip, '5 星'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('book-a')), findsOneWidget);
+    expect(find.byKey(const ValueKey('book-b')), findsNothing);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('shelf.tabGroup'), 'rating');
+  });
+
+  testWidgets('收藏分类在最前且可进入查看', (tester) async {
+    final base = _item('a', category: '小说');
+    final item = ShelfItem(book: base.book.copyWith(isFavorite: true));
+    await pumpShelf(tester, [item]);
+    expect(find.text('收藏'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('category-__qyreader_favorites__')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('book-a')), findsOneWidget);
+    expect(find.text('收藏'), findsOneWidget);
   });
 
   testWidgets('搜索书名：只显示命中的书，清空后恢复', (tester) async {
@@ -207,8 +316,9 @@ void main() {
     expect(find.text('小说'), findsOneWidget); // AppBar 标题
 
     // 模拟 Android 系统返回键（flutter/navigation 的 popRoute）
-    final message = const JSONMethodCodec()
-        .encodeMethodCall(const MethodCall('popRoute'));
+    final message = const JSONMethodCodec().encodeMethodCall(
+      const MethodCall('popRoute'),
+    );
     await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
       SystemChannels.navigation.name,
       message,
@@ -218,7 +328,7 @@ void main() {
 
     // 一次返回就回到书架首屏，不会退出 App。
     expect(find.byType(CategoryCard), findsNWidgets(2));
-    expect(find.text('书架'), findsOneWidget);
+    expect(find.text('书架'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
   });
 
@@ -315,7 +425,7 @@ void main() {
 
     await tester.tap(find.byTooltip('退出多选'));
     await tester.pumpAndSettle();
-    expect(find.text('书架'), findsOneWidget);
+    expect(find.text('书架'), findsNWidgets(2));
     expect(find.byType(CategoryCard), findsNWidgets(2));
   });
 
@@ -354,10 +464,7 @@ void main() {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(ShelfPage)),
     );
-    expect(
-      container.read(appThemeModeControllerProvider),
-      AppThemeMode.system,
-    );
+    expect(container.read(appThemeModeControllerProvider), AppThemeMode.system);
 
     // 测试环境是亮色：点一次应切成暗色（按钮按当前 Theme 亮度决定方向）
     await tester.tap(modeButton);

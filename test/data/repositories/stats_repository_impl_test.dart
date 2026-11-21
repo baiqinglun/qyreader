@@ -1,11 +1,15 @@
 /// 阅读统计仓储单测：会话落库、日聚合、连续天数、目标。
 library;
 
+import 'dart:convert';
+
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:qy_reader/core/db/app_database.dart';
+import 'package:qy_reader/core/hlc.dart';
+import 'package:qy_reader/core/stats_revision.dart';
 import 'package:qy_reader/data/repositories/stats_repository_impl.dart';
 import 'package:qy_reader/domain/entities/reading_stats.dart';
 import 'package:qy_reader/domain/repositories/stats_repository.dart';
@@ -16,6 +20,7 @@ DateTime _todayNoon() {
   final now = DateTime.now();
   return DateTime(now.year, now.month, now.day, 12);
 }
+
 void main() {
   late AppDatabase db;
   late StatsRepository repo;
@@ -24,7 +29,11 @@ void main() {
     TestWidgetsFlutterBinding.ensureInitialized();
     SharedPreferences.setMockInitialValues({});
     db = AppDatabase(NativeDatabase.memory());
-    repo = StatsRepositoryImpl(db: db, deviceId: 'testdev1');
+    repo = StatsRepositoryImpl(
+      db: db,
+      deviceId: 'testdev1',
+      hlcClock: HlcClock(deviceId: 'testdev1'),
+    );
   });
 
   tearDown(() async => db.close());
@@ -73,6 +82,95 @@ void main() {
     expect(total.sessions, 2);
   });
 
+  test('记录会话同时写 session 同步 op（payload 与会话行一致）', () async {
+    final now = _todayNoon().millisecondsSinceEpoch;
+    await repo.recordSession(
+      bookId: 'b1',
+      startedAt: now - 12 * 60 * 1000,
+      endedAt: now,
+      charsRead: 900,
+    );
+    final ops = await db.select(db.syncOps).get();
+    expect(ops, hasLength(1));
+    expect(ops.single.entity, 'session');
+    expect(ops.single.entityId, 'b1');
+    expect(ops.single.op, 'upsert');
+    expect(ops.single.hlc, isNotEmpty);
+    final payload = jsonDecode(ops.single.payload) as Map<String, dynamic>;
+    final session = (await db.select(db.readingSessions).get()).single;
+    expect(payload['id'], session.id);
+    expect(payload['bookId'], 'b1');
+    expect(payload['startedAt'], session.startedAt);
+    expect(payload['endedAt'], session.endedAt);
+    expect(payload['durationMs'], session.durationMs);
+    expect(payload['charsRead'], session.charsRead);
+    expect(payload['deviceId'], session.deviceId);
+    expect(payload['hlc'], isNotEmpty);
+  });
+
+  test('recordSession 传 countedDurationMs：聚合与会话 op 按计入时长', () async {
+    final now = _todayNoon().millisecondsSinceEpoch;
+    await repo.recordSession(
+      bookId: 'b1',
+      startedAt: now - 30 * 60 * 1000,
+      endedAt: now,
+      charsRead: 500,
+      countedDurationMs: 10 * 60 * 1000,
+    );
+    final daily = await db.select(db.dailyStats).get();
+    final total = daily.firstWhere((r) => r.bookId == '');
+    expect(total.durationMs, 10 * 60 * 1000);
+    final session = (await db.select(db.readingSessions).get()).single;
+    expect(session.durationMs, 10 * 60 * 1000);
+    // startedAt/endedAt 保持真实墙钟，计入时长单独承载
+    expect(session.endedAt - session.startedAt, 30 * 60 * 1000);
+    final op = (await db.select(db.syncOps).get()).single;
+    final payload = jsonDecode(op.payload) as Map<String, dynamic>;
+    expect(payload['durationMs'], 10 * 60 * 1000);
+  });
+
+  test('recordSession 落库后 bump 统计修订号（首页/统计页据此刷新）', () async {
+    statsRevision.value = 0;
+    final now = _todayNoon().millisecondsSinceEpoch;
+    await repo.recordSession(
+      bookId: 'b1',
+      startedAt: now - 60 * 1000,
+      endedAt: now,
+      charsRead: 0,
+    );
+    expect(statsRevision.value, 1);
+    await repo.recordSession(
+      bookId: 'b1',
+      startedAt: now,
+      endedAt: now + 60 * 1000,
+      charsRead: 0,
+    );
+    expect(statsRevision.value, 2);
+  });
+
+  test('bookTotals 汇总所有书（排除全书合计行）并按时长排序', () async {
+    final now = _todayNoon().millisecondsSinceEpoch;
+    await repo.recordSession(
+      bookId: 'b1',
+      startedAt: now - 10 * 60 * 1000,
+      endedAt: now,
+      charsRead: 500,
+    );
+    await repo.recordSession(
+      bookId: 'b2',
+      startedAt: now - 30 * 60 * 1000,
+      endedAt: now - 10 * 60 * 1000,
+      charsRead: 900,
+    );
+    final totals = await repo.bookTotals();
+    expect(totals, hasLength(2));
+    expect(totals.first.bookId, 'b2');
+    expect(totals.first.durationMs, 20 * 60 * 1000);
+    expect(totals.first.charsRead, 900);
+    expect(totals.last.bookId, 'b1');
+    expect(totals.last.durationMs, 10 * 60 * 1000);
+  });
+
   test('10 秒以内会话丢弃（误触）', () async {
     final now = _todayNoon().millisecondsSinceEpoch;
     await repo.recordSession(
@@ -110,8 +208,7 @@ void main() {
     expect(stats.totalDays, 2);
     expect(stats.streakDays, 2); // 今天+昨天连续
     expect(stats.recentDays, hasLength(7));
-    expect(stats.recentDays.last.day,
-        stats.recentDays.last.day); // 最后一天是今天
+    expect(stats.recentDays.last.day, stats.recentDays.last.day); // 最后一天是今天
     expect(stats.recentDays.last.durationMs, 12 * 60 * 1000);
     expect(stats.recentDays[5].durationMs, 30 * 60 * 1000); // 昨天
     expect(stats.charsPerMinute, closeTo(3300 / 42, 0.5));
@@ -155,13 +252,12 @@ void main() {
       DateTime start,
       int minutes,
       int chars,
-    ) =>
-        repo.recordSession(
-          bookId: bookId,
-          startedAt: start.millisecondsSinceEpoch,
-          endedAt: start.add(Duration(minutes: minutes)).millisecondsSinceEpoch,
-          charsRead: chars,
-        );
+    ) => repo.recordSession(
+      bookId: bookId,
+      startedAt: start.millisecondsSinceEpoch,
+      endedAt: start.add(Duration(minutes: minutes)).millisecondsSinceEpoch,
+      charsRead: chars,
+    );
 
     test('周：7 天桶 + 按书聚合（时长降序）', () async {
       final monday = DateTime(2026, 1, 5); // 周一
@@ -263,13 +359,17 @@ void main() {
       final base = _todayNoon();
       await repo.recordSession(
         bookId: 'b1',
-        startedAt: base.subtract(const Duration(days: 1, minutes: 20)).millisecondsSinceEpoch,
+        startedAt: base
+            .subtract(const Duration(days: 1, minutes: 20))
+            .millisecondsSinceEpoch,
         endedAt: base.subtract(const Duration(days: 1)).millisecondsSinceEpoch,
         charsRead: 800,
       );
       await repo.recordSession(
         bookId: 'b1',
-        startedAt: base.subtract(const Duration(days: 2, minutes: 30)).millisecondsSinceEpoch,
+        startedAt: base
+            .subtract(const Duration(days: 2, minutes: 30))
+            .millisecondsSinceEpoch,
         endedAt: base.subtract(const Duration(days: 2)).millisecondsSinceEpoch,
         charsRead: 900,
       );
@@ -277,10 +377,7 @@ void main() {
       final daily = await repo.bookDailyDurations('b1', days: 14);
       expect(daily, hasLength(2));
       // 昨天读 20 分钟、前天读 30 分钟（时长各归各日）
-      expect(daily.values.toSet(), {
-        20 * 60 * 1000,
-        30 * 60 * 1000,
-      });
+      expect(daily.values.toSet(), {20 * 60 * 1000, 30 * 60 * 1000});
 
       // 窗口收窄到 2 天（含今天）：只剩昨天这一条
       final yesterdayOnly = await repo.bookDailyDurations('b1', days: 2);

@@ -17,6 +17,9 @@ abstract interface class AnnotationRepository {
   /// 监听某本书的标注（增删改实时刷新）。
   Stream<List<Annotation>> watchForBook(String bookId);
 
+  /// 监听全库标注（「笔记回顾」用；新在前）。
+  Stream<List<Annotation>> watchAll();
+
   /// 新增划线。
   Future<Annotation> addHighlight({
     required String bookId,
@@ -27,9 +30,13 @@ abstract interface class AnnotationRepository {
     required String quotedText,
     String? href,
     int? chapterIndex,
+
     /// 原生文本模式的章内字符区间（null = 靠 CFI 定位）。
     int? offset,
     int? offsetEnd,
+
+    /// 标注类型：高亮 / 下划线（默认高亮）。
+    AnnotationType type = AnnotationType.highlight,
   });
 
   /// 修改划线颜色。
@@ -39,7 +46,10 @@ abstract interface class AnnotationRepository {
   Future<void> setNote(String id, String note);
 
   /// 改写划线的锚点（原生文本模式把 CFI 迁移成章索引+字符偏移）。
-  Future<void> setAnchor(String id, String locatorJson);
+  ///
+  /// [locatorEnd] 省略时与 [locatorJson] 相同（旧调用语义）；覆盖导入
+  /// 匹配笔记位置时会同时给出新的起点/终点，让高亮范围也一起更新。
+  Future<void> setAnchor(String id, String locatorJson, {String? locatorEnd});
 
   /// 删除标注（软删）。
   Future<void> remove(String id);
@@ -51,6 +61,9 @@ abstract interface class AnnotationRepository {
 
   /// 监听某本书的书签。
   Stream<List<Bookmark>> watchBookmarks(String bookId);
+
+  /// 监听全库书签（「笔记回顾」用；新在前）。
+  Stream<List<Bookmark>> watchAllBookmarks();
 
   /// 新增书签。
   Future<Bookmark> addBookmark({

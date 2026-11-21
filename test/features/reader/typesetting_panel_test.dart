@@ -1,6 +1,8 @@
 /// 排版面板交互单测：选项型设置统一走下拉框，选中后真的写进设置。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,8 +30,11 @@ Future<ProviderContainer> _pumpPanel(WidgetTester tester) async {
 
 /// 点开一个下拉框并选中某个选项。
 Future<void> _pick(WidgetTester tester, Finder dropdown, String option) async {
-  await tester.scrollUntilVisible(dropdown, 80,
-      scrollable: find.byType(Scrollable).last);
+  await tester.scrollUntilVisible(
+    dropdown,
+    80,
+    scrollable: find.byType(Scrollable).last,
+  );
   await tester.pumpAndSettle();
   await tester.tap(dropdown);
   await tester.pumpAndSettle();
@@ -74,6 +79,28 @@ void main() {
     expect(
       container.read(readingSettingsControllerProvider).bodyWeight,
       BodyFontWeight.semiBold,
+    );
+  });
+
+  testWidgets('页面页签：背景图可切完整显示，不再强制裁切', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'reader.settings': jsonEncode(
+        const ReadingSettings(backgroundImage: '/tmp/bg.png').toMap(),
+      ),
+    });
+    final container = await _pumpPanel(tester);
+
+    await tester.tap(find.text('页面'));
+    await tester.pumpAndSettle();
+
+    await _pick(
+      tester,
+      find.byType(DropdownButton<BackgroundImageFit>),
+      BackgroundImageFit.contain.label,
+    );
+    expect(
+      container.read(readingSettingsControllerProvider).backgroundFit,
+      BackgroundImageFit.contain,
     );
   });
 

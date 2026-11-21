@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面组件暗色（跟随系统深色模式） -->
+    <color name="widget_card">#1E1F23</color>
+    <color name="widget_text_primary">#F2F3F7</color>
+    <color name="widget_text_secondary">#9BA1AE</color>
+    <color name="widget_track">#33363D</color>
+    <color name="widget_accent">#5AA0FF</color>
+    <color name="widget_cover_placeholder">#2A2D34</color>
+</resources>

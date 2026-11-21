@@ -38,18 +38,16 @@ class SyncStatus {
     bool? running,
     String? deviceId,
     String? spaceId,
-  }) =>
-      SyncStatus(
-        pendingOps: pendingOps ?? this.pendingOps,
-        lastSyncAt: lastSyncAt == _sentinel
-            ? this.lastSyncAt
-            : lastSyncAt as DateTime?,
-        lastError:
-            lastError == _sentinel ? this.lastError : lastError as String?,
-        running: running ?? this.running,
-        deviceId: deviceId ?? this.deviceId,
-        spaceId: spaceId ?? this.spaceId,
-      );
+  }) => SyncStatus(
+    pendingOps: pendingOps ?? this.pendingOps,
+    lastSyncAt: lastSyncAt == _sentinel
+        ? this.lastSyncAt
+        : lastSyncAt as DateTime?,
+    lastError: lastError == _sentinel ? this.lastError : lastError as String?,
+    running: running ?? this.running,
+    deviceId: deviceId ?? this.deviceId,
+    spaceId: spaceId ?? this.spaceId,
+  );
 
   static const Object _sentinel = Object();
 }
@@ -68,6 +66,8 @@ class SyncResult {
     this.backupError,
     this.fontsSynced = 0,
     this.backgroundsSynced = 0,
+    this.audiosSynced = 0,
+    this.themesSynced = 0,
     this.error,
   });
 
@@ -103,6 +103,12 @@ class SyncResult {
 
   /// 本次同步的背景图数（上传 + 下载）。
   final int backgroundsSynced;
+
+  /// 本次同步的音频数（上传 + 下载）。
+  final int audiosSynced;
+
+  /// 本次同步的阅读主题数（上传 + 下载）。
+  final int themesSynced;
 
   /// 失败原因；null = 成功。
   final String? error;

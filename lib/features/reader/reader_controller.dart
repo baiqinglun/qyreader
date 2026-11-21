@@ -90,30 +90,28 @@ class ReaderState {
     int? bookPages,
     bool? locationsReady,
     Object? loadError = _sentinel,
-  }) =>
-      ReaderState(
-        book: book ?? this.book,
-        chapters: chapters ?? this.chapters,
-        initialLocator: initialLocator == _sentinel
-            ? this.initialLocator
-            : initialLocator as Locator?,
-        currentLocator: currentLocator == _sentinel
-            ? this.currentLocator
-            : currentLocator as Locator?,
-        percent: percent == _sentinel ? this.percent : percent as double?,
-        currentChapterIndex: currentChapterIndex == _sentinel
-            ? this.currentChapterIndex
-            : currentChapterIndex as int?,
-        atStart: atStart ?? this.atStart,
-        atEnd: atEnd ?? this.atEnd,
-        chapterPage: chapterPage ?? this.chapterPage,
-        chapterPages: chapterPages ?? this.chapterPages,
-        bookPage: bookPage ?? this.bookPage,
-        bookPages: bookPages ?? this.bookPages,
-        locationsReady: locationsReady ?? this.locationsReady,
-        loadError:
-            loadError == _sentinel ? this.loadError : loadError as String?,
-      );
+  }) => ReaderState(
+    book: book ?? this.book,
+    chapters: chapters ?? this.chapters,
+    initialLocator: initialLocator == _sentinel
+        ? this.initialLocator
+        : initialLocator as Locator?,
+    currentLocator: currentLocator == _sentinel
+        ? this.currentLocator
+        : currentLocator as Locator?,
+    percent: percent == _sentinel ? this.percent : percent as double?,
+    currentChapterIndex: currentChapterIndex == _sentinel
+        ? this.currentChapterIndex
+        : currentChapterIndex as int?,
+    atStart: atStart ?? this.atStart,
+    atEnd: atEnd ?? this.atEnd,
+    chapterPage: chapterPage ?? this.chapterPage,
+    chapterPages: chapterPages ?? this.chapterPages,
+    bookPage: bookPage ?? this.bookPage,
+    bookPages: bookPages ?? this.bookPages,
+    locationsReady: locationsReady ?? this.locationsReady,
+    loadError: loadError == _sentinel ? this.loadError : loadError as String?,
+  );
 
   static const Object _sentinel = Object();
 }
@@ -155,6 +153,31 @@ BookReadStatus readStatusForProgress(double? percent) =>
 @riverpod
 class ReaderController extends _$ReaderController {
   Timer? _saveDebounce;
+
+  /// 划线跳转期间挂起进度落库：默认不把「跳去看划线」当成阅读进度。
+  bool _progressHold = false;
+
+  /// 当前是否挂起进度落库。
+  bool get progressHold => _progressHold;
+
+  /// 开始挂起进度落库（划线跳转前调用）。
+  void holdProgress() {
+    _progressHold = true;
+    _saveDebounce?.cancel();
+  }
+
+  /// 取消挂起但不写当前页（返回原位置 / 退出阅读器时用）。
+  void cancelProgressHold() {
+    _progressHold = false;
+    _saveDebounce?.cancel();
+  }
+
+  /// 结束挂起；[saveCurrent] 为 true 时把当前页写成阅读进度。
+  Future<void> releaseProgress({required bool saveCurrent}) async {
+    _progressHold = false;
+    _saveDebounce?.cancel();
+    if (saveCurrent) await flushProgress();
+  }
 
   /// 页面销毁后异步链（init 的多次 await）不得再写 state，
   /// 否则触发 defunct 元素断言（debug 崩溃）。
@@ -237,7 +260,7 @@ class ReaderController extends _$ReaderController {
       bookPage: bookPage,
       bookPages: bookPages,
     );
-    _scheduleSave();
+    if (!_progressHold) _scheduleSave();
   }
 
   /// locations 生成完成。
@@ -263,6 +286,7 @@ class ReaderController extends _$ReaderController {
   /// 立即落库（退出阅读器时调用）。
   Future<void> flushProgress() async {
     _saveDebounce?.cancel();
+    if (_progressHold) return;
     final locator = state.currentLocator;
     final percent = state.percent ?? locator?.pos;
     if (locator == null || percent == null) return;
@@ -275,6 +299,7 @@ class ReaderController extends _$ReaderController {
   /// 保证存的是用户最后看到的那一页。
   Future<void> saveLocator(Locator locator) async {
     _saveDebounce?.cancel();
+    if (_progressHold) return;
     final percent = locatorPercent(locator);
     state = state.copyWith(
       currentLocator: locator,
@@ -286,6 +311,7 @@ class ReaderController extends _$ReaderController {
   }
 
   Future<void> _write(Locator locator, double percent) async {
+    if (_progressHold) return;
     final progressRepo = await ref.read(progressRepositoryProvider.future);
     try {
       await progressRepo.saveProgress(

@@ -23,6 +23,7 @@ class CategoryCard extends StatelessWidget {
     required this.title,
     required this.items,
     required this.onOpen,
+    this.onLongPress,
     this.coverRadius = 20,
     super.key,
   });
@@ -36,6 +37,9 @@ class CategoryCard extends StatelessWidget {
   /// 点开分类。
   final VoidCallback onOpen;
 
+  /// 长按分类（弹出管理菜单）。
+  final VoidCallback? onLongPress;
+
   /// 卡片圆角（书架设置，0..24）。
   final double coverRadius;
 
@@ -48,7 +52,10 @@ class CategoryCard extends StatelessWidget {
       button: true,
       child: PressableScale(
         onTap: onOpen,
+        onLongPress: onLongPress,
         child: Card(
+          // 卡片与书卡同尺寸，内部书位留出边距。
+          margin: EdgeInsets.zero,
           clipBehavior: Clip.antiAlias,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(coverRadius),
@@ -57,7 +64,7 @@ class CategoryCard extends StatelessWidget {
             ),
           ),
           child: Padding(
-            padding: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(6),
             child: _Quad(
               books: _preview(items),
               slotRadius: coverRadius > 8 ? 8.0 : coverRadius,
@@ -75,6 +82,7 @@ class CategoryListTile extends StatelessWidget {
     required this.title,
     required this.items,
     required this.onOpen,
+    this.onLongPress,
     this.coverRadius = 20,
     super.key,
   });
@@ -88,6 +96,9 @@ class CategoryListTile extends StatelessWidget {
   /// 点开分类。
   final VoidCallback onOpen;
 
+  /// 长按分类（弹出管理菜单）。
+  final VoidCallback? onLongPress;
+
   /// 缩略图圆角（书架设置，最大用到 8，避免小图变成圆形）。
   final double coverRadius;
 
@@ -96,6 +107,7 @@ class CategoryListTile extends StatelessWidget {
     final theme = Theme.of(context);
     return PressableScale(
       onTap: onOpen,
+      onLongPress: onLongPress,
       child: Card(
         margin: EdgeInsets.zero,
         clipBehavior: Clip.antiAlias,
@@ -179,15 +191,15 @@ class _Quad extends StatelessWidget {
               );
 
         Widget row(int a, int b) => SizedBox(
-              height: slotH,
-              child: Row(
-                children: [
-                  SizedBox(width: slotW, child: slot(a)),
-                  const SizedBox(width: gap),
-                  SizedBox(width: slotW, child: slot(b)),
-                ],
-              ),
-            );
+          height: slotH,
+          child: Row(
+            children: [
+              SizedBox(width: slotW, child: slot(a)),
+              const SizedBox(width: gap),
+              SizedBox(width: slotW, child: slot(b)),
+            ],
+          ),
+        );
 
         return Center(
           child: SizedBox(
@@ -255,18 +267,22 @@ class _BlankBook extends StatelessWidget {
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.9)),
       ),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Container(
-          width: 3,
-          margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 0),
-          decoration: BoxDecoration(
-            color: scheme.outline.withValues(alpha: 0.55),
-            borderRadius: const BorderRadius.horizontal(
-              right: Radius.circular(2),
+      child: Stack(
+        children: [
+          Positioned(
+            left: 2,
+            top: 6,
+            bottom: 6,
+            width: 3,
+            child: DecoratedBox(
+              key: const ValueKey('category-placeholder-spine'),
+              decoration: BoxDecoration(
+                color: scheme.outline.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:qy_reader/core/db/app_database.dart';
 import 'package:qy_reader/core/hlc.dart';
+import 'package:qy_reader/core/locator.dart';
 import 'package:qy_reader/data/repositories/annotation_repository_impl.dart';
 import 'package:qy_reader/domain/entities/annotation.dart';
 import 'package:qy_reader/domain/repositories/annotation_repository.dart';
@@ -49,6 +50,48 @@ void main() {
     expect(ops.single.op, 'upsert');
   });
 
+  test('watchAll / watchAllBookmarks 返回全库未删除笔记', () async {
+    final a1 = await repo.addHighlight(
+      bookId: 'b1',
+      cfiRange: 'epubcfi(/6/4!/4/2,/1:0,/1:20)',
+      color: AnnotationColor.yellow,
+      quotedText: '山川湖海',
+    );
+    await repo.addHighlight(
+      bookId: 'b2',
+      cfiRange: 'epubcfi(/6/4!/4/2,/1:0,/1:20)',
+      color: AnnotationColor.blue,
+      quotedText: '日月星辰',
+    );
+    await repo.addBookmark(bookId: 'b1', locatorJson: '{}', label: '这里');
+    await repo.remove(a1.id);
+
+    final all = await repo.watchAll().first;
+    expect(all, hasLength(1));
+    expect(all.single.bookId, 'b2');
+    final marks = await repo.watchAllBookmarks().first;
+    expect(marks, hasLength(1));
+    expect(marks.single.label, '这里');
+  });
+
+  test('addHighlight 可创建下划线类型', () async {
+    final a = await repo.addHighlight(
+      bookId: 'b1',
+      cfiRange: '',
+      color: AnnotationColor.blue,
+      quotedText: '下划线',
+      chapterIndex: 0,
+      offset: 1,
+      offsetEnd: 3,
+      type: AnnotationType.underline,
+    );
+    expect(a.type, AnnotationType.underline);
+    final rows = await repo.listForBook('b1');
+    expect(rows.single.type, AnnotationType.underline);
+    final op = await db.select(db.syncOps).getSingle();
+    expect(op.payload, contains('"type":"underline"'));
+  });
+
   test('setColor / setNote 更新且 sync_ops 追加；setNote 空串清笔记回 highlight', () async {
     final a = await repo.addHighlight(
       bookId: 'b1',
@@ -72,6 +115,35 @@ void main() {
 
     final ops = await db.select(db.syncOps).get();
     expect(ops, hasLength(4)); // add + setColor + setNote×2
+  });
+
+  test('setAnchor 同时更新起点/终点（覆盖导入匹配笔记用）', () async {
+    final a = await repo.addHighlight(
+      bookId: 'b1',
+      cfiRange: 'epubcfi(/6/4!/4/2,/1:0,/1:20)',
+      color: AnnotationColor.yellow,
+      quotedText: '山川湖海',
+      chapterIndex: 0,
+    );
+    final anchor = locatorToJson(
+      const Locator(
+        href: 'c1.xhtml',
+        chapterIndex: 1,
+        offset: 3,
+        offsetEnd: 12,
+      ),
+    );
+
+    await repo.setAnchor(a.id, anchor, locatorEnd: anchor);
+
+    final row = (await repo.listForBook('b1')).single;
+    expect(row.locatorStart, anchor);
+    expect(row.locatorEnd, anchor);
+    expect(row.chapterIndex, 1);
+    expect(row.href, 'c1.xhtml');
+    final op = (await db.select(db.syncOps).get()).last;
+    expect(op.payload, contains('"locatorEnd"'));
+    expect(op.payload, contains('c1.xhtml'));
   });
 
   test('remove 软删：列表不可见、watch 刷新、sync_ops 记 delete', () async {
@@ -101,21 +173,29 @@ void main() {
     expect(ops.last.op, 'delete');
   });
 
-  test('书签：新增/删除/列表，sync_ops 同事务', () async {
+  test('书签：新增/删除/列表，备注随 sync_ops 落库', () async {
     final bm = await repo.addBookmark(
       bookId: 'b1',
-      locatorJson: '{"v":1,"cfi":"epubcfi(/6/4!/4:0)","href":"OEBPS/ch1.xhtml"}',
+      locatorJson:
+          '{"v":1,"cfi":"epubcfi(/6/4!/4:0)","href":"OEBPS/ch1.xhtml"}',
+      label: '这一页很重要',
     );
 
     var rows = await repo.listBookmarks('b1');
     expect(rows, hasLength(1));
     expect(rows.single.locator, contains('epubcfi'));
+    expect(rows.single.label, '这一页很重要');
+
+    final ops = await db.select(db.syncOps).get();
+    expect(ops.single.entity, 'bookmark');
+    expect(ops.single.op, 'upsert');
+    expect(ops.single.payload, contains('这一页很重要'));
 
     await repo.removeBookmark(bm.id);
     expect(await repo.listBookmarks('b1'), isEmpty);
 
-    final ops = await db.select(db.syncOps).get();
-    expect(ops.map((o) => o.entity), ['bookmark', 'bookmark']);
-    expect(ops.last.op, 'delete');
+    final allOps = await db.select(db.syncOps).get();
+    expect(allOps.map((o) => o.entity), ['bookmark', 'bookmark']);
+    expect(allOps.last.op, 'delete');
   });
 }

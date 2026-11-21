@@ -12,6 +12,8 @@ import 'package:flutter/foundation.dart' show compute;
 import 'package:xml/xml.dart';
 
 import '../../../core/result.dart';
+import 'epub_block_style.dart';
+import 'epub_css.dart';
 
 /// 章内一个排版块（标题或正文段落）。
 ///
@@ -22,6 +24,7 @@ class ParsedBlock {
     required this.text,
     this.level = 0,
     this.centered = false,
+    this.style,
   });
 
   /// 块文本（空白已收敛）。
@@ -32,6 +35,9 @@ class ParsedBlock {
 
   /// 原书是否显式要求居中。
   final bool centered;
+
+  /// 原书样式（精排用；null = 没解析到）。
+  final EpubBlockStyle? style;
 }
 
 /// 解析产出的章节。
@@ -48,6 +54,8 @@ class ParsedChapter {
     this.paragraphStarts = const <int>[],
     this.paragraphLevels = const <int>[],
     this.paragraphCentered = const <bool>[],
+    this.paragraphStyles = const <EpubBlockStyle>[],
+    this.paragraphStyleIds = const <int>[],
   });
 
   /// 章序号（0 基）。
@@ -83,26 +91,35 @@ class ParsedChapter {
   /// 段落是否原书居中。
   final List<bool> paragraphCentered;
 
+  /// 原书段落样式表（精排用；与 [paragraphStyleIds] 配合）。
+  final List<EpubBlockStyle> paragraphStyles;
+
+  /// 每段在 [paragraphStyles] 里的下标（-1 = 没有原书样式）。
+  final List<int> paragraphStyleIds;
+
   /// 拷贝（正文提取回填用）。
   ParsedChapter copyWith({
     String? bodyText,
     List<int>? paragraphStarts,
     List<int>? paragraphLevels,
     List<bool>? paragraphCentered,
-  }) =>
-      ParsedChapter(
-        idx: idx,
-        title: title,
-        href: href,
-        level: level,
-        anchor: anchor,
-        startOffset: startOffset,
-        charCount: charCount,
-        bodyText: bodyText ?? this.bodyText,
-        paragraphStarts: paragraphStarts ?? this.paragraphStarts,
-        paragraphLevels: paragraphLevels ?? this.paragraphLevels,
-        paragraphCentered: paragraphCentered ?? this.paragraphCentered,
-      );
+    List<EpubBlockStyle>? paragraphStyles,
+    List<int>? paragraphStyleIds,
+  }) => ParsedChapter(
+    idx: idx,
+    title: title,
+    href: href,
+    level: level,
+    anchor: anchor,
+    startOffset: startOffset,
+    charCount: charCount,
+    bodyText: bodyText ?? this.bodyText,
+    paragraphStarts: paragraphStarts ?? this.paragraphStarts,
+    paragraphLevels: paragraphLevels ?? this.paragraphLevels,
+    paragraphCentered: paragraphCentered ?? this.paragraphCentered,
+    paragraphStyles: paragraphStyles ?? this.paragraphStyles,
+    paragraphStyleIds: paragraphStyleIds ?? this.paragraphStyleIds,
+  );
 }
 
 /// 解析产出：元数据 + 章节 + 封面字节。
@@ -151,6 +168,7 @@ class ParsedEbook {
 ParsedEbook parseEpub(
   Uint8List bytes,
   String fileName, {
+
   /// 是否提取段落结构（阅读器需要；导入/同步只取纯文本时可关掉省内存）。
   bool withParagraphs = true,
 }) {
@@ -187,18 +205,40 @@ ParsedEbook parseEpub(
   final opfDir = _parentDir(opfPath);
 
   final title = opf.findAllElements('dc:title').firstOrNull?.innerText.trim();
-  final author =
-      opf.findAllElements('dc:creator').firstOrNull?.innerText.trim();
-  final language =
-      opf.findAllElements('dc:language').firstOrNull?.innerText.trim();
-  final description =
-      opf.findAllElements('dc:description').firstOrNull?.innerText.trim();
+  final author = opf
+      .findAllElements('dc:creator')
+      .firstOrNull
+      ?.innerText
+      .trim();
+  final language = opf
+      .findAllElements('dc:language')
+      .firstOrNull
+      ?.innerText
+      .trim();
+  final description = opf
+      .findAllElements('dc:description')
+      .firstOrNull
+      ?.innerText
+      .trim();
 
   // manifest: id → item
   final manifestItems = <String, XmlNode>{};
   for (final item in opf.findAllElements('item')) {
     final id = item.getAttribute('id');
     if (id != null) manifestItems[id] = item;
+  }
+
+  // 外部样式表（精排用）：一次性读入，拼给每章 XHTML 的 CSS 解析器。
+  final externalCss = StringBuffer();
+  for (final item in manifestItems.values) {
+    final type = item.getAttribute('media-type');
+    final href = item.getAttribute('href');
+    if (href == null) continue;
+    if (type != 'text/css' && !href.toLowerCase().endsWith('.css')) continue;
+    final css = reader.readAsString(_joinPath(opfDir, _decodeHref(href)));
+    if (css != null && css.trim().isNotEmpty) {
+      externalCss.writeln(css);
+    }
   }
 
   // spine: 文档顺序 idref
@@ -250,7 +290,11 @@ ParsedEbook parseEpub(
       }
       continue;
     }
-    final segments = _splitByAnchors(raw, [for (final c in sources) c.anchor]);
+    final segments = _splitByAnchors(
+      raw,
+      [for (final c in sources) c.anchor],
+      externalCss: externalCss.toString(),
+    );
     // 文档开头、第一个锚点之前的内容：属于上一个目录条目（跨文件续章）。
     // 全书第一份文档没有上一章，前置内容（封面 / 版权页）并进第一章。
     if (segments.leading.isNotEmpty) {
@@ -276,19 +320,24 @@ ParsedEbook parseEpub(
     final source = chapters[sourceIndex];
     final merged = _mergeHardWrappedBlocks(blocksByChapter[sourceIndex]!);
     final data = _layoutOfBlocks(merged, withParagraphs: withParagraphs);
-    rebuilt.add(ParsedChapter(
-      idx: rebuilt.length,
-      title: source.title,
-      href: source.href,
-      level: source.level,
-      anchor: source.anchor,
-      startOffset: source.startOffset,
-      charCount: source.charCount,
-      bodyText: data.text,
-      paragraphStarts: data.starts,
-      paragraphLevels: data.levels,
-      paragraphCentered: data.centered,
-    ));
+    rebuilt.add(
+      ParsedChapter(
+        idx: rebuilt.length,
+        title: source.title,
+        href: source.href,
+        level: source.level,
+        anchor: source.anchor,
+        startOffset: source.startOffset,
+        // 章内字符数以正文纯文本为准（目录条目本身没有字数）。
+        charCount: data.text.length,
+        bodyText: data.text,
+        paragraphStarts: data.starts,
+        paragraphLevels: data.levels,
+        paragraphCentered: data.centered,
+        paragraphStyles: data.styles,
+        paragraphStyleIds: data.styleIds,
+      ),
+    );
   }
   chapters = rebuilt;
 
@@ -328,15 +377,11 @@ Future<ParsedEbook> parseEpubInIsolate(
   Uint8List bytes,
   String fileName, {
   bool withParagraphs = true,
-}) =>
-    compute(
-      (req) => parseEpub(
-        req.bytes,
-        req.fileName,
-        withParagraphs: req.withParagraphs,
-      ),
-      _ParseRequest(bytes, fileName, withParagraphs),
-    );
+}) => compute(
+  (req) =>
+      parseEpub(req.bytes, req.fileName, withParagraphs: req.withParagraphs),
+  _ParseRequest(bytes, fileName, withParagraphs),
+);
 
 class _ParseRequest {
   const _ParseRequest(this.bytes, this.fileName, this.withParagraphs);
@@ -494,8 +539,8 @@ List<ParsedChapter> _parseNav(
   final navs = doc.findAllElements('nav').toList();
   XmlElement? tocNav;
   for (final n in navs) {
-    final type = n.getAttribute('type',
-            namespace: 'http://www.idpf.org/2007/ops') ??
+    final type =
+        n.getAttribute('type', namespace: 'http://www.idpf.org/2007/ops') ??
         n.getAttribute('epub:type');
     if (type == 'toc') {
       tocNav = n;
@@ -542,11 +587,14 @@ List<ParsedChapter> _parseNcx(
   final result = <ParsedChapter>[];
 
   void walk(XmlElement navPoint, int level) {
-    final label = navPoint.findElements('navLabel').firstOrNull?.innerText ??
+    final label =
+        navPoint.findElements('navLabel').firstOrNull?.innerText ??
         navPoint.findElements('text').firstOrNull?.innerText ??
         '';
-    final content =
-        navPoint.findElements('content').firstOrNull?.getAttribute('src');
+    final content = navPoint
+        .findElements('content')
+        .firstOrNull
+        ?.getAttribute('src');
     if (label.trim().isNotEmpty && content != null) {
       result.add(
         ParsedChapter(
@@ -589,7 +637,8 @@ List<ParsedChapter> _chaptersFromSpine(
     if (raw != null) {
       try {
         final doc = XmlDocument.parse(raw);
-        title = doc.findAllElements('title').firstOrNull?.innerText.trim() ??
+        title =
+            doc.findAllElements('title').firstOrNull?.innerText.trim() ??
             doc.findAllElements('h1').firstOrNull?.innerText.trim() ??
             '';
       } on XmlException {
@@ -616,12 +665,16 @@ class _ChapterLayoutData {
     this.starts,
     this.levels,
     this.centered,
+    this.styles,
+    this.styleIds,
   );
 
   final String text;
   final List<int> starts;
   final List<int> levels;
   final List<bool> centered;
+  final List<EpubBlockStyle> styles;
+  final List<int> styleIds;
 }
 
 /// 把一章 XHTML 拆成「标题 + 正文段落」块序列（测试/工具用）。
@@ -631,14 +684,28 @@ class _ChapterLayoutData {
 /// 也不会把包裹用的 <div> 拆成一段空白。
 List<ParsedBlock> extractChapterBlocks(String raw) {
   final blocks = <ParsedBlock>[];
-  _forEachBlock(raw, (text, level, centered) {
-    blocks.add(ParsedBlock(text: text, level: level, centered: centered));
+  _forEachBlock(raw, (text, level, centered, style) {
+    blocks.add(
+      ParsedBlock(
+        text: text,
+        level: level,
+        centered: centered,
+        style: style,
+      ),
+    );
   });
-  final merged = _mergeHardWrappedBlocks(
-    [for (final b in blocks) _TextBlock(b.text, b.level, b.centered)],
-  );
+  final merged = _mergeHardWrappedBlocks([
+    for (final b in blocks)
+      _TextBlock(b.text, b.level, b.centered, b.style),
+  ]);
   return [
-    for (final b in merged) ParsedBlock(text: b.text, level: b.level, centered: b.centered),
+    for (final b in merged)
+      ParsedBlock(
+        text: b.text,
+        level: b.level,
+        centered: b.centered,
+        style: b.style,
+      ),
   ];
 }
 
@@ -649,10 +716,18 @@ List<ParsedBlock> extractChapterBlocks(String raw) {
 /// 锚点所在块本身没正文时（锚点独占一段），正好落到后面的正文块。
 void _forEachBlock(
   String raw,
-  void Function(String text, int level, bool centered) emit, {
+  void Function(
+    String text,
+    int level,
+    bool centered,
+    EpubBlockStyle? style,
+  )
+  emit, {
   void Function(String anchor, int blockIndex)? onAnchor,
+  String externalCss = '',
 }) {
   var emitted = 0;
+  final css = EpubCssResolver.parse(raw, externalCss: externalCss);
   void reportAnchor(XmlElement el) {
     final report = onAnchor;
     if (report == null) return;
@@ -673,7 +748,7 @@ void _forEachBlock(
     }
   }
 
-  void add(String text, int level, bool centered) {
+  void add(String text, int level, bool centered, EpubBlockStyle? style) {
     // 有的（盗版转制）书把标签打散成正文文本，例如一段以
     // `div class="kindle..." aid="11"> 正文...` 开头。带属性的「标签前缀」
     // 不可能是正常段落，剥掉前缀保留后面的正文。
@@ -687,14 +762,17 @@ void _forEachBlock(
         )
         .replaceAll(RegExp(r'</[A-Za-z0-9]*>?'), '')
         .trim();
-    if (cleaned.isEmpty || cleaned == '<' || cleaned == '>' || cleaned == '</') {
+    if (cleaned.isEmpty ||
+        cleaned == '<' ||
+        cleaned == '>' ||
+        cleaned == '</') {
       return;
     }
     // 纯 ASCII 且带属性的行 = 拆散的标签残片（正常正文/英文不会出现 ="）
     final cjk = RegExp('[一-鿿]');
     if (!cjk.hasMatch(cleaned) && cleaned.contains('="')) return;
     emitted++;
-    emit(cleaned, level, centered);
+    emit(cleaned, level, centered, style);
   }
 
   try {
@@ -713,7 +791,12 @@ void _forEachBlock(
         if (_blockTags.contains(tag) && !_hasNestedBlock(node)) {
           reportAnchorDeep(node);
           final text = _collapseWhitespace(node.innerText);
-          add(text, _headingLevel(node, tag, text), _isCentered(node));
+          add(
+            text,
+            _headingLevel(node, tag, text),
+            _isCentered(node),
+            css.styleFor(node),
+          );
         } else {
           reportAnchor(node);
           walk(node);
@@ -723,7 +806,7 @@ void _forEachBlock(
 
     walk(doc.rootElement);
     if (emitted == 0) {
-      add(_collapseWhitespace(doc.rootElement.innerText), 0, false);
+      add(_collapseWhitespace(doc.rootElement.innerText), 0, false, null);
     }
   } on XmlException {
     // 坏 XML（HTML 风格未闭合标签等）：按块边界切段的保守粗提。
@@ -737,8 +820,7 @@ void _forEachBlock(
 String _stripTagFragment(String text) {
   var s = text;
   // 形态一：完整标签名开头（div class="..."）
-  final named =
-      RegExp('^/?[A-Za-z][A-Za-z0-9:-]*([ ][^<>]*)?>').firstMatch(s);
+  final named = RegExp('^/?[A-Za-z][A-Za-z0-9:-]*([ ][^<>]*)?>').firstMatch(s);
   if (named != null &&
       (named.group(0)!.contains('="') || named.group(0)!.contains("='"))) {
     s = s.substring(named.end).trim();
@@ -758,7 +840,13 @@ String _stripTagFragment(String text) {
 /// 无法按 XML 解析时的兜底：按块级标签换行、保守去标签。
 void _fallbackBlocks(
   String raw,
-  void Function(String text, int level, bool centered) emit,
+  void Function(
+    String text,
+    int level,
+    bool centered,
+    EpubBlockStyle? style,
+  )
+  emit,
 ) {
   var s = raw;
   for (final tag in ['script', 'style']) {
@@ -769,8 +857,10 @@ void _fallbackBlocks(
   }
   // 块级结束标签与 <br> 视作段落边界
   s = s.replaceAll(
-    RegExp('</(p|div|section|article|li|blockquote|h[1-6]|tr|td|dd)>',
-        caseSensitive: false),
+    RegExp(
+      '</(p|div|section|article|li|blockquote|h[1-6]|tr|td|dd)>',
+      caseSensitive: false,
+    ),
     String.fromCharCode(10),
   );
   s = s.replaceAll(
@@ -781,15 +871,14 @@ void _fallbackBlocks(
   s = s.replaceAll(RegExp('<[a-zA-Z/!?][^>]*>'), ' ');
   // 有的书 HTML 坏到把标签拆成两行（「<」单独一行 + `div class="...">`），
   // 保守丢弃「像标签碎片」的整行，避免正文里夹着 div 属性串。
-  final tagFragment =
-      RegExp('^/?[A-Za-z][A-Za-z0-9:-]*([ ]+[^<>]*)?/?>\$');
+  final tagFragment = RegExp('^/?[A-Za-z][A-Za-z0-9:-]*([ ]+[^<>]*)?/?>\$');
   final lines = s.split(String.fromCharCode(10));
   for (final line in lines) {
     final text = _collapseWhitespace(line);
     if (text.isEmpty) continue;
     if (text == '<' || text == '>' || text == '</') continue;
     if (tagFragment.hasMatch(text)) continue;
-    emit(text, 0, false);
+    emit(text, 0, false, null);
   }
 }
 
@@ -837,22 +926,19 @@ String _sanitizeXhtml(String raw) {
   }
   var s = _selfCloseVoidTags(cleaned.toString());
   if (s.contains('&')) {
-    s = s.replaceAllMapped(
-      RegExp('&([A-Za-z][A-Za-z0-9]*);'),
-      (m) {
-        final name = m.group(1)!;
-        switch (name) {
-          case 'amp':
-          case 'lt':
-          case 'gt':
-          case 'quot':
-          case 'apos':
-            return m.group(0)!;
-        }
-        final ch = _namedEntities[name];
-        return ch ?? '&amp;$name;';
-      },
-    );
+    s = s.replaceAllMapped(RegExp('&([A-Za-z][A-Za-z0-9]*);'), (m) {
+      final name = m.group(1)!;
+      switch (name) {
+        case 'amp':
+        case 'lt':
+        case 'gt':
+        case 'quot':
+        case 'apos':
+          return m.group(0)!;
+      }
+      final ch = _namedEntities[name];
+      return ch ?? '&amp;$name;';
+    });
     // 裸 &（例如书名「AT&T」）会让 XML 解析失败
     s = s.replaceAll(
       RegExp('&(?!(#[0-9]+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)'),
@@ -883,14 +969,11 @@ String _selfCloseVoidTags(String input) {
   ];
   var s = input;
   for (final tag in voidTags) {
-    s = s.replaceAllMapped(
-      RegExp('<$tag([^>]*)>', caseSensitive: false),
-      (m) {
-        final attrs = (m.group(1) ?? '').trimRight();
-        if (attrs.endsWith('/')) return m.group(0)!;
-        return '<$tag$attrs/>';
-      },
-    );
+    s = s.replaceAllMapped(RegExp('<$tag([^>]*)>', caseSensitive: false), (m) {
+      final attrs = (m.group(1) ?? '').trimRight();
+      if (attrs.endsWith('/')) return m.group(0)!;
+      return '<$tag$attrs/>';
+    });
   }
   return s;
 }
@@ -937,8 +1020,9 @@ int _headingLevel(XmlElement el, String tag, String text) {
       '${el.getAttribute('class') ?? ''} ${el.getAttribute('id') ?? ''}'
           .toLowerCase();
   if (hint.isEmpty || text.length > 60) return 0;
-  if (RegExp(r'(^|[\s_-])(chapter|section|heading|title|h[1-6])([\s_-]|$)')
-      .hasMatch(hint)) {
+  if (RegExp(
+    r'(^|[\s_-])(chapter|section|heading|title|h[1-6])([\s_-]|$)',
+  ).hasMatch(hint)) {
     return 1;
   }
   return 0;
@@ -969,7 +1053,10 @@ int _extractTextLength(String raw) {
     return doc.rootElement.innerText.length;
   } on XmlException {
     // 非 XML 的 HTML：粗略去标签
-    final noScript = raw.replaceAll(RegExp(r'<(script|style)[\s\S]*?</\1>', caseSensitive: false), '');
+    final noScript = raw.replaceAll(
+      RegExp(r'<(script|style)[\s\S]*?</\1>', caseSensitive: false),
+      '',
+    );
     return noScript.replaceAll(RegExp(r'<[^>]+>'), '').length;
   }
 }
@@ -1035,10 +1122,7 @@ String _normalizeTitle(String raw, {String? author}) {
   final stripped = t.replaceAll(RegExp(r'【[^】]{8,}】'), ' ');
   if (stripped.trim().isNotEmpty) t = stripped;
   if (author != null && author.isNotEmpty) {
-    t = t.replaceAll(
-      RegExp('[-_—]\\s*${RegExp.escape(author)}\\s*\$'),
-      '',
-    );
+    t = t.replaceAll(RegExp('[-_—]\\s*${RegExp.escape(author)}\\s*\$'), '');
   }
   t = t
       .replaceFirst(RegExp(r'^[-_—·]\s*'), '')
@@ -1047,14 +1131,14 @@ String _normalizeTitle(String raw, {String? author}) {
   return t.isEmpty ? raw.trim() : t;
 }
 
-
 /// 正文块（分段前的中间形态，供单文件按锚点切分）。
 class _TextBlock {
-  const _TextBlock(this.text, this.level, this.centered);
+  const _TextBlock(this.text, this.level, this.centered, this.style);
 
   final String text;
   final int level;
   final bool centered;
+  final EpubBlockStyle? style;
 }
 
 /// 一份 XHTML 按目录锚点切出来的一章。
@@ -1084,16 +1168,24 @@ class _FileSegments {
 /// [anchors] 与目录条目一一对应（空串 = 该条目没有锚点）。能定位到的
 /// 锚点作为章节起点，同一块上的重复锚点只认第一个；一个都定位不到时
 /// 整篇作一章（`source` 取 0，保持旧行为）。
-_FileSegments _splitByAnchors(String raw, List<String> anchors) {
+_FileSegments _splitByAnchors(
+  String raw,
+  List<String> anchors, {
+  String externalCss = '',
+}) {
   final blocks = <_TextBlock>[];
   final blockOfAnchor = <String, int>{};
   _forEachBlock(
     raw,
-    (text, level, centered) => blocks.add(_TextBlock(text, level, centered)),
+    (text, level, centered, style) =>
+        blocks.add(_TextBlock(text, level, centered, style)),
     onAnchor: (anchor, blockIndex) =>
         blockOfAnchor.putIfAbsent(anchor, () => blockIndex),
+    externalCss: externalCss,
   );
-  if (blocks.isEmpty) return const _FileSegments(<_TextBlock>[], <_ChapterPart>[]);
+  if (blocks.isEmpty) {
+    return const _FileSegments(<_TextBlock>[], <_ChapterPart>[]);
+  }
 
   final hits = <({int source, int block})>[];
   for (var i = 0; i < anchors.length; i++) {
@@ -1104,9 +1196,7 @@ _FileSegments _splitByAnchors(String raw, List<String> anchors) {
     hits.add((source: i, block: block));
   }
   if (hits.isEmpty) {
-    return _FileSegments(const <_TextBlock>[], [
-      _ChapterPart(0, blocks),
-    ]);
+    return _FileSegments(const <_TextBlock>[], [_ChapterPart(0, blocks)]);
   }
 
   // 目录顺序一般就是文档顺序；真乱了也按块位置排，切出来仍然连续。
@@ -1131,8 +1221,7 @@ _FileSegments _splitByAnchors(String raw, List<String> anchors) {
 ///
 /// 注意**不含**逗号/顿号/破折号——印刷行在逗号后断行很常见，那仍是
 /// 段中行，要继续合并。
-const String _sentenceEnders =
-    '。！？；：…”’』」）】〕〉》»…!?.;:)';
+const String _sentenceEnders = '。！？；：…”’』」）】〕〉》»…!?.;:)';
 
 /// 印刷行的最小列宽：扫描重排版书的正文行通常 29~32 字一行，
 /// 诗歌/标题/页码远短于此（实测海子的诗最长无标点诗行 21 字——
@@ -1172,15 +1261,18 @@ List<_TextBlock> _mergeHardWrappedBlocks(List<_TextBlock> blocks) {
         !_sentenceEnders.contains(lastChar)) {
       i++;
       final next = blocks[i];
-      final joinsAscii = lastChar.isNotEmpty &&
+      final joinsAscii =
+          lastChar.isNotEmpty &&
           RegExp('[A-Za-z0-9]').hasMatch(lastChar) &&
           next.text.isNotEmpty &&
           RegExp('[A-Za-z0-9]').hasMatch(next.text.substring(0, 1));
       text += (joinsAscii ? ' ' : '') + next.text;
       lastLineLen = next.text.length;
-      lastChar = next.text.isEmpty ? '' : next.text.substring(next.text.length - 1);
+      lastChar = next.text.isEmpty
+          ? ''
+          : next.text.substring(next.text.length - 1);
     }
-    out.add(_TextBlock(text, first.level, first.centered));
+    out.add(_TextBlock(text, first.level, first.centered, first.style));
     i++;
   }
   return out;
@@ -1194,14 +1286,32 @@ _ChapterLayoutData _layoutOfBlocks(
   final starts = <int>[];
   final levels = <int>[];
   final centered = <bool>[];
+  final styles = <EpubBlockStyle>[];
+  final styleIds = <int>[];
+  int idOf(EpubBlockStyle style) {
+    final existing = styles.indexOf(style);
+    if (existing >= 0) return existing;
+    styles.add(style);
+    return styles.length - 1;
+  }
+
   for (final b in blocks) {
     if (buffer.isNotEmpty) buffer.write(String.fromCharCode(10));
     if (withParagraphs) {
       starts.add(buffer.length);
       levels.add(b.level);
       centered.add(b.centered);
+      final style = b.style;
+      styleIds.add(style == null ? -1 : idOf(style));
     }
     buffer.write(b.text);
   }
-  return _ChapterLayoutData(buffer.toString(), starts, levels, centered);
+  return _ChapterLayoutData(
+    buffer.toString(),
+    starts,
+    levels,
+    centered,
+    styles,
+    styleIds,
+  );
 }

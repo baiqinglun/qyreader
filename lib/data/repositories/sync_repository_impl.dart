@@ -22,12 +22,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/db/app_database.dart';
 import '../../core/hlc.dart';
+import '../../core/stats_revision.dart';
 import '../../domain/entities/book.dart';
 import '../../domain/repositories/sync_repository.dart';
 import '../../domain/sync/object_store.dart';
 import '../sync/book_shard.dart';
+import '../sync/audio_sync.dart';
 import '../sync/background_sync.dart';
 import '../sync/font_sync.dart';
+import '../sync/s3_object_store.dart' show describeStoreError;
+import '../sync/theme_sync.dart';
 import '../../domain/sync/sync_status.dart';
 
 /// 同步引擎实现。
@@ -40,12 +44,12 @@ class SyncRepositoryImpl implements SyncRepository {
     required String deviceId,
     required Directory libraryDir,
     required HlcClock hlcClock,
-  })  : _db = db,
-        _store = store,
-        _spaceId = spaceId,
-        _deviceId = deviceId,
-        _libraryDir = libraryDir,
-        _hlcClock = hlcClock;
+  }) : _db = db,
+       _store = store,
+       _spaceId = spaceId,
+       _deviceId = deviceId,
+       _libraryDir = libraryDir,
+       _hlcClock = hlcClock;
 
   final AppDatabase _db;
   final ObjectStore _store;
@@ -57,11 +61,15 @@ class SyncRepositoryImpl implements SyncRepository {
   static const String _kLastSyncAt = 'sync.lastAt';
   static const String _kLastError = 'sync.lastError';
 
+  /// 历史会话补传置位（v2.46.0 升级前的会话没有 op，首次同步补齐一次）。
+  static const String _kSessionsBackfilled = 'sync.sessionsBackfilled';
+
   /// 上次拉取到的对象修改时间（服务端时间；增量拉取的水位线）。
   static const String _kLastPullAt = 'sync.lastPullAt';
 
   /// 上次拉取分片的时间（分片也走增量，避免每次把所有书的进度都拉一遍）。
   static const String _kLastShardPullAt = 'sync.lastShardPullAt';
+  static const String _kContentRepair = 'sync.contentRepairV1';
 
   /// 水位线回看窗口：设备/服务端时钟有偏差时，宁可多拉几条也不能漏。
   static const int _pullLookbackMs = 10 * 60 * 1000;
@@ -69,6 +77,7 @@ class SyncRepositoryImpl implements SyncRepository {
   String get _opsPrefix => 'spaces/$_spaceId/ops/';
   String get _booksPrefix => 'spaces/$_spaceId/books/';
   String get _coversPrefix => 'spaces/$_spaceId/covers/';
+
   /// 分片位置：`<配置前缀>/shards/<bookId>.json`。
   String get _shardsPrefix => 'shards/';
 
@@ -79,10 +88,12 @@ class SyncRepositoryImpl implements SyncRepository {
   @override
   Future<List<String>> pendingShardBooks() async {
     try {
-      final rows = await _db.customSelect(
-        'SELECT entity, entity_id, payload FROM sync_ops '
-        'WHERE uploaded_at IS NULL',
-      ).get();
+      final rows = await _db
+          .customSelect(
+            'SELECT entity, entity_id, payload FROM sync_ops '
+            'WHERE uploaded_at IS NULL',
+          )
+          .get();
       return _bookIdsOf(rows).toList()..sort();
     } catch (_) {
       return const [];
@@ -108,44 +119,38 @@ class SyncRepositoryImpl implements SyncRepository {
     return ids;
   }
 
+  /// 单条待上传 op 涉及的书 id（book op 用 entityId，其它实体读 payload.bookId）。
+  String? _bookIdOfOp(SyncOpRow op) {
+    // 会话不属于分片数据（进度/笔记/书签），别触发分片重传
+    if (op.entity == 'session') return null;
+    if (op.entity == 'book') {
+      return op.entityId.isEmpty ? null : op.entityId;
+    }
+    try {
+      final payload = jsonDecode(op.payload);
+      if (payload is Map) {
+        final id = payload['bookId'] as String?;
+        if (id != null && id.isNotEmpty) return id;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<({int books, int bytes, String? error})> _uploadShards(
-    int sinceMs, {
+    Set<String> touched, {
     void Function(SyncProgress progress)? onProgress,
   }) async {
-    final touched = <String>{};
-    try {
-      final rows = await _db.customSelect(
-        'SELECT entity, entity_id, payload FROM sync_ops '
-        'WHERE uploaded_at >= ?',
-        variables: [Variable.withInt(sinceMs)],
-      ).get();
-      for (final r in rows) {
-        final entity = r.data['entity'] as String? ?? '';
-        if (entity == 'book') {
-          final id = r.data['entity_id'] as String?;
-          if (id != null && id.isNotEmpty) touched.add(id);
-          continue;
-        }
-        try {
-          final payload = jsonDecode(r.data['payload'] as String? ?? '{}');
-          final id = payload is Map ? payload['bookId'] as String? : null;
-          if (id != null && id.isNotEmpty) touched.add(id);
-        } catch (_) {
-          // payload 不是 JSON 就跳过
-        }
-      }
-    } catch (_) {
-      // 读日志失败：本次不传分片
-    }
     var bytes = 0;
     var done = 0;
     for (final id in touched) {
       done++;
-      onProgress?.call(SyncProgress(
-        '正在上传《${await _bookTitle(id)}》的阅读数据',
-        done,
-        touched.length,
-      ));
+      onProgress?.call(
+        SyncProgress(
+          '正在上传《${await _bookTitle(id)}》的阅读数据',
+          done,
+          touched.length,
+        ),
+      );
       try {
         // 已删除的书（只剩墓碑 op）不再生成空分片，否则刚清掉的云端分片
         // 又会被传回来。
@@ -175,10 +180,12 @@ class SyncRepositoryImpl implements SyncRepository {
     try {
       final existingBooks = (await _store.list(_booksPrefix)).toSet();
       final existingCovers = (await _store.list(_coversPrefix)).toSet();
-      final rows = await _db.customSelect(
-        'SELECT id, file_path, file_sha256, cover_path FROM books '
-        'WHERE deleted_at IS NULL',
-      ).get();
+      final rows = await _db
+          .customSelect(
+            'SELECT id, file_path, file_sha256, cover_path FROM books '
+            'WHERE deleted_at IS NULL',
+          )
+          .get();
       var done = 0;
       for (final row in rows) {
         final id = row.data['id'] as String? ?? '';
@@ -189,47 +196,49 @@ class SyncRepositoryImpl implements SyncRepository {
         if (sha.isNotEmpty) {
           final key = _bookBlobKey(sha);
           if (!existingBooks.contains(key)) {
-            onProgress?.call(SyncProgress(
-              '正在上传《${await _bookTitle(id)}》的书籍',
-              done,
-              rows.length,
-            ));
+            onProgress?.call(
+              SyncProgress(
+                '正在上传《${await _bookTitle(id)}》的书籍',
+                done,
+                rows.length,
+              ),
+            );
             try {
-              final data =
-                  await _readFileIfExists(row.data['file_path'] as String?);
+              final data = await _readFileIfExists(
+                row.data['file_path'] as String?,
+              );
               if (data != null) {
                 await _store.put(key, data);
                 files++;
                 bytes += data.length;
               }
             } catch (e) {
-              error ??= '$e';
+              error ??= describeStoreError(e);
             }
           }
         }
         // 封面（每本固定 `<id>.jpg`）
         final coverKey = _coverBlobKey(id);
         if (!existingCovers.contains(coverKey)) {
-          onProgress?.call(SyncProgress(
-            '正在上传《${await _bookTitle(id)}》的封面',
-            done,
-            rows.length,
-          ));
+          onProgress?.call(
+            SyncProgress('正在上传《${await _bookTitle(id)}》的封面', done, rows.length),
+          );
           try {
-            final data =
-                await _readFileIfExists(row.data['cover_path'] as String?);
+            final data = await _readFileIfExists(
+              row.data['cover_path'] as String?,
+            );
             if (data != null) {
               await _store.put(coverKey, data);
               files++;
               bytes += data.length;
             }
           } catch (e) {
-            error ??= '$e';
+            error ??= describeStoreError(e);
           }
         }
       }
     } catch (e) {
-      return (files: files, bytes: bytes, error: '$e');
+      return (files: files, bytes: bytes, error: describeStoreError(e));
     }
     return (files: files, bytes: bytes, error: error);
   }
@@ -255,41 +264,70 @@ class SyncRepositoryImpl implements SyncRepository {
       final entries = await _store.listDetailed(_shardsPrefix);
       final watermarkRaw = await _stateOf(_kLastShardPullAt);
       final watermark = int.tryParse(watermarkRaw ?? '') ?? 0;
+      final repairing = await _stateOf(_kContentRepair) != '1';
       final cutoff = watermark - _pullLookbackMs;
       final candidates = [
         for (final entry in entries)
           if (entry.key.endsWith('.json') &&
-              (entry.modifiedAtMs == 0 || entry.modifiedAtMs > cutoff))
+              (repairing ||
+                  entry.modifiedAtMs == 0 ||
+                  entry.modifiedAtMs > cutoff))
             entry,
       ];
       var maxSeen = watermark;
       var done = 0;
+      var repairComplete = true;
       for (final entry in candidates) {
         final bytes = await _store.get(entry.key);
-        if (bytes == null) continue; // 下载失败：下次再试
+        if (bytes == null) {
+          repairComplete = false;
+          continue;
+        }
         if (entry.modifiedAtMs > maxSeen) maxSeen = entry.modifiedAtMs;
         final shard = BookShard.decode(bytes);
-        if (shard == null) continue;
+        if (shard == null) {
+          repairComplete = false;
+          continue;
+        }
         final id = shard['bookId'] as String?;
         if (id == null || id.isEmpty) continue;
         final remoteRows = shard['books'];
         final remoteUpdated = remoteRows is List && remoteRows.isNotEmpty
             ? (remoteRows.first is Map
-                ? (remoteRows.first as Map)['updated_at'] as int? ?? 0
-                : 0)
+                  ? (remoteRows.first as Map)['updated_at'] as int? ?? 0
+                  : 0)
             : 0;
-        final local = await _db.customSelect(
-          'SELECT updated_at FROM books WHERE id = ?',
-          variables: [Variable.withString(id)],
-        ).getSingleOrNull();
+        final local = await _db
+            .customSelect(
+              'SELECT updated_at, file_sha256 FROM books WHERE id = ?',
+              variables: [Variable.withString(id)],
+            )
+            .getSingleOrNull();
         if (local != null &&
             (local.data['updated_at'] as int? ?? 0) >= remoteUpdated) {
+          final bookRow =
+              remoteRows is List &&
+                  remoteRows.isNotEmpty &&
+                  remoteRows.first is Map
+              ? Map<String, dynamic>.from(remoteRows.first as Map)
+              : null;
+          if ((local.data['updated_at'] as int? ?? 0) == remoteUpdated &&
+              bookRow != null &&
+              await _repairShardContent(
+                id,
+                local.data['file_sha256'] as String? ?? '',
+                bookRow,
+              )) {
+            await BookShard.applyChapters(_db, shard);
+          }
           // 元数据已是最新。按需下载的新设备这里本地没有章节行——
           // 分片里的目录元数据补上，书详情的目录/章数才不是空的。
-          final chapterCount = await _db.customSelect(
-            'SELECT COUNT(*) AS n FROM chapters WHERE book_id = ?',
-            variables: [Variable.withString(id)],
-          ).getSingleOrNull();
+          final chapterCount = await _db
+              .customSelect(
+                'SELECT COUNT(*) AS n FROM chapters WHERE book_id = ?',
+                variables: [Variable.withString(id)],
+              )
+              .getSingleOrNull();
           if ((chapterCount?.data['n'] as int? ?? 0) == 0) {
             await BookShard.applyChapters(_db, shard);
           }
@@ -297,11 +335,13 @@ class SyncRepositoryImpl implements SyncRepository {
         }
         done++;
         // 只给真正会写入本地的书报进度，别把没变化的书也刷一遍。
-        onProgress?.call(SyncProgress(
-          '正在同步《${await _bookTitle(id)}》的阅读数据',
-          done,
-          candidates.length,
-        ));
+        onProgress?.call(
+          SyncProgress(
+            '正在同步《${await _bookTitle(id)}》的阅读数据',
+            done,
+            candidates.length,
+          ),
+        );
         await BookShard.apply(_db, shard);
         await _ensureCoverForBook(id);
         applied++;
@@ -309,10 +349,34 @@ class SyncRepositoryImpl implements SyncRepository {
       if (maxSeen > watermark) {
         await _setState(_kLastShardPullAt, '$maxSeen');
       }
+      if (repairing && repairComplete) await _setState(_kContentRepair, '1');
     } catch (_) {
       // 列分片失败按没有处理
     }
     return applied;
+  }
+
+  /// 修复旧版已合并元数据但遗漏书源字段的记录。
+  Future<bool> _repairShardContent(
+    String id,
+    String localSha,
+    Map<String, dynamic> row,
+  ) async {
+    final sha = row['file_sha256'] as String? ?? '';
+    if (sha == localSha || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha)) {
+      return false;
+    }
+    await (_db.update(_db.books)..where((b) => b.id.equals(id))).write(
+      BooksCompanion(
+        fileSha256: Value(sha),
+        filePath: Value(_plannedBookPath(id, sha)),
+        fileSize: Value((row['file_size'] as num?)?.toInt() ?? 0),
+        format: Value(row['format'] as String? ?? 'epub'),
+        chapterCount: Value((row['chapter_count'] as num?)?.toInt() ?? 0),
+        wordCount: Value((row['word_count'] as num?)?.toInt() ?? 0),
+      ),
+    );
+    return true;
   }
 
   @override
@@ -331,18 +395,34 @@ class SyncRepositoryImpl implements SyncRepository {
     );
   }
 
+  /// 同步进行中标记（防重入：手动同步与自动同步撞车时后到的直接跳过）。
+  bool _syncing = false;
+
   @override
   Future<SyncResult> syncNow({
     void Function(SyncProgress progress)? onProgress,
   }) async {
+    if (_syncing) return const SyncResult();
+    _syncing = true;
+    try {
+      return await _syncNowInner(onProgress: onProgress);
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  Future<SyncResult> _syncNowInner({
+    void Function(SyncProgress progress)? onProgress,
+  }) async {
     try {
       await _ensureDirs();
-      final startedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingOps = (await _pendingOps()).length;
       final pendingBooks = (await pendingShardBooks()).length;
       final total = pendingOps + pendingBooks;
       onProgress?.call(SyncProgress('正在准备同步', 0, total));
-      final pushed = await _push(onProgress: onProgress);
+      // 升级前的历史会话没有 op：首次同步补齐一次（幂等，见 _backfillSessionOps）
+      await _backfillSessionOps();
+      final push = await _push(onProgress: onProgress);
       // 云端 -> 本地：先拉操作日志，再按书同步分片
       final pull = await _pull(onProgress: onProgress);
       final pulledShards = await _pullShards(onProgress: onProgress);
@@ -352,8 +432,10 @@ class SyncRepositoryImpl implements SyncRepository {
       // 云端有封面、本地文件缺失（旧版本拉取 / 清过缓存）：补回本地
       await _restoreLocalCovers(onProgress: onProgress);
       onProgress?.call(SyncProgress('正在核对云端数据', total, total));
-      // 本地 -> 云端：只传本次有写入的那些书
-      final backup = await _uploadShards(startedAt, onProgress: onProgress);
+      // 本地 -> 云端：只传本次 push 的书，**只认本机发出的 op**。
+      // 不能按 uploaded_at 时间窗取：拉回来的远端 op 也会被标记 uploaded_at，
+      // 那样会把远端改动过的书全部重新导出、上传一遍分片（同步越用越慢）。
+      final backup = await _uploadShards(push.books, onProgress: onProgress);
       // 本地有、云端没有的书源与封面：补齐上传（含之前同步失败/换桶的情况）
       onProgress?.call(SyncProgress('正在补齐本地文件', total, total));
       final files = await _backupLocalBlobs(onProgress: onProgress);
@@ -362,10 +444,15 @@ class SyncRepositoryImpl implements SyncRepository {
       final fonts = await _syncFonts(onProgress: onProgress);
       onProgress?.call(SyncProgress('正在同步背景', total, total));
       final backgrounds = await _syncBackgrounds(onProgress: onProgress);
+      onProgress?.call(SyncProgress('正在同步音频', total, total));
+      final audios = await _syncAudios(onProgress: onProgress);
+      // 主题清单最后同步：背景图先到位，主题里的文件名才能还原成本机路径。
+      onProgress?.call(SyncProgress('正在同步主题', total, total));
+      final themes = await _syncThemes();
       await _setState(_kLastSyncAt, '${DateTime.now().millisecondsSinceEpoch}');
       await _setState(_kLastError, '');
       return SyncResult(
-        pushed: pushed,
+        pushed: push.pushed,
         pulled: pull.pulled,
         applied: pull.applied + pulledShards,
         skipped: pull.skipped,
@@ -376,28 +463,81 @@ class SyncRepositoryImpl implements SyncRepository {
         backupError: files.error,
         fontsSynced: fonts.uploaded + fonts.downloaded,
         backgroundsSynced: backgrounds.uploaded + backgrounds.downloaded,
+        audiosSynced: audios.uploaded + audios.downloaded,
+        themesSynced: themes.uploaded + themes.downloaded,
       );
     } catch (e) {
-      await _setState(_kLastError, '$e');
-      return SyncResult(error: '$e');
+      final message = describeStoreError(e);
+      await _setState(_kLastError, message);
+      return SyncResult(error: message);
     }
   }
 
   // ---- 推送 ----
 
-  Future<int> _push({
+  /// 历史会话补传：v2.46.0 之前记录的会话没有 session op，换设备看不到
+  /// 那些时长。首次同步把**本机记录**的会话按 `opId='ses-<id>'` 补写 op
+  /// （与 recordSession 同一规则，已推过的跳过），状态表置位后不再跑。
+  /// 只认 deviceId 是本机的会话：从远端合并来的会话由对方设备补传，
+  /// 别在这里回传（回声）。补传被中断也没关系：对端按会话 id 幂等合并，
+  /// 重复应用不会重复计数。
+  Future<void> _backfillSessionOps() async {
+    if (await _stateOf(_kSessionsBackfilled) == '1') return;
+    final rows = await (_db.select(
+      _db.readingSessions,
+    )..where((r) => r.deviceId.equals(_deviceId))).get();
+    if (rows.isNotEmpty) {
+      final existingOps = await (_db.select(
+        _db.syncOps,
+      )..where((r) => r.entity.equals('session'))).get();
+      final hasOp = existingOps.map((e) => e.opId).toSet();
+      for (final s in rows) {
+        final opId = 'ses-${s.id}';
+        if (hasOp.contains(opId)) continue;
+        final hlc = _hlcClock.tick().encode();
+        await _db
+            .into(_db.syncOps)
+            .insert(
+              SyncOpsCompanion.insert(
+                opId: opId,
+                entity: 'session',
+                entityId: s.bookId,
+                op: 'upsert',
+                payload: jsonEncode(<String, dynamic>{
+                  'id': s.id,
+                  'bookId': s.bookId,
+                  'startedAt': s.startedAt,
+                  'endedAt': s.endedAt,
+                  'durationMs': s.durationMs,
+                  'charsRead': s.charsRead,
+                  'deviceId': s.deviceId,
+                  'hlc': hlc,
+                }),
+                hlc: hlc,
+                createdAt: s.endedAt,
+              ),
+            );
+      }
+    }
+    await _setState(_kSessionsBackfilled, '1');
+  }
+
+  Future<({int pushed, Set<String> books})> _push({
     void Function(SyncProgress progress)? onProgress,
   }) async {
     final ops = await _pendingOps();
+    final touched = <String>{};
     var pushed = 0;
     for (final op in ops) {
       final title = await _bookTitleOfOp(op);
       final what = _entityLabel(op.entity);
-      onProgress?.call(SyncProgress(
-        title.isEmpty ? '正在上传本机改动' : '正在上传《$title》的$what',
-        pushed,
-        ops.length,
-      ));
+      onProgress?.call(
+        SyncProgress(
+          title.isEmpty ? '正在上传本机改动' : '正在上传《$title》的$what',
+          pushed,
+          ops.length,
+        ),
+      );
       // 书籍操作先把书源文件传到桶（内容寻址；已存在则跳过）
       if (op.entity == 'book') {
         await _uploadBookBlob(op.entityId);
@@ -413,10 +553,11 @@ class SyncRepositoryImpl implements SyncRepository {
         'createdAt': op.createdAt,
       });
       await _store.put('$_opsPrefix${op.opId}.json', utf8.encode(wrapper));
-      await (_db.update(_db.syncOps)..where((r) => r.seq.equals(op.seq)))
-          .write(SyncOpsCompanion(
-        uploadedAt: Value(DateTime.now().millisecondsSinceEpoch),
-      ));
+      await (_db.update(_db.syncOps)..where((r) => r.seq.equals(op.seq))).write(
+        SyncOpsCompanion(
+          uploadedAt: Value(DateTime.now().millisecondsSinceEpoch),
+        ),
+      );
       // 墓碑推上去后再清云端书源/封面/分片；失败下次同步重试。
       if (op.entity == 'book' && op.op == 'delete') {
         String? sha;
@@ -426,9 +567,11 @@ class SyncRepositoryImpl implements SyncRepository {
         } catch (_) {}
         await deleteCloudBook(op.entityId, fileSha256: sha);
       }
+      final bookId = _bookIdOfOp(op);
+      if (bookId != null) touched.add(bookId);
       pushed++;
     }
-    return pushed;
+    return (pushed: pushed, books: touched);
   }
 
   /// 书源文件的桶 key（内容寻址；扩展名固定 .epub 仅为历史惯例）。
@@ -455,16 +598,19 @@ class SyncRepositoryImpl implements SyncRepository {
 
   /// 分片应用后确保本地有封面（并把行里的 cover_path 指到本地文件）。
   Future<void> _ensureCoverForBook(String bookId) async {
-    final row = await _db.customSelect(
-      'SELECT cover_path FROM books WHERE id = ?',
-      variables: [Variable.withString(bookId)],
-    ).getSingleOrNull();
+    final row = await _db
+        .customSelect(
+          'SELECT cover_path FROM books WHERE id = ?',
+          variables: [Variable.withString(bookId)],
+        )
+        .getSingleOrNull();
     if (row == null) return;
     final current = row.data['cover_path'] as String?;
     final local = await _downloadCover(bookId);
     if (local == null || local == current) return;
-    await (_db.update(_db.books)..where((b) => b.id.equals(bookId)))
-        .write(BooksCompanion(coverPath: Value(local)));
+    await (_db.update(_db.books)..where((b) => b.id.equals(bookId))).write(
+      BooksCompanion(coverPath: Value(local)),
+    );
   }
 
   /// 本地有书、封面文件却不在时，从云端补回（旧版本拉取 / 清过缓存）。
@@ -472,9 +618,11 @@ class SyncRepositoryImpl implements SyncRepository {
     void Function(SyncProgress progress)? onProgress,
   }) async {
     try {
-      final rows = await _db.customSelect(
-        'SELECT id, cover_path FROM books WHERE deleted_at IS NULL',
-      ).get();
+      final rows = await _db
+          .customSelect(
+            'SELECT id, cover_path FROM books WHERE deleted_at IS NULL',
+          )
+          .get();
       var done = 0;
       for (final row in rows) {
         final id = row.data['id'] as String? ?? '';
@@ -486,11 +634,9 @@ class SyncRepositoryImpl implements SyncRepository {
             await File(current).exists()) {
           continue;
         }
-        onProgress?.call(SyncProgress(
-          '正在同步《${await _bookTitle(id)}》的封面',
-          done,
-          rows.length,
-        ));
+        onProgress?.call(
+          SyncProgress('正在同步《${await _bookTitle(id)}》的封面', done, rows.length),
+        );
         await _ensureCoverForBook(id);
       }
     } catch (_) {
@@ -571,9 +717,10 @@ class SyncRepositoryImpl implements SyncRepository {
 
   // ---- 拉取 ----
 
-  /// 拉取云端 ops：**增量**——按对象的服务端修改时间过滤，只下载比上次
-  /// 拉取新的 op。旧实现每次把 `ops/` 下全部对象下载一遍再逐条比对
-  /// opId，读了几百个对象却一条也不应用（用户看到「每次都拉 500 多条」）。
+  /// 拉取云端 ops：**增量**——按对象的服务端修改时间过滤，只处理比上次
+  /// 拉取新的 op。已知 op 直接按对象 key（`ops/<opId>.json`）跳过，连下载
+  /// 都不做；只有真正要应用的 op 才报「正在同步《书名》」，避免看起来像
+  /// 「所有书都同步了一遍」。
   ///
   /// 水位线存 `sync.lastPullAt`（取已成功下载对象的最大修改时间），
   /// 并回看 10 分钟兜底设备时钟偏差；opId 幂等比对改为一次性读出
@@ -594,6 +741,13 @@ class SyncRepositoryImpl implements SyncRepository {
       if (!entry.key.endsWith('.json')) continue;
       // 修改时间取不到（0）时按「可能更新」处理，宁可多拉。
       if (entry.modifiedAtMs > 0 && entry.modifiedAtMs <= cutoff) continue;
+      // 对象名就是 opId：已知 op 直接按 key 跳过，连下载都不做。
+      final keyOpId = _opIdFromKey(entry.key);
+      if (keyOpId != null && known.contains(keyOpId)) {
+        skipped++;
+        if (entry.modifiedAtMs > maxSeen) maxSeen = entry.modifiedAtMs;
+        continue;
+      }
       final bytes = await _store.get(entry.key);
       if (bytes == null) continue; // 下载失败：不推进水位线，下次重试
       pulled++;
@@ -606,22 +760,27 @@ class SyncRepositoryImpl implements SyncRepository {
       }
       final opId = op['opId'] as String?;
       if (opId == null) continue;
-      final entityId = op['entityId'] as String? ?? '';
-      // 新设备本地还没有这本书：优先用 op 里带的标题，别显示 id。
-      onProgress?.call(SyncProgress(
-        entityId.isEmpty
-            ? '正在同步云端数据'
-            : '正在同步《${await _titleOfRemoteOp(op, entityId)}》'
-                '的${_entityLabel(op['entity'] as String? ?? '')}',
-        pulled,
-        entries.length,
-      ));
       if (known.contains(opId)) {
         skipped++;
         continue;
       }
+      final entityId = op['entityId'] as String? ?? '';
+      // 只给真正要应用的 op 报书名；已知 op 连标题都不查（以前每条都报，
+      // 看起来像「所有书都同步了一遍」）。
+      onProgress?.call(
+        SyncProgress(
+          entityId.isEmpty
+              ? '正在同步云端数据'
+              : '正在同步《${await _titleOfRemoteOp(op, entityId)}》'
+                    '的${_entityLabel(op['entity'] as String? ?? '')}',
+          pulled,
+          entries.length,
+        ),
+      );
       await _applyRemoteOp(op);
-      await _db.into(_db.syncOps).insert(
+      await _db
+          .into(_db.syncOps)
+          .insert(
             SyncOpsCompanion.insert(
               opId: opId,
               entity: op['entity'] as String? ?? 'unknown',
@@ -629,9 +788,11 @@ class SyncRepositoryImpl implements SyncRepository {
               op: op['op'] as String? ?? 'upsert',
               payload: op['payload'] as String? ?? '{}',
               hlc: op['hlc'] as String? ?? _hlcClock.tick().encode(),
-              createdAt: (op['createdAt'] as num?)?.toInt() ??
+              createdAt:
+                  (op['createdAt'] as num?)?.toInt() ??
                   DateTime.now().millisecondsSinceEpoch,
-              uploadedAt: Value(DateTime.now().millisecondsSinceEpoch),
+              // 远端来的 op 不是本机改动：用 0 标记，别再当成待上传/待传分片。
+              uploadedAt: const Value(0),
             ),
             mode: InsertMode.insertOrIgnore,
           );
@@ -651,6 +812,13 @@ class SyncRepositoryImpl implements SyncRepository {
       for (final row in rows)
         if (row.opId.isNotEmpty) row.opId,
     };
+  }
+
+  /// 从对象 key 取 opId（写入时固定为 `ops/<opId>.json`）。
+  String? _opIdFromKey(String key) {
+    final name = key.split('/').last;
+    if (!name.endsWith('.json')) return null;
+    return name.substring(0, name.length - '.json'.length);
   }
 
   /// 合并一条远端操作（整次调用包一层事务，实体级原子）。
@@ -674,15 +842,118 @@ class SyncRepositoryImpl implements SyncRepository {
           await _mergeAnnotation(payload, remoteHlc);
         case 'bookmark':
           await _mergeBookmark(payload, remoteHlc);
+        case 'session':
+          await _mergeSession(payload);
         default:
           break; // 未知实体（未来版本）静默跳过，向前兼容
       }
     });
   }
 
+  /// 合并远端阅读会话：按会话 id 幂等插入，再按天重算 daily_stats。
+  ///
+  /// 会话只增不改（append-only），所以不需要 LWW——重复应用同一 op
+  /// 靠「id 已存在就跳过」保证不重复计数；聚合靠重算而不是累加，
+  /// 即使 op 幂等记录丢失也不会算错。
+  Future<void> _mergeSession(Map<String, dynamic> payload) async {
+    final id = payload['id'] as String? ?? '';
+    final bookId = payload['bookId'] as String? ?? '';
+    final startedAt = (payload['startedAt'] as num?)?.toInt() ?? 0;
+    final endedAt = (payload['endedAt'] as num?)?.toInt() ?? 0;
+    final durationMs = (payload['durationMs'] as num?)?.toInt() ?? 0;
+    final charsRead = (payload['charsRead'] as num?)?.toInt() ?? 0;
+    final deviceId = payload['deviceId'] as String? ?? '';
+    if (id.isEmpty || durationMs <= 0 || startedAt <= 0) return;
+    final existing = await (_db.select(
+      _db.readingSessions,
+    )..where((r) => r.id.equals(id))).getSingleOrNull();
+    if (existing != null) return; // 幂等：同一会话只算一次
+    await _db
+        .into(_db.readingSessions)
+        .insert(
+          ReadingSessionsCompanion.insert(
+            id: id,
+            bookId: bookId,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationMs: durationMs,
+            charsRead: Value(charsRead < 0 ? 0 : charsRead),
+            deviceId: deviceId,
+          ),
+        );
+    await _recomputeDailyStats(
+      _dayOf(DateTime.fromMillisecondsSinceEpoch(startedAt)),
+    );
+    // 远端会话合并进当日聚合：通知可见的首页/统计页重拉
+    bumpStatsRevision();
+  }
+
+  /// 重算某一天的 daily_stats（单书行 + 全书合计）。
+  ///
+  /// daily_stats 只是缓存（可由 reading_sessions 重算）：按会话重算
+  /// 而不是增量累加，重复合并也幂等；当天会话被清空的书（如另一设备
+  /// 删了书）对应行归零。
+  Future<void> _recomputeDailyStats(String day) async {
+    final parts = day.split('-');
+    final y = int.tryParse(parts.isEmpty ? '' : parts[0]);
+    final m = parts.length > 1 ? int.tryParse(parts[1]) : null;
+    final d = parts.length > 2 ? int.tryParse(parts[2]) : null;
+    if (y == null || m == null || d == null) return;
+    final startMs = DateTime(y, m, d).millisecondsSinceEpoch;
+    final endMs = DateTime(y, m, d + 1).millisecondsSinceEpoch;
+    final sessions =
+        await (_db.select(_db.readingSessions)
+              ..where((r) => r.startedAt.isBiggerOrEqualValue(startMs))
+              ..where((r) => r.startedAt.isSmallerThanValue(endMs)))
+            .get();
+    final agg = <String, List<int>>{}; // bookId -> [时长ms, 字数, 会话数]
+    for (final s in sessions) {
+      final cur = agg.putIfAbsent(s.bookId, () => <int>[0, 0, 0]);
+      cur[0] += s.durationMs;
+      cur[1] += s.charsRead;
+      cur[2] += 1;
+    }
+    // 全书合计（bookId=''）
+    final totals = <int>[0, 0, 0];
+    for (final v in agg.values) {
+      totals[0] += v[0];
+      totals[1] += v[1];
+      totals[2] += v[2];
+    }
+    agg[''] = totals;
+    // 当天已有但会话已消失的行（删书墓碑清了 sessions）：归零
+    final existingRows = await (_db.select(
+      _db.dailyStats,
+    )..where((r) => r.day.equals(day))).get();
+    for (final row in existingRows) {
+      if (!agg.containsKey(row.bookId)) agg[row.bookId] = <int>[0, 0, 0];
+    }
+    for (final entry in agg.entries) {
+      await _db
+          .into(_db.dailyStats)
+          .insertOnConflictUpdate(
+            DailyStatsCompanion.insert(
+              day: day,
+              bookId: Value(entry.key),
+              durationMs: Value(entry.value[0]),
+              charsRead: Value(entry.value[1]),
+              sessions: Value(entry.value[2]),
+            ),
+          );
+    }
+  }
+
+  /// 本地日期 yyyy-MM-dd（与 stats_repository_impl._dayOf 同口径）。
+  static String _dayOf(DateTime t) =>
+      '${t.year}-${t.month.toString().padLeft(2, '0')}-'
+      '${t.day.toString().padLeft(2, '0')}';
+
   // ---- 实体合并 ----
 
-  Future<void> _mergeBook(Map<String, dynamic> payload, String remoteHlc) async {
+  Future<void> _mergeBook(
+    Map<String, dynamic> payload,
+    String remoteHlc,
+  ) async {
     // 删除墓碑：payload 只有 id/deletedAt/fileSha256（没有完整书籍字段），
     // 不能走 bookFromJson。按 HLC 判断后删除本地整本书及关联数据。
     final tombstoneId = payload['id'] as String?;
@@ -690,28 +961,28 @@ class SyncRepositoryImpl implements SyncRepository {
     if (tombstoneId != null && deletedAt != null && payload['title'] == null) {
       final local = await _db.bookDao.getById(tombstoneId);
       if (local == null || !_isNewer(remoteHlc, local.hlc)) return;
-      await (_db.delete(_db.readingProgress)
-            ..where((t) => t.bookId.equals(tombstoneId)))
-          .go();
-      await (_db.delete(_db.readingSessions)
-            ..where((t) => t.bookId.equals(tombstoneId)))
-          .go();
-      await (_db.delete(_db.chapters)
-            ..where((t) => t.bookId.equals(tombstoneId)))
-          .go();
-      await (_db.delete(_db.annotations)
-            ..where((t) => t.bookId.equals(tombstoneId)))
-          .go();
-      await (_db.delete(_db.bookmarks)
-            ..where((t) => t.bookId.equals(tombstoneId)))
-          .go();
-      await (_db.delete(_db.books)..where((t) => t.id.equals(tombstoneId)))
-          .go();
+      await (_db.delete(
+        _db.readingProgress,
+      )..where((t) => t.bookId.equals(tombstoneId))).go();
+      await (_db.delete(
+        _db.readingSessions,
+      )..where((t) => t.bookId.equals(tombstoneId))).go();
+      await (_db.delete(
+        _db.chapters,
+      )..where((t) => t.bookId.equals(tombstoneId))).go();
+      await (_db.delete(
+        _db.annotations,
+      )..where((t) => t.bookId.equals(tombstoneId))).go();
+      await (_db.delete(
+        _db.bookmarks,
+      )..where((t) => t.bookId.equals(tombstoneId))).go();
+      await (_db.delete(
+        _db.books,
+      )..where((t) => t.id.equals(tombstoneId))).go();
       try {
-        await _db.customStatement(
-          'DELETE FROM book_fts WHERE book_id = ?',
-          [tombstoneId],
-        );
+        await _db.customStatement('DELETE FROM book_fts WHERE book_id = ?', [
+          tombstoneId,
+        ]);
       } catch (_) {
         // FTS 是派生表，删不掉不影响主流程
       }
@@ -738,27 +1009,60 @@ class SyncRepositoryImpl implements SyncRepository {
     if (local != null) {
       // LWW：远端更新才覆盖元数据（书源文件保留本地路径）
       if (_isNewer(remoteHlc, local.hlc)) {
-        await (_db.update(_db.books)..where((r) => r.id.equals(remote.id)))
-            .write(BooksCompanion(
-          title: Value(remote.title),
-          author: Value(remote.author),
-          language: Value(remote.language),
-          description: Value(remote.description),
-          updatedAt: Value(remote.updatedAt),
-          lastOpenedAt: Value(remote.lastOpenedAt),
-          isFinished: Value(remote.isFinished),
-          isArchived: Value(remote.isArchived),
-          rating: Value(remote.rating),
-          review: Value(remote.review),
-          tags: Value(
-            remote.tags.isEmpty ? null : jsonEncode(remote.tags),
+        final contentChanged =
+            remote.fileSha256 != local.fileSha256 &&
+            RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(remote.fileSha256);
+        if (contentChanged) {
+          await (_db.delete(
+            _db.chapters,
+          )..where((c) => c.bookId.equals(remote.id))).go();
+        }
+        await (_db.update(
+          _db.books,
+        )..where((r) => r.id.equals(remote.id))).write(
+          BooksCompanion(
+            fileSha256: Value(
+              contentChanged ? remote.fileSha256 : local.fileSha256,
+            ),
+            filePath: Value(
+              contentChanged
+                  ? _plannedBookPath(remote.id, remote.fileSha256)
+                  : local.filePath,
+            ),
+            fileSize: Value(contentChanged ? remote.fileSize : local.fileSize),
+            format: Value(contentChanged ? remote.format.name : local.format),
+            chapterCount: Value(
+              contentChanged ? remote.chapterCount : local.chapterCount,
+            ),
+            wordCount: Value(
+              contentChanged ? remote.wordCount : local.wordCount,
+            ),
+            title: Value(remote.title),
+            author: Value(remote.author),
+            language: Value(remote.language),
+            description: Value(remote.description),
+            updatedAt: Value(remote.updatedAt),
+            lastOpenedAt: Value(remote.lastOpenedAt),
+            finishedAt: Value(remote.finishedAt),
+            isFinished: Value(remote.isFinished),
+            readStatus: Value(remote.readStatus.name),
+            isArchived: Value(remote.isArchived),
+            rating: Value(remote.rating),
+            review: Value(remote.review),
+            tags: Value(remote.tags.isEmpty ? null : jsonEncode(remote.tags)),
+            category: Value(remote.category),
+            pinnedAt: Value(remote.pinnedAt),
+            // 旧设备不包含收藏字段，不应清掉本地收藏。
+            isFavorite: Value(
+              payload.containsKey('isFavorite')
+                  ? remote.isFavorite
+                  : local.isFavorite,
+            ),
+            deletedAt: Value(remote.deletedAt),
+            hlc: Value(remote.hlc),
+            deviceId: Value(remote.deviceId),
           ),
-          category: Value(remote.category),
-          pinnedAt: Value(remote.pinnedAt),
-          deletedAt: Value(remote.deletedAt),
-          hlc: Value(remote.hlc),
-          deviceId: Value(remote.deviceId),
-        ));
+        );
       }
       if (remote.deletedAt == null) await _ensureCoverForBook(remote.id);
       return;
@@ -773,44 +1077,58 @@ class SyncRepositoryImpl implements SyncRepository {
     // 若在本机存在则兜底。
     final downloadedCover = await _downloadCover(remote.id);
     final remoteCover = remote.coverPath;
-    final coverPath = downloadedCover ??
+    final coverPath =
+        downloadedCover ??
         (remoteCover != null &&
                 remoteCover.isNotEmpty &&
                 await File(remoteCover).exists()
             ? remoteCover
             : null);
 
-    await _db.into(_db.books).insert(
+    await _db
+        .into(_db.books)
+        .insert(
           _bookRowCompanion(remote, bookPath, coverPath: coverPath),
           mode: InsertMode.insertOrIgnore,
         );
   }
 
   /// 本地书源文件的计划路径（按需下载时落在这里）。
-  String _plannedBookPath(String bookId) =>
-      p.join(_libraryDir.path, 'books', '$bookId.epub');
+  String _plannedBookPath(String bookId, [String? sha]) => p.join(
+    _libraryDir.path,
+    'books',
+    sha == null ? '$bookId.epub' : '${bookId}_$sha.epub',
+  );
 
   /// 归一化云端书籍的本地路径：分片/远端带来的 `file_path` 是别的设备
   /// 上的路径，本机文件不在时改写为本机计划路径，按需下载才落对地方。
   Future<void> _normalizeCloudBookPaths() async {
     try {
-      final rows = await _db.customSelect(
-        'SELECT id, file_path FROM books WHERE deleted_at IS NULL',
-      ).get();
+      final rows = await _db
+          .customSelect(
+            'SELECT id, file_path, file_sha256 FROM books WHERE deleted_at IS NULL',
+          )
+          .get();
       for (final row in rows) {
         final id = row.data['id'] as String? ?? '';
         if (id.isEmpty) continue;
         final path = row.data['file_path'] as String? ?? '';
         if (path.isEmpty) {
-          await (_db.update(_db.books)..where((b) => b.id.equals(id)))
-              .write(BooksCompanion(filePath: Value(_plannedBookPath(id))));
+          await (_db.update(_db.books)..where((b) => b.id.equals(id))).write(
+            BooksCompanion(filePath: Value(_plannedBookPath(id))),
+          );
           continue;
         }
         if (await File(path).exists()) continue;
-        final planned = _plannedBookPath(id);
+        final sha = row.data['file_sha256'] as String? ?? '';
+        final planned = _plannedBookPath(
+          id,
+          RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha) ? sha : null,
+        );
         if (path == planned) continue;
-        await (_db.update(_db.books)..where((b) => b.id.equals(id)))
-            .write(BooksCompanion(filePath: Value(planned)));
+        await (_db.update(_db.books)..where((b) => b.id.equals(id))).write(
+          BooksCompanion(filePath: Value(planned)),
+        );
       }
     } catch (_) {
       // 归一化失败不阻塞同步（下次同步再试）
@@ -821,38 +1139,39 @@ class SyncRepositoryImpl implements SyncRepository {
     Book b,
     String filePath, {
     String? coverPath,
-  }) =>
-      BooksCompanion.insert(
-        id: b.id,
-        title: b.title,
-        author: Value(b.author),
-        series: Value(b.series),
-        seriesIndex: Value(b.seriesIndex),
-        language: Value(b.language),
-        description: Value(b.description),
-        format: b.format.name,
-        filePath: filePath,
-        fileSha256: b.fileSha256,
-        fileSize: b.fileSize,
-        coverPath: Value(coverPath),
-        chapterCount: Value(b.chapterCount),
-        wordCount: Value(b.wordCount),
-        addedAt: b.addedAt,
-        updatedAt: b.updatedAt,
-        lastOpenedAt: Value(b.lastOpenedAt),
-        isFinished: Value(b.isFinished),
-        readStatus: Value(b.readStatus.name),
-        isArchived: Value(b.isArchived),
-        rating: Value(b.rating),
-        review: Value(b.review),
-        tags: Value(b.tags.isEmpty ? null : jsonEncode(b.tags)),
-        category: Value(b.category),
-        pinnedAt: Value(b.pinnedAt),
-        deletedAt: Value(b.deletedAt),
-        metaJson: Value(b.metaJson),
-        hlc: b.hlc,
-        deviceId: b.deviceId,
-      );
+  }) => BooksCompanion.insert(
+    id: b.id,
+    title: b.title,
+    author: Value(b.author),
+    series: Value(b.series),
+    seriesIndex: Value(b.seriesIndex),
+    language: Value(b.language),
+    description: Value(b.description),
+    format: b.format.name,
+    filePath: filePath,
+    fileSha256: b.fileSha256,
+    fileSize: b.fileSize,
+    coverPath: Value(coverPath),
+    chapterCount: Value(b.chapterCount),
+    wordCount: Value(b.wordCount),
+    addedAt: b.addedAt,
+    updatedAt: b.updatedAt,
+    lastOpenedAt: Value(b.lastOpenedAt),
+    finishedAt: Value(b.finishedAt),
+    isFinished: Value(b.isFinished),
+    readStatus: Value(b.readStatus.name),
+    isArchived: Value(b.isArchived),
+    rating: Value(b.rating),
+    review: Value(b.review),
+    tags: Value(b.tags.isEmpty ? null : jsonEncode(b.tags)),
+    category: Value(b.category),
+    pinnedAt: Value(b.pinnedAt),
+    isFavorite: Value(b.isFavorite),
+    deletedAt: Value(b.deletedAt),
+    metaJson: Value(b.metaJson),
+    hlc: b.hlc,
+    deviceId: b.deviceId,
+  );
 
   Future<void> _mergeProgress(
     Map<String, dynamic> payload,
@@ -866,17 +1185,20 @@ class SyncRepositoryImpl implements SyncRepository {
     final local = await _db.progressDao.getForBook(bookId);
 
     if (local == null) {
-      await _db.progressDao.upsert(ReadingProgressRow(
-        bookId: bookId,
-        locator: payload['locator'] as String? ?? '{}',
-        percent: remotePercent,
-        furthestLocator: payload['furthestLocator'] as String?,
-        furthestPercent: remoteFurthest,
-        updatedAt: (payload['createdAt'] as num?)?.toInt() ??
-            DateTime.now().millisecondsSinceEpoch,
-        hlc: remoteHlc,
-        deviceId: payload['deviceId'] as String? ?? '',
-      ));
+      await _db.progressDao.upsert(
+        ReadingProgressRow(
+          bookId: bookId,
+          locator: payload['locator'] as String? ?? '{}',
+          percent: remotePercent,
+          furthestLocator: payload['furthestLocator'] as String?,
+          furthestPercent: remoteFurthest,
+          updatedAt:
+              (payload['createdAt'] as num?)?.toInt() ??
+              DateTime.now().millisecondsSinceEpoch,
+          hlc: remoteHlc,
+          deviceId: payload['deviceId'] as String? ?? '',
+        ),
+      );
       return;
     }
 
@@ -885,21 +1207,24 @@ class SyncRepositoryImpl implements SyncRepository {
     // 最远进度取 max，永不回退
     final takeFurthest = remoteFurthest > local.furthestPercent;
     if (!lww && !takeFurthest) return;
-    await _db.progressDao.upsert(local.copyWith(
-      locator: lww ? (payload['locator'] as String? ?? local.locator)
-          : local.locator,
-      percent: lww ? remotePercent : local.percent,
-      furthestLocator: Value(takeFurthest
-          ? (payload['furthestLocator'] as String? ??
-              local.furthestLocator)
-          : local.furthestLocator),
-      furthestPercent:
-          takeFurthest ? remoteFurthest : local.furthestPercent,
-      hlc: lww ? remoteHlc : local.hlc,
-      deviceId: lww
-          ? (payload['deviceId'] as String? ?? local.deviceId)
-          : local.deviceId,
-    ));
+    await _db.progressDao.upsert(
+      local.copyWith(
+        locator: lww
+            ? (payload['locator'] as String? ?? local.locator)
+            : local.locator,
+        percent: lww ? remotePercent : local.percent,
+        furthestLocator: Value(
+          takeFurthest
+              ? (payload['furthestLocator'] as String? ?? local.furthestLocator)
+              : local.furthestLocator,
+        ),
+        furthestPercent: takeFurthest ? remoteFurthest : local.furthestPercent,
+        hlc: lww ? remoteHlc : local.hlc,
+        deviceId: lww
+            ? (payload['deviceId'] as String? ?? local.deviceId)
+            : local.deviceId,
+      ),
+    );
   }
 
   Future<void> _mergeAnnotation(
@@ -912,7 +1237,9 @@ class SyncRepositoryImpl implements SyncRepository {
     final existing = await _annotationById(id);
     if (existing != null && !_isNewer(remoteHlc, existing.hlc)) return;
     final deleted = payload['deletedAt'] as num?;
-    await _db.into(_db.annotations).insertOnConflictUpdate(
+    await _db
+        .into(_db.annotations)
+        .insertOnConflictUpdate(
           AnnotationRow(
             id: id,
             bookId: bookId,
@@ -922,9 +1249,11 @@ class SyncRepositoryImpl implements SyncRepository {
             locatorEnd: payload['locatorEnd'] as String? ?? '{}',
             quotedText: payload['quotedText'] as String?,
             note: payload['note'] as String?,
-            createdAt: (payload['createdAt'] as num?)?.toInt() ??
+            createdAt:
+                (payload['createdAt'] as num?)?.toInt() ??
                 DateTime.now().millisecondsSinceEpoch,
-            updatedAt: (payload['createdAt'] as num?)?.toInt() ??
+            updatedAt:
+                (payload['createdAt'] as num?)?.toInt() ??
                 DateTime.now().millisecondsSinceEpoch,
             deletedAt: deleted?.toInt(),
             hlc: remoteHlc,
@@ -943,13 +1272,16 @@ class SyncRepositoryImpl implements SyncRepository {
     final existing = await _bookmarkById(id);
     if (existing != null && !_isNewer(remoteHlc, existing.hlc)) return;
     final deleted = payload['deletedAt'] as num?;
-    await _db.into(_db.bookmarks).insertOnConflictUpdate(
+    await _db
+        .into(_db.bookmarks)
+        .insertOnConflictUpdate(
           BookmarkRow(
             id: id,
             bookId: bookId,
             locator: payload['locator'] as String? ?? '{}',
             label: payload['label'] as String?,
-            createdAt: (payload['createdAt'] as num?)?.toInt() ??
+            createdAt:
+                (payload['createdAt'] as num?)?.toInt() ??
                 DateTime.now().millisecondsSinceEpoch,
             deletedAt: deleted?.toInt(),
             hlc: remoteHlc,
@@ -960,27 +1292,30 @@ class SyncRepositoryImpl implements SyncRepository {
 
   // ---- 内部工具 ----
 
-  Future<List<SyncOpRow>> _pendingOps() => (_db.select(_db.syncOps)
-        ..where((r) => r.uploadedAt.isNull())
-        ..orderBy([(r) => OrderingTerm.asc(r.seq)]))
-      .get();
+  Future<List<SyncOpRow>> _pendingOps() =>
+      (_db.select(_db.syncOps)
+            ..where((r) => r.uploadedAt.isNull())
+            ..orderBy([(r) => OrderingTerm.asc(r.seq)]))
+          .get();
 
-  Future<AnnotationRow?> _annotationById(String id) =>
-      (_db.select(_db.annotations)..where((r) => r.id.equals(id)))
-          .getSingleOrNull();
+  Future<AnnotationRow?> _annotationById(String id) => (_db.select(
+    _db.annotations,
+  )..where((r) => r.id.equals(id))).getSingleOrNull();
 
-  Future<BookmarkRow?> _bookmarkById(String id) =>
-      (_db.select(_db.bookmarks)..where((r) => r.id.equals(id)))
-          .getSingleOrNull();
+  Future<BookmarkRow?> _bookmarkById(String id) => (_db.select(
+    _db.bookmarks,
+  )..where((r) => r.id.equals(id))).getSingleOrNull();
 
-  /// 同步进度里的「在同步什么」：书籍信息 / 阅读进度 / 笔记 / 书签。
+  /// 同步进度里的「在同步什么」：书籍信息 / 阅读进度 / 笔记 / 书签 /
+  /// 阅读时长。
   String _entityLabel(String entity) => switch (entity) {
-        'book' => '书籍信息',
-        'progress' => '阅读进度',
-        'annotation' => '笔记',
-        'bookmark' => '书签',
-        _ => '阅读数据',
-      };
+    'book' => '书籍信息',
+    'progress' => '阅读进度',
+    'annotation' => '笔记',
+    'bookmark' => '书签',
+    'session' => '阅读时长',
+    _ => '阅读数据',
+  };
 
   /// 同步自定义阅读字体（字体文件 + 清单）。
   ///
@@ -1001,7 +1336,7 @@ class SyncRepositoryImpl implements SyncRepository {
       );
       return await sync.run(onProgress: onProgress);
     } catch (e) {
-      return FontSyncResult(error: '$e');
+      return FontSyncResult(error: describeStoreError(e));
     }
   }
 
@@ -1018,7 +1353,48 @@ class SyncRepositoryImpl implements SyncRepository {
       );
       return await sync.run(onProgress: onProgress);
     } catch (e) {
-      return BackgroundSyncResult(error: '');
+      return BackgroundSyncResult(error: describeStoreError(e));
+    }
+  }
+
+  /// 背景音乐（导入音频）也走同步：spaces/<空间>/music/* + manifest。
+  ///
+  /// 音频落在应用支持目录 `music/`，与 `AudioLibraryController` 同目录同
+  /// prefs 清单；内置曲目在 APK 里，不参与同步。
+  Future<AudioSyncResult> _syncAudios({
+    void Function(SyncProgress progress)? onProgress,
+  }) async {
+    try {
+      final support = await getApplicationSupportDirectory();
+      final prefs = await SharedPreferences.getInstance();
+      final sync = AudioSync(
+        store: _store,
+        spaceId: _spaceId,
+        prefs: prefs,
+        dir: Directory(p.join(support.path, 'music')),
+      );
+      return await sync.run(onProgress: onProgress);
+    } catch (e) {
+      return AudioSyncResult(error: describeStoreError(e));
+    }
+  }
+
+  /// 自定义阅读主题清单也走同步（`spaces/<空间>/themes.json`）。
+  ///
+  /// 背景图必须已经同步过：主题里只存图片文件名，本机路径在这里还原。
+  Future<ThemeSyncResult> _syncThemes() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final prefs = await SharedPreferences.getInstance();
+      final sync = ThemeSync(
+        store: _store,
+        spaceId: _spaceId,
+        prefs: prefs,
+        backgroundsDir: Directory(p.join(docs.path, 'QYReader', 'backgrounds')),
+      );
+      return await sync.run();
+    } catch (e) {
+      return ThemeSyncResult(error: describeStoreError(e));
     }
   }
 
@@ -1032,10 +1408,12 @@ class SyncRepositoryImpl implements SyncRepository {
     if (cached != null) return cached;
     String title = '';
     try {
-      final row = await _db.customSelect(
-        'SELECT title FROM books WHERE id = ?',
-        variables: [Variable.withString(id)],
-      ).getSingleOrNull();
+      final row = await _db
+          .customSelect(
+            'SELECT title FROM books WHERE id = ?',
+            variables: [Variable.withString(id)],
+          )
+          .getSingleOrNull();
       title = row?.data['title'] as String? ?? '';
     } catch (_) {
       // 查不到就用 id
@@ -1061,7 +1439,10 @@ class SyncRepositoryImpl implements SyncRepository {
   }
 
   /// 远端 op 的书名：op 里带标题就用它（本地还没建书时也能显示）。
-  Future<String> _titleOfRemoteOp(Map<String, dynamic> op, String entityId) async {
+  Future<String> _titleOfRemoteOp(
+    Map<String, dynamic> op,
+    String entityId,
+  ) async {
     if (op['entity'] == 'book') {
       final raw = op['payload'];
       if (raw is String) {
@@ -1084,16 +1465,16 @@ class SyncRepositoryImpl implements SyncRepository {
       remote.isNotEmpty && remote.compareTo(local) > 0;
 
   Future<String?> _stateOf(String key) async {
-    final row = await (_db.select(_db.syncState)
-          ..where((r) => r.key.equals(key)))
-        .getSingleOrNull();
+    final row = await (_db.select(
+      _db.syncState,
+    )..where((r) => r.key.equals(key))).getSingleOrNull();
     return row?.value;
   }
 
   Future<void> _setState(String key, String value) async {
-    await _db.into(_db.syncState).insertOnConflictUpdate(
-          SyncStateRow(key: key, value: value),
-        );
+    await _db
+        .into(_db.syncState)
+        .insertOnConflictUpdate(SyncStateRow(key: key, value: value));
   }
 
   Future<void> _ensureDirs() async {

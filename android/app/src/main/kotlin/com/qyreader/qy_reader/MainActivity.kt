@@ -7,6 +7,8 @@ import android.os.BatteryManager
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.WindowManager
+import com.qyreader.qy_reader.widgets.HomeWidgetStore
+import com.qyreader.qy_reader.widgets.HomeWidgetUpdater
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -15,7 +17,9 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private var openChannel: MethodChannel? = null
     private var launchChannel: MethodChannel? = null
+    private var widgetChannel: MethodChannel? = null
     private var pendingOpenPath: String? = null
+    private var pendingWidgetAction: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // 文件「打开方式」的 data URI 不能交给 Flutter 当深链路由：
@@ -25,11 +29,47 @@ class MainActivity : FlutterActivity() {
             pendingOpenPath = path
             intent?.data = null
         }
+        // 桌面组件冷启动：记下动作，等 Flutter 侧来取（取完即清）。
+        val widgetAction = intent?.getStringExtra(HomeWidgetUpdater.EXTRA_WIDGET_ACTION)
+        if (!widgetAction.isNullOrEmpty()) {
+            pendingWidgetAction = widgetAction
+            intent?.removeExtra(HomeWidgetUpdater.EXTRA_WIDGET_ACTION)
+        }
         super.onCreate(savedInstanceState)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "qyreader/app_version")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "versionCode") {
+                    @Suppress("DEPRECATION")
+                    val info = packageManager.getPackageInfo(packageName, 0)
+                    val code = if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+                    result.success(code)
+                } else if (call.method == "installApk") {
+                    try {
+                        val args = call.arguments as Map<*, *>
+                        val file = File(args["path"] as String).canonicalFile
+                        val expected = (args["versionCode"] as Number).toLong()
+                        require(file.parentFile == cacheDir.canonicalFile && file.name == "qyreader-update.apk")
+                        @Suppress("DEPRECATION")
+                        val info = packageManager.getPackageArchiveInfo(file.path, 0)
+                            ?: throw IllegalArgumentException("安装包无效")
+                        @Suppress("DEPRECATION")
+                        val version = if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+                        require(info.packageName == packageName && version == expected) { "安装包与更新清单不匹配" }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.updates", file)
+                        startActivity(Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        })
+                        result.success(null)
+                    } catch (e: Exception) {
+                        result.error("install", e.message, null)
+                    }
+                } else result.notImplemented()
+            }
         // 阅读页常亮：避免依赖额外的 wakelock 插件
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -95,6 +135,48 @@ class MainActivity : FlutterActivity() {
         ).also { channel ->
             channel.setMethodCallHandler { _, result -> result.notImplemented() }
         }
+        // 桌面组件：Flutter 推送数据快照 → 存 prefs 并刷新三个组件；
+        // 组件点击 → 送到 Dart（WidgetActionRouter 转成 go_router 导航）。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "qyreader/home_widgets"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "update" -> {
+                    val json = call.arguments as? String
+                    if (json.isNullOrBlank()) {
+                        result.error("bad_args", "缺少桌面组件数据", null)
+                    } else {
+                        val appContext = applicationContext
+                        // 解码封面 + RemoteViews 更新放到后台线程，别卡 UI。
+                        Thread {
+                            try {
+                                HomeWidgetStore.save(appContext, json)
+                                HomeWidgetUpdater.updateAll(appContext)
+                            } catch (_: Throwable) {
+                                // 组件刷新失败不能拖垮 App
+                            }
+                        }.start()
+                        result.success(null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+        widgetChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "qyreader/widget_action"
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getInitialAction" -> {
+                        result.success(pendingWidgetAction)
+                        pendingWidgetAction = null
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -102,10 +184,23 @@ class MainActivity : FlutterActivity() {
         val path = copyIncomingFile(intent)
         if (path != null) intent.data = null
         val fromLauncher = isLauncherIntent(intent)
+        val widgetAction = intent.getStringExtra(HomeWidgetUpdater.EXTRA_WIDGET_ACTION)
+        if (!widgetAction.isNullOrEmpty()) {
+            intent.removeExtra(HomeWidgetUpdater.EXTRA_WIDGET_ACTION)
+        }
         super.onNewIntent(intent)
         // 从桌面图标重新进入：回书架（用户要求「下次启动在书架，不回到阅读页」）。
         if (fromLauncher) {
             launchChannel?.invokeMethod("resetToShelf", null)
+        }
+        // 组件点击（进程还在）：直接通知 Dart 导航。
+        if (!widgetAction.isNullOrEmpty()) {
+            val channel = widgetChannel
+            if (channel != null) {
+                channel.invokeMethod("open", widgetAction)
+            } else {
+                pendingWidgetAction = widgetAction
+            }
         }
         if (path == null) return
         val channel = openChannel

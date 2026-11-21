@@ -7,10 +7,7 @@ import '../../../app/theme/motion.dart';
 import '../../../domain/entities/book.dart';
 
 /// 询问是否从云端下载这本书；返回用户是否同意（取消 / 点外部 = false）。
-Future<bool> showCloudDownloadConfirm(
-  BuildContext context,
-  Book book,
-) async {
+Future<bool> showCloudDownloadConfirm(BuildContext context, Book book) async {
   final sizeText = _sizeText(book.fileSize);
   final ok = await showDialog<bool>(
     context: context,

@@ -29,10 +29,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
   }
 
-  testWidgets('设置页分成外观 / 资源 / 管理 / 数据 / 关于五组', (tester) async {
+  testWidgets('设置页分成外观 / 资源 / 管理 / 数据 / 实验性功能 / 关于六组', (tester) async {
     await pumpSettings(tester);
 
-    for (final section in ['外观', '资源', '管理', '数据', '关于']) {
+    for (final section in ['外观', '资源', '管理', '数据', '实验性功能', '关于']) {
       expect(find.text(section), findsOneWidget, reason: '缺少「$section」分组');
     }
 
@@ -41,17 +41,37 @@ void main() {
     expect(find.text('主题色'), findsOneWidget);
     expect(find.byKey(const ValueKey('settings-theme-mode')), findsOneWidget);
 
-    // 资源：字体 / 背景
+    // 资源：字体 / 背景 / 听书音频
     expect(find.text('字体'), findsOneWidget);
     expect(find.text('背景'), findsOneWidget);
+    expect(find.text('听书音频'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-audio')), findsOneWidget);
 
-    // 管理：标签 / 分类
+    // 管理：我的阅读 / 笔记回顾 / 标签 / 分类 / 作者管理 / 重复书籍整理
+    expect(find.text('我的阅读'), findsOneWidget);
+    expect(find.text('笔记回顾'), findsOneWidget);
     expect(find.text('标签'), findsOneWidget);
     expect(find.text('分类'), findsOneWidget);
+    expect(find.text('作者管理'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-authors')), findsOneWidget);
+    expect(find.text('重复书籍整理'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-duplicate-books')),
+      findsOneWidget,
+    );
 
-    // 数据：同步 / 缓存
+    // 数据：同步 / 缓存 / 导出阅读数据
     expect(find.text('同步'), findsOneWidget);
     expect(find.text('缓存'), findsOneWidget);
+    expect(find.text('导出阅读数据'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-export-reading-data')),
+      findsOneWidget,
+    );
+
+    // 实验性功能：微信读书
+    expect(find.text('微信读书'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-weread')), findsOneWidget);
 
     // 关于：关于 + 开源协议
     expect(find.text('关于 QYReader'), findsOneWidget);

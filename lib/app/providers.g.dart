@@ -237,7 +237,7 @@ final syncRepositoryProvider = FutureProvider<SyncRepository>.internal(
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef SyncRepositoryRef = FutureProviderRef<SyncRepository>;
-String _$statsRepositoryHash() => r'f1f78b43c74eccc54b81dcfceae48d3e588d89f3';
+String _$statsRepositoryHash() => r'6e6c07f2f5b3e659349c425bd8d92cb8ef8ce4f1';
 
 /// 阅读统计仓储单例。
 ///

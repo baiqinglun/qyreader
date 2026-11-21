@@ -91,9 +91,7 @@ class _BookSearchPageState extends ConsumerState<BookSearchPage> {
 
   Widget _buildBody(ReadingTheme theme) {
     if (_searching) {
-      return Center(
-        child: CircularProgressIndicator(color: theme.accent),
-      );
+      return Center(child: CircularProgressIndicator(color: theme.accent));
     }
     if (_error.isNotEmpty) {
       return Center(
@@ -158,7 +156,9 @@ class _HitTile extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                hit.chapterTitle.isEmpty ? '第 ${hit.chapterIdx + 1} 节' : hit.chapterTitle,
+                hit.chapterTitle.isEmpty
+                    ? '第 ${hit.chapterIdx + 1} 节'
+                    : hit.chapterTitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -199,13 +199,12 @@ class _SnippetText extends StatelessWidget {
       if (start > 0) {
         spans.add(TextSpan(text: rest.substring(0, start)));
       }
-      spans.add(TextSpan(
-        text: rest.substring(start + 1, end),
-        style: TextStyle(
-          color: theme.accent,
-          fontWeight: FontWeight.w700,
+      spans.add(
+        TextSpan(
+          text: rest.substring(start + 1, end),
+          style: TextStyle(color: theme.accent, fontWeight: FontWeight.w700),
         ),
-      ));
+      );
       rest = rest.substring(end + 1);
     }
     return Text.rich(

@@ -3,6 +3,7 @@ library;
 
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,6 +12,7 @@ import 'package:qy_reader/core/hlc.dart';
 import 'package:qy_reader/data/repositories/annotation_repository_impl.dart';
 import 'package:qy_reader/data/repositories/book_repository_impl.dart';
 import 'package:qy_reader/data/repositories/progress_repository_impl.dart';
+import 'package:qy_reader/data/repositories/stats_repository_impl.dart';
 import 'package:qy_reader/data/repositories/sync_repository_impl.dart';
 import 'package:qy_reader/data/sync/local_object_store.dart';
 import 'package:qy_reader/domain/entities/annotation.dart';
@@ -39,11 +41,15 @@ class _Device {
     hlcClock: clock,
     deviceId: deviceId,
   );
-  late final AnnotationRepositoryImpl annotations =
-      AnnotationRepositoryImpl(
+  late final AnnotationRepositoryImpl annotations = AnnotationRepositoryImpl(
     db: db,
     hlcClock: clock,
     deviceId: deviceId,
+  );
+  late final StatsRepositoryImpl stats = StatsRepositoryImpl(
+    db: db,
+    deviceId: deviceId,
+    hlcClock: clock,
   );
   late final SyncRepositoryImpl sync = SyncRepositoryImpl(
     db: db,
@@ -56,10 +62,7 @@ class _Device {
 
   Future<Book> importBook(String sourcePath) async {
     final r = await books.importFromFile(sourcePath);
-    return r.when(
-      ok: (b) => b,
-      failure: (e) => throw StateError('导入失败: $e'),
-    );
+    return r.when(ok: (b) => b, failure: (e) => throw StateError('导入失败: $e'));
   }
 }
 
@@ -101,6 +104,69 @@ void main() {
     await f.writeAsBytes(buildEpub());
     return f.path;
   }
+
+  test('收藏状态同步到新设备，取消收藏也同步', () async {
+    final src = await writeEpub('favorite.epub');
+    final book = await a.importBook(src);
+    await a.books.setFavorite(book.id, true);
+    expect((await a.sync.syncNow()).ok, isTrue);
+    expect((await b.sync.syncNow()).ok, isTrue);
+    expect((await b.books.getById(book.id))!.isFavorite, isTrue);
+    await a.books.setFavorite(book.id, false);
+    expect((await a.sync.syncNow()).ok, isTrue);
+    expect((await b.sync.syncNow()).ok, isTrue);
+    expect((await b.books.getById(book.id))!.isFavorite, isFalse);
+  });
+
+  test('覆盖导入同步新书源，并修复已合并旧书源的设备', () async {
+    final original = File('${tempRoot.path}/old.txt');
+    final replacement = File('${tempRoot.path}/new.txt');
+    await original.writeAsString('旧占位正文');
+    await replacement.writeAsString('新正文内容' * 300);
+    final book = await a.importBook(original.path);
+    await a.sync.syncNow();
+    await b.sync.syncNow();
+    expect(await b.sync.ensureBookFileLocal(book.id), isTrue);
+    final old = (await b.books.getById(book.id))!;
+    final result = await a.books.replaceBookContent(book.id, replacement.path);
+    final updated = result.when(
+      ok: (value) => value,
+      failure: (e) => throw StateError('$e'),
+    );
+    await a.sync.syncNow();
+    await b.sync.syncNow();
+    var received = (await b.books.getById(book.id))!;
+    expect(received.fileSha256, updated.fileSha256);
+    expect(received.fileSize, updated.fileSize);
+    expect(await b.sync.ensureBookFileLocal(book.id), isTrue);
+    expect(
+      await File(received.filePath).readAsString(),
+      await replacement.readAsString(),
+    );
+
+    // 模拟旧版本已经处理了更新操作，却保留旧书源字段。
+    await (b.db.update(
+      b.db.books,
+    )..where((row) => row.id.equals(book.id))).write(
+      BooksCompanion(
+        fileSha256: Value(old.fileSha256),
+        fileSize: Value(old.fileSize),
+        filePath: Value(old.filePath),
+      ),
+    );
+    await b.db.customStatement(
+      "DELETE FROM sync_state WHERE key = 'sync.contentRepairV1'",
+    );
+    await b.sync.syncNow();
+    received = (await b.books.getById(book.id))!;
+    expect(received.fileSha256, updated.fileSha256);
+    expect(received.fileSize, updated.fileSize);
+    expect(await b.sync.ensureBookFileLocal(book.id), isTrue);
+    expect(
+      await File(received.filePath).readAsString(),
+      await replacement.readAsString(),
+    );
+  });
 
   test('书籍 + 进度 + 标注 + 书签全链路同步到另一台设备', () async {
     final src = await writeEpub('book.epub');
@@ -152,8 +218,10 @@ void main() {
     expect(await File(bBook.filePath).exists(), isFalse);
     expect(bBook.coverPath, isNotNull);
     expect(await File(bBook.coverPath!).exists(), isTrue);
-    expect((await b.books.getChapters(book.id)).length,
-        (await a.books.getChapters(book.id)).length);
+    expect(
+      (await b.books.getChapters(book.id)).length,
+      (await a.books.getChapters(book.id)).length,
+    );
 
     // 首次打开（按需）才下载书源文件
     expect(await b.sync.ensureBookFileLocal(book.id), isTrue);
@@ -170,6 +238,143 @@ void main() {
     expect(bAnns.single.color, AnnotationColor.green);
 
     expect(await b.annotations.listBookmarks(book.id), hasLength(1));
+  });
+
+  test('阅读时长（会话）同步到另一台设备：明细合并 + 当日聚合重算', () async {
+    final src = await writeEpub('book.epub');
+    final book = await a.importBook(src);
+    final now = DateTime.now();
+    final noon = DateTime(now.year, now.month, now.day, 12);
+    await a.stats.recordSession(
+      bookId: book.id,
+      startedAt: noon.millisecondsSinceEpoch,
+      endedAt: noon.add(const Duration(minutes: 12)).millisecondsSinceEpoch,
+      charsRead: 1500,
+    );
+
+    // A 推送：book + session
+    final pushA = await a.sync.syncNow();
+    expect(pushA.ok, isTrue, reason: pushA.error);
+    expect(pushA.pushed, 2);
+
+    // B 拉取
+    final pullB = await b.sync.syncNow();
+    expect(pullB.ok, isTrue, reason: pullB.error);
+    expect(pullB.applied, 2);
+
+    // B 上会话明细已合并，设备归属保留
+    final bSessions = await b.db.select(b.db.readingSessions).get();
+    expect(bSessions, hasLength(1));
+    expect(bSessions.single.deviceId, a.deviceId);
+    expect(bSessions.single.durationMs, 12 * 60 * 1000);
+
+    // B 的当日聚合已重算：单书 + 全书合计
+    final day =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    final daily = await (b.db.select(
+      b.db.dailyStats,
+    )..where((r) => r.day.equals(day))).get();
+    expect(daily, hasLength(2));
+    final perBook = daily.firstWhere((r) => r.bookId == book.id);
+    expect(perBook.durationMs, 12 * 60 * 1000);
+    final total = daily.firstWhere((r) => r.bookId == '');
+    expect(total.durationMs, 12 * 60 * 1000);
+    expect(total.sessions, 1);
+
+    // 幂等：B 再同步一遍不重复计数
+    await b.sync.syncNow();
+    final again = await (b.db.select(
+      b.db.dailyStats,
+    )..where((r) => r.day.equals(day))).get();
+    expect(again.firstWhere((r) => r.bookId == '').durationMs, 12 * 60 * 1000);
+    expect(again.firstWhere((r) => r.bookId == '').sessions, 1);
+  });
+
+  test('两台设备各读一段：合并后当日合计是两段之和', () async {
+    final src = await writeEpub('book.epub');
+    final book = await a.importBook(src);
+    final now = DateTime.now();
+    DateTime noonAt(int minute) =>
+        DateTime(now.year, now.month, now.day, 12, minute);
+    await a.stats.recordSession(
+      bookId: book.id,
+      startedAt: noonAt(0).millisecondsSinceEpoch,
+      endedAt: noonAt(12).millisecondsSinceEpoch,
+      charsRead: 1500,
+    );
+    await a.sync.syncNow();
+    await b.sync.syncNow();
+
+    // B 在自己的设备上读了一段，推回 A
+    await b.stats.recordSession(
+      bookId: book.id,
+      startedAt: noonAt(30).millisecondsSinceEpoch,
+      endedAt: noonAt(40).millisecondsSinceEpoch,
+      charsRead: 900,
+    );
+    final pushB = await b.sync.syncNow();
+    expect(pushB.ok, isTrue, reason: pushB.error);
+    expect(pushB.pushed, 1); // 只有 B 自己的会话 op
+
+    await a.sync.syncNow();
+    final aDaily = await a.db.select(a.db.dailyStats).get();
+    final aTotal = aDaily.firstWhere((r) => r.bookId == '');
+    expect(aTotal.durationMs, 22 * 60 * 1000);
+    expect(aTotal.sessions, 2);
+    final aPerBook = aDaily.firstWhere((r) => r.bookId == book.id);
+    expect(aPerBook.durationMs, 22 * 60 * 1000);
+
+    // B 本地也一样：本地会话 + 拉回的会话
+    final bTotal = (await b.db.select(b.db.dailyStats).get()).firstWhere(
+      (r) => r.bookId == '',
+    );
+    expect(bTotal.durationMs, 22 * 60 * 1000);
+  });
+
+  test('升级补传：旧版本记录的历史会话首次同步时补传到另一台设备', () async {
+    final src = await writeEpub('book.epub');
+    final book = await a.importBook(src);
+    // 模拟旧版本数据：直接插会话行（没有 session op）
+    final now = DateTime.now();
+    final noon = DateTime(now.year, now.month, now.day, 12);
+    await a.db
+        .into(a.db.readingSessions)
+        .insert(
+          ReadingSessionsCompanion.insert(
+            id: 'legacy-1',
+            bookId: book.id,
+            startedAt: noon.millisecondsSinceEpoch,
+            endedAt: noon
+                .add(const Duration(minutes: 10))
+                .millisecondsSinceEpoch,
+            durationMs: 10 * 60 * 1000,
+            charsRead: const Value(700),
+            deviceId: a.deviceId,
+          ),
+        );
+
+    // A 首次同步：补传历史会话（book + session）
+    final pushA = await a.sync.syncNow();
+    expect(pushA.ok, isTrue, reason: pushA.error);
+    expect(pushA.pushed, 2);
+
+    final pullB = await b.sync.syncNow();
+    expect(pullB.ok, isTrue, reason: pullB.error);
+    final bSessions = await b.db.select(b.db.readingSessions).get();
+    expect(bSessions, hasLength(1));
+    expect(bSessions.single.id, 'legacy-1');
+    final day =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    final bDaily = await (b.db.select(
+      b.db.dailyStats,
+    )..where((r) => r.day.equals(day))).get();
+    expect(bDaily.firstWhere((r) => r.bookId == '').durationMs, 10 * 60 * 1000);
+
+    // 置位后不再补传：A 已无待传 op
+    final pushA2 = await a.sync.syncNow();
+    expect(pushA2.pushed, 0);
   });
 
   test('幂等：重复同步不再产生新增/重复数据', () async {
@@ -343,10 +548,7 @@ void main() {
     expect(await store.exists('a/b/c.json'), isFalse);
     // 路径穿越被隔离在桶内（'..' 段转义成 %2E%2E，不会写到桶外）
     await store.put('../escape.txt', [9]);
-    expect(
-      Directory('${tempRoot.path}/escape.txt').existsSync(),
-      isFalse,
-    );
+    expect(Directory('${tempRoot.path}/escape.txt').existsSync(), isFalse);
     expect(await store.list(''), contains('%2E%2E/escape.txt'));
     // 转义后的对象仍可按原 key 读回
     expect(await store.get('../escape.txt'), [9]);
@@ -407,8 +609,10 @@ void main() {
       final withFile = await b.books.getById(book.id);
       expect(withFile!.filePath, pulled.filePath);
       expect(await File(withFile.filePath).exists(), isTrue);
-      expect(await File(withFile.filePath).length(),
-          (await File(book.filePath).length()));
+      expect(
+        await File(withFile.filePath).length(),
+        (await File(book.filePath).length()),
+      );
     });
 
     test('清除缓存只删本地书源：封面、数据库、云端都保留', () async {
@@ -549,10 +753,7 @@ void main() {
     b.store.readKeys.clear();
     final idle = await b.sync.syncNow();
     expect(idle.ok, isTrue, reason: idle.error);
-    expect(
-      b.store.readKeys.where((k) => k.startsWith('shards/')),
-      isEmpty,
-    );
+    expect(b.store.readKeys.where((k) => k.startsWith('shards/')), isEmpty);
 
     // A 只读了 book1：同步后 B 只该拉这一本书的分片。
     await a.progress.saveProgress(
@@ -564,10 +765,53 @@ void main() {
     b.store.readKeys.clear();
     final pulled = await b.sync.syncNow();
     expect(pulled.ok, isTrue, reason: pulled.error);
-    final shardReads =
-        b.store.readKeys.where((k) => k.startsWith('shards/')).toList();
+    final shardReads = b.store.readKeys
+        .where((k) => k.startsWith('shards/'))
+        .toList();
     expect(shardReads, hasLength(1));
     expect(shardReads.single, contains(book1.id));
     expect(pulled.applied, greaterThanOrEqualTo(1));
+  });
+
+  test('已知 op 不再重复下载：再次同步不读 ops/', () async {
+    final src = await writeEpub('known-ops.epub');
+    await a.importBook(src);
+    await a.sync.syncNow();
+    await b.sync.syncNow();
+
+    b.store.readKeys.clear();
+    final again = await b.sync.syncNow();
+    expect(again.ok, isTrue, reason: again.error);
+    expect(
+      b.store.readKeys.where((k) => k.startsWith('spaces/test-space/ops/')),
+      isEmpty,
+      reason: '已应用过的 op 应按 key 直接跳过，不再下载',
+    );
+  });
+
+  test('只拉远端改动时，不重新上传对应分片', () async {
+    final src = await writeEpub('no-reupload.epub');
+    final book = await a.importBook(src);
+    await a.sync.syncNow();
+    await b.sync.syncNow();
+
+    await a.progress.saveProgress(
+      bookId: book.id,
+      locator: '{"v":1,"cfi":"epubcfi(/6/2!/4/2/1:0)","percent":0.4}',
+      percent: 0.4,
+    );
+    await a.sync.syncNow();
+    b.store.putKeys.clear();
+    final pulledB = await b.sync.syncNow();
+    expect(pulledB.ok, isTrue, reason: pulledB.error);
+    expect(
+      b.store.putKeys.where((k) => k.startsWith('shards/')),
+      isEmpty,
+      reason: 'B 只是拉取，不应把 A 上传的分片再传一遍',
+    );
+    expect(
+      b.store.putKeys.where((k) => k.startsWith('spaces/test-space/ops/')),
+      isEmpty,
+    );
   });
 }

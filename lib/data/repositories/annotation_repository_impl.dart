@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/db/app_database.dart';
 import '../../core/hlc.dart';
+import '../../core/locator.dart';
 import '../../domain/entities/annotation.dart';
 import '../../domain/entities/bookmark.dart';
 import '../../domain/repositories/annotation_repository.dart';
@@ -19,9 +20,9 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     required AppDatabase db,
     required HlcClock hlcClock,
     required this.deviceId,
-  })  : _db = db,
-        _hlcClock = hlcClock,
-        _uuid = const Uuid();
+  }) : _db = db,
+       _hlcClock = hlcClock,
+       _uuid = const Uuid();
 
   final AppDatabase _db;
   final HlcClock _hlcClock;
@@ -35,10 +36,14 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
       (await _db.annotationDao.listForBook(bookId)).map(_rowToEntity).toList();
 
   @override
-  Stream<List<Annotation>> watchForBook(String bookId) =>
-      _db.annotationDao.watchForBook(bookId).map(
-            (rows) => rows.map(_rowToEntity).toList(),
-          );
+  Stream<List<Annotation>> watchForBook(String bookId) => _db.annotationDao
+      .watchForBook(bookId)
+      .map((rows) => rows.map(_rowToEntity).toList());
+
+  @override
+  Stream<List<Annotation>> watchAll() => _db.annotationDao.watchAll().map(
+    (rows) => rows.map(_rowToEntity).toList(),
+  );
 
   @override
   Future<Annotation> addHighlight({
@@ -50,6 +55,7 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     int? chapterIndex,
     int? offset,
     int? offsetEnd,
+    AnnotationType type = AnnotationType.highlight,
   }) async {
     final id = _uuid.v4();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -65,19 +71,21 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
       if (offsetEnd != null) 'offsetEnd': offsetEnd,
     });
     await _db.transaction(() async {
-      await _db.annotationDao.upsert(AnnotationRow(
-        id: id,
-        bookId: bookId,
-        type: AnnotationType.highlight.token,
-        color: color.token,
-        locatorStart: locatorJson,
-        locatorEnd: locatorJson,
-        quotedText: quotedText,
-        createdAt: now,
-        updatedAt: now,
-        hlc: hlc.encode(),
-        deviceId: deviceId,
-      ));
+      await _db.annotationDao.upsert(
+        AnnotationRow(
+          id: id,
+          bookId: bookId,
+          type: type.token,
+          color: color.token,
+          locatorStart: locatorJson,
+          locatorEnd: locatorJson,
+          quotedText: quotedText,
+          createdAt: now,
+          updatedAt: now,
+          hlc: hlc.encode(),
+          deviceId: deviceId,
+        ),
+      );
       await _appendSyncOp(
         entity: 'annotation',
         entityId: id,
@@ -85,7 +93,7 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
         payload: jsonEncode(<String, dynamic>{
           'id': id,
           'bookId': bookId,
-          'type': AnnotationType.highlight.token,
+          'type': type.token,
           'color': color.token,
           'locatorStart': locatorJson,
           'locatorEnd': locatorJson,
@@ -102,7 +110,7 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     return Annotation(
       id: id,
       bookId: bookId,
-      type: AnnotationType.highlight,
+      type: type,
       color: color,
       locatorStart: locatorJson,
       locatorEnd: locatorJson,
@@ -120,19 +128,23 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
 
   @override
   Future<void> setNote(String id, String note) => _updateAnnotation(
-        id,
-        (row) => row.copyWith(
-          note: Value(note.isEmpty ? null : note),
-          type: note.isEmpty
-              ? AnnotationType.highlight.token
-              : AnnotationType.note.token,
-        ),
-      );
+    id,
+    (row) => row.copyWith(
+      note: Value(note.isEmpty ? null : note),
+      type: note.isEmpty
+          ? AnnotationType.highlight.token
+          : AnnotationType.note.token,
+    ),
+  );
 
   @override
-  Future<void> setAnchor(String id, String locatorJson) => _updateAnnotation(
+  Future<void> setAnchor(String id, String locatorJson, {String? locatorEnd}) =>
+      _updateAnnotation(
         id,
-        (row) => row.copyWith(locatorStart: locatorJson),
+        (row) => row.copyWith(
+          locatorStart: locatorJson,
+          locatorEnd: locatorEnd ?? locatorJson,
+        ),
       );
 
   @override
@@ -142,13 +154,19 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
 
   @override
   Future<List<Bookmark>> listBookmarks(String bookId) async =>
-      (await _db.bookmarkDao.listForBook(bookId)).map(_bookmarkRowToEntity).toList();
+      (await _db.bookmarkDao.listForBook(
+        bookId,
+      )).map(_bookmarkRowToEntity).toList();
 
   @override
-  Stream<List<Bookmark>> watchBookmarks(String bookId) =>
-      _db.bookmarkDao.watchForBook(bookId).map(
-            (rows) => rows.map(_bookmarkRowToEntity).toList(),
-          );
+  Stream<List<Bookmark>> watchBookmarks(String bookId) => _db.bookmarkDao
+      .watchForBook(bookId)
+      .map((rows) => rows.map(_bookmarkRowToEntity).toList());
+
+  @override
+  Stream<List<Bookmark>> watchAllBookmarks() => _db.bookmarkDao.watchAll().map(
+    (rows) => rows.map(_bookmarkRowToEntity).toList(),
+  );
 
   @override
   Future<Bookmark> addBookmark({
@@ -160,15 +178,17 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     final hlc = _hlcClock.tick();
     await _db.transaction(() async {
-      await _db.bookmarkDao.upsert(BookmarkRow(
-        id: id,
-        bookId: bookId,
-        locator: locatorJson,
-        label: label,
-        createdAt: now,
-        hlc: hlc.encode(),
-        deviceId: deviceId,
-      ));
+      await _db.bookmarkDao.upsert(
+        BookmarkRow(
+          id: id,
+          bookId: bookId,
+          locator: locatorJson,
+          label: label,
+          createdAt: now,
+          hlc: hlc.encode(),
+          deviceId: deviceId,
+        ),
+      );
       await _appendSyncOp(
         entity: 'bookmark',
         entityId: id,
@@ -199,26 +219,33 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
 
   // ---- 内部 ----
 
-  Annotation _rowToEntity(AnnotationRow row) => Annotation(
-        id: row.id,
-        bookId: row.bookId,
-        type: AnnotationType.fromToken(row.type),
-        color: AnnotationColor.fromToken(row.color),
-        locatorStart: row.locatorStart,
-        locatorEnd: row.locatorEnd,
-        quotedText: row.quotedText,
-        note: row.note,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      );
+  Annotation _rowToEntity(AnnotationRow row) {
+    // href/chapterIndex 不单独存列，统一从 locator 反解（笔记漫游的章号
+    // 显示、覆盖导入的「优先同章」都靠它）。
+    final loc = locatorFromJson(row.locatorStart);
+    return Annotation(
+      id: row.id,
+      bookId: row.bookId,
+      type: AnnotationType.fromToken(row.type),
+      color: AnnotationColor.fromToken(row.color),
+      locatorStart: row.locatorStart,
+      locatorEnd: row.locatorEnd,
+      quotedText: row.quotedText,
+      note: row.note,
+      href: loc?.href,
+      chapterIndex: loc?.chapterIndex,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    );
+  }
 
   Bookmark _bookmarkRowToEntity(BookmarkRow row) => Bookmark(
-        id: row.id,
-        bookId: row.bookId,
-        locator: row.locator,
-        label: row.label,
-        createdAt: row.createdAt,
-      );
+    id: row.id,
+    bookId: row.bookId,
+    locator: row.locator,
+    label: row.label,
+    createdAt: row.createdAt,
+  );
 
   /// 通用标注更新：读旧行 → 变换 → 全列写回 + sync_ops（LWW 时间戳）。
   /// 必须走 writeById（companion 显式携带 null）——insertOnConflictUpdate
@@ -326,19 +353,19 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
 
   /// 标注行 → 全列 companion（显式携带 null，供 writeById 清空可空字段）。
   AnnotationsCompanion _fullCompanion(AnnotationRow r) => AnnotationsCompanion(
-        bookId: Value(r.bookId),
-        type: Value(r.type),
-        color: Value(r.color),
-        locatorStart: Value(r.locatorStart),
-        locatorEnd: Value(r.locatorEnd),
-        quotedText: Value(r.quotedText),
-        note: Value(r.note),
-        createdAt: Value(r.createdAt),
-        updatedAt: Value(r.updatedAt),
-        deletedAt: Value(r.deletedAt),
-        hlc: Value(r.hlc),
-        deviceId: Value(r.deviceId),
-      );
+    bookId: Value(r.bookId),
+    type: Value(r.type),
+    color: Value(r.color),
+    locatorStart: Value(r.locatorStart),
+    locatorEnd: Value(r.locatorEnd),
+    quotedText: Value(r.quotedText),
+    note: Value(r.note),
+    createdAt: Value(r.createdAt),
+    updatedAt: Value(r.updatedAt),
+    deletedAt: Value(r.deletedAt),
+    hlc: Value(r.hlc),
+    deviceId: Value(r.deviceId),
+  );
 
   /// sync_ops 追加（与业务写在同一事务内调用）。
   Future<void> _appendSyncOp({
@@ -349,7 +376,9 @@ class AnnotationRepositoryImpl implements AnnotationRepository {
     required String hlc,
     required int createdAt,
   }) async {
-    await _db.into(_db.syncOps).insert(
+    await _db
+        .into(_db.syncOps)
+        .insert(
           SyncOpsCompanion.insert(
             opId: _uuid.v4(),
             entity: entity,

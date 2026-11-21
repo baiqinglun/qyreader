@@ -1,7 +1,8 @@
 /// 书架的架板：网格每行书下面一条木板（无 / 木纹 / 纯色）。
 ///
-/// 木纹是深胡桃渐变 + 几条确定性（不随机）的横向纹理 + 板沿高光 + 板沿投影。
+/// 木纹是深胡桃渐变 + 几条确定性（不随机）的横向纹理 + 板沿高光。
 /// 不随机是有意的：同一条板每帧长得一样，重建时不会「抖」，组件测试也稳定。
+/// 不画投影（用户要求分类 / 书都平放，不做立体悬浮感）。
 library;
 
 import 'package:flutter/material.dart';
@@ -30,14 +31,6 @@ class ShelfPlank extends StatelessWidget {
       top: Radius.circular(2),
       bottom: Radius.circular(4),
     );
-    final shadow = [
-      // 板沿落在纸面上的投影
-      BoxShadow(
-        color: Colors.black.withValues(alpha: 0.22),
-        blurRadius: 8,
-        offset: const Offset(0, 4),
-      ),
-    ];
 
     if (style == ShelfPlankStyle.solid) {
       return Container(
@@ -51,7 +44,6 @@ class ShelfPlank extends StatelessWidget {
               color: Colors.white.withValues(alpha: 0.16),
             ),
           ),
-          boxShadow: shadow,
         ),
       );
     }
@@ -60,9 +52,9 @@ class ShelfPlank extends StatelessWidget {
     return Container(
       height: height,
       width: double.infinity,
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         borderRadius: radius,
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
@@ -72,7 +64,6 @@ class ShelfPlank extends StatelessWidget {
           ],
           stops: [0.0, 0.55, 1.0],
         ),
-        boxShadow: shadow,
       ),
       child: CustomPaint(painter: const _WoodGrainPainter()),
     );

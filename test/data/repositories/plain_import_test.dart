@@ -61,8 +61,11 @@ void main() {
     final rows = await db
         .customSelect('SELECT book_id, chapter_idx, href, title FROM book_fts')
         .get();
-    expect(rows.length, 2,
-        reason: rows.map((r) => r.data.toString()).join(' | '));
+    expect(
+      rows.length,
+      2,
+      reason: rows.map((r) => r.data.toString()).join(' | '),
+    );
   });
 
   test('Markdown：按 # 标题切章', () async {
@@ -87,7 +90,8 @@ void main() {
     final result = await repo.importFromFile(file.path);
     result.when(
       ok: (_) => fail('不该导入成功'),
-      failure: (e) => expect(e.message, contains('EPUB / TXT / Markdown')),
+      failure: (e) =>
+          expect(e.message, contains('EPUB / AZW3 / MOBI / TXT / Markdown')),
     );
 
     final bin = File('${tempDir.path}/x.bin');

@@ -7,7 +7,7 @@ part of 'reader_themes.dart';
 // **************************************************************************
 
 String _$readerThemesControllerHash() =>
-    r'1a80851d9ee004d81754c6bb21c1d028137befb3';
+    r'afd08b7f3befea3b700399ab64154f6a18cec1e5';
 
 /// 主题库控制器。
 ///

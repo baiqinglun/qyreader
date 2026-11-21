@@ -98,10 +98,11 @@ class ShelfPrefs {
   const ShelfPrefs({
     this.coverRadius = 20,
     this.columns = ShelfColumnCount.auto,
-    this.plankStyle = ShelfPlankStyle.wood,
+    this.plankStyle = ShelfPlankStyle.none,
     this.sortField = ShelfSortField.lastOpened,
     this.sortAscending = false,
     this.showGridProgress = true,
+    this.showGridTitle = true,
     this.showRating = false,
     this.showTags = false,
     this.showDescription = false,
@@ -127,6 +128,9 @@ class ShelfPrefs {
 
   /// 网格/封面模式是否在封面右上角显示圆形阅读进度。
   final bool showGridProgress;
+
+  /// 网格模式是否在封面下方显示书名（纯封面模式不受影响）。
+  final bool showGridTitle;
 
   /// 列表行是否显示星级。
   final bool showRating;
@@ -154,6 +158,7 @@ class ShelfPrefs {
     ShelfSortField? sortField,
     bool? sortAscending,
     bool? showGridProgress,
+    bool? showGridTitle,
     bool? showRating,
     bool? showTags,
     bool? showDescription,
@@ -168,6 +173,7 @@ class ShelfPrefs {
       sortField: sortField ?? this.sortField,
       sortAscending: sortAscending ?? this.sortAscending,
       showGridProgress: showGridProgress ?? this.showGridProgress,
+      showGridTitle: showGridTitle ?? this.showGridTitle,
       showRating: showRating ?? this.showRating,
       showTags: showTags ?? this.showTags,
       showDescription: showDescription ?? this.showDescription,
@@ -216,7 +222,6 @@ class RecentShelfVisible extends _$RecentShelfVisible {
   }
 }
 
-
 /// 书架展示形式（默认平铺）。
 @Riverpod(keepAlive: true)
 class ShelfViewModeController extends _$ShelfViewModeController {
@@ -259,7 +264,6 @@ class ShelfViewModeController extends _$ShelfViewModeController {
     }
   }
 }
-
 
 /// 书架分类筛选（'' = 书架首屏；分类名 = 正在看这个分类）。
 @Riverpod(keepAlive: true)
@@ -310,6 +314,7 @@ class ShelfPrefsController extends _$ShelfPrefsController {
   static const String _kSortField = 'shelf.sortField';
   static const String _kSortAsc = 'shelf.sortAsc';
   static const String _kShowGridProgress = 'shelf.grid.showProgress';
+  static const String _kShowGridTitle = 'shelf.grid.showTitle';
   static const String _kShowRating = 'shelf.list.showRating';
   static const String _kShowTags = 'shelf.list.showTags';
   static const String _kShowDescription = 'shelf.list.showDescription';
@@ -342,31 +347,34 @@ class ShelfPrefsController extends _$ShelfPrefsController {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (_userChanged) return;
-      final rawRadius =
-          (prefs.getInt(_kRadius) ?? defaultCoverRadius).clamp(0, maxCoverRadius);
-      final rawDescLines = (prefs.getInt(_kDescriptionLines) ?? defaultTextLines)
-          .clamp(1, maxTextLines);
+      final rawRadius = (prefs.getInt(_kRadius) ?? defaultCoverRadius).clamp(
+        0,
+        maxCoverRadius,
+      );
+      final rawDescLines =
+          (prefs.getInt(_kDescriptionLines) ?? defaultTextLines).clamp(
+            1,
+            maxTextLines,
+          );
       final rawReviewLines = (prefs.getInt(_kReviewLines) ?? defaultTextLines)
           .clamp(1, maxTextLines);
       state = ShelfPrefs(
         coverRadius: rawRadius,
-        columns: _enumByName(
-              ShelfColumnCount.values,
-              prefs.getString(_kColumns),
-            ) ??
+        columns:
+            _enumByName(ShelfColumnCount.values, prefs.getString(_kColumns)) ??
             ShelfColumnCount.auto,
-        plankStyle: _enumByName(
+        plankStyle:
+            _enumByName(
               ShelfPlankStyle.values,
               prefs.getString(_kPlankStyle),
             ) ??
-            ShelfPlankStyle.wood,
-        sortField: _enumByName(
-              ShelfSortField.values,
-              prefs.getString(_kSortField),
-            ) ??
+            ShelfPlankStyle.none,
+        sortField:
+            _enumByName(ShelfSortField.values, prefs.getString(_kSortField)) ??
             ShelfSortField.lastOpened,
         sortAscending: prefs.getBool(_kSortAsc) ?? false,
         showGridProgress: prefs.getBool(_kShowGridProgress) ?? true,
+        showGridTitle: prefs.getBool(_kShowGridTitle) ?? true,
         showRating: prefs.getBool(_kShowRating) ?? false,
         showTags: prefs.getBool(_kShowTags) ?? false,
         showDescription: prefs.getBool(_kShowDescription) ?? false,
@@ -424,6 +432,15 @@ class ShelfPrefsController extends _$ShelfPrefsController {
       state = state.copyWith(showGridProgress: value);
     }
     await _write((p) => p.setBool(_kShowGridProgress, value));
+  }
+
+  /// 网格是否显示书名。
+  Future<void> setShowGridTitle(bool value) async {
+    _userChanged = true;
+    if (state.showGridTitle != value) {
+      state = state.copyWith(showGridTitle: value);
+    }
+    await _write((p) => p.setBool(_kShowGridTitle, value));
   }
 
   /// 列表行是否显示星级。

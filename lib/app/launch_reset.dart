@@ -4,7 +4,7 @@
 /// `launchMode=singleTop` 走 `onNewIntent`，原生经 `qyreader/launch` 通道
 /// 通知这里。
 /// - 正在阅读：**保持阅读页**（用户要求切后台回来不要合书）；
-/// - 不在阅读页（书架/统计/设置）：回书架首屏。
+/// - 不在阅读页（首页/书架/统计/设置）：回首页。
 /// 冷启动本来就从 `/` 开始；从文件管理器/深链进来的不归位。
 library;
 
@@ -32,7 +32,7 @@ class LaunchReset {
         // 阅读页处于活动状态时忽略归位，仍然停在阅读界面。
         final active = activeReaderBookSync() ?? await activeReaderBook();
         if (active != null && active.isNotEmpty) return null;
-        // 不在阅读页：沿用「点图标回书架」的旧行为。
+        // 不在阅读页：回到主框架（`/` 的默认 Tab 是首页）。
         router.go(kShelfPath);
       }
       return null;

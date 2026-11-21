@@ -14,8 +14,8 @@ import '../../domain/repositories/search_repository.dart';
 class SearchRepositoryImpl implements SearchRepository {
   /// 构造：注入数据库与书籍仓储（懒重建时取书源文件）。
   SearchRepositoryImpl({required AppDatabase db, required BookRepository books})
-      : _db = db,
-        _books = books;
+    : _db = db,
+      _books = books;
 
   final AppDatabase _db;
   final BookRepository _books;
@@ -26,10 +26,9 @@ class SearchRepositoryImpl implements SearchRepository {
     List<(int, String, String, String)> chapters,
   ) async {
     await _db.transaction(() async {
-      await _db.customStatement(
-        'DELETE FROM book_fts WHERE book_id = ?',
-        [bookId],
-      );
+      await _db.customStatement('DELETE FROM book_fts WHERE book_id = ?', [
+        bookId,
+      ]);
       for (final (idx, href, title, body) in chapters) {
         if (body.isEmpty) continue;
         await _db.customInsert(
@@ -49,10 +48,12 @@ class SearchRepositoryImpl implements SearchRepository {
 
   @override
   Future<bool> hasIndex(String bookId) async {
-    final rows = await _db.customSelect(
-      'SELECT COUNT(*) AS n FROM book_fts WHERE book_id = ?',
-      variables: [Variable(bookId)],
-    ).get();
+    final rows = await _db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM book_fts WHERE book_id = ?',
+          variables: [Variable(bookId)],
+        )
+        .get();
     return (rows.first.data['n'] as int? ?? 0) > 0;
   }
 
@@ -73,30 +74,43 @@ class SearchRepositoryImpl implements SearchRepository {
       // SQLite 里双引号是标识符，字符串字面量必须单引号
       const snippetArg = '\u3010';
       const snippetEnd = '\u3011';
-      final rows = await _db.customSelect(
-        'SELECT chapter_idx, href, title, '
-        "snippet(book_fts, 4, '$snippetArg', '$snippetEnd', '…', 12) AS snip "
-        'FROM book_fts WHERE book_fts MATCH ? AND book_id = ? '
-        'ORDER BY rank LIMIT ?',
-        variables: [Variable(q), Variable(bookId), Variable(limit)],
-      ).get();
+      final rows = await _db
+          .customSelect(
+            'SELECT chapter_idx, href, title, '
+            'instr(lower(body), lower(?)) - 1 AS pos, '
+            "snippet(book_fts, 4, '$snippetArg', '$snippetEnd', '…', 12) AS snip "
+            'FROM book_fts WHERE book_fts MATCH ? AND book_id = ? '
+            'ORDER BY rank LIMIT ?',
+            variables: [
+              Variable(q),
+              Variable(q),
+              Variable(bookId),
+              Variable(limit),
+            ],
+          )
+          .get();
       for (final row in rows) {
-        hits.add(BookSearchHit(
-          chapterIdx: row.data['chapter_idx'] as int,
-          href: row.data['href'] as String,
-          chapterTitle: (row.data['title'] as String?) ?? '',
-          snippet: (row.data['snip'] as String?) ?? '',
-        ));
+        hits.add(
+          BookSearchHit(
+            chapterIdx: row.data['chapter_idx'] as int,
+            href: row.data['href'] as String,
+            chapterTitle: (row.data['title'] as String?) ?? '',
+            snippet: (row.data['snip'] as String?) ?? '',
+            offset: (row.data['pos'] as int? ?? 0).clamp(0, 1 << 30).toInt(),
+          ),
+        );
       }
       return hits;
     }
 
     // LIKE 降级：手工截取命中上下文
-    final rows = await _db.customSelect(
-      'SELECT chapter_idx, href, title, body FROM book_fts '
-      'WHERE book_id = ? ORDER BY chapter_idx',
-      variables: [Variable(bookId)],
-    ).get();
+    final rows = await _db
+        .customSelect(
+          'SELECT chapter_idx, href, title, body FROM book_fts '
+          'WHERE book_id = ? ORDER BY chapter_idx',
+          variables: [Variable(bookId)],
+        )
+        .get();
     for (final row in rows) {
       final body = row.data['body'] as String? ?? '';
       final lowerBody = body.toLowerCase();
@@ -106,16 +120,19 @@ class SearchRepositoryImpl implements SearchRepository {
       final start = (idx - 20).clamp(0, body.length);
       final end = (idx + q.length + 20).clamp(0, body.length);
       final snip = body.substring(start, end);
-      hits.add(BookSearchHit(
-        chapterIdx: row.data['chapter_idx'] as int,
-        href: row.data['href'] as String,
-        chapterTitle: (row.data['title'] as String?) ?? '',
-        snippet: snip.replaceRange(
-          idx - start,
-          idx - start + q.length,
-          '\u3010${body.substring(idx, idx + q.length)}\u3011',
+      hits.add(
+        BookSearchHit(
+          chapterIdx: row.data['chapter_idx'] as int,
+          href: row.data['href'] as String,
+          chapterTitle: (row.data['title'] as String?) ?? '',
+          snippet: snip.replaceRange(
+            idx - start,
+            idx - start + q.length,
+            '\u3010${body.substring(idx, idx + q.length)}\u3011',
+          ),
+          offset: idx,
         ),
-      ));
+      );
       if (hits.length >= limit) break;
     }
     return hits;
@@ -129,12 +146,8 @@ class SearchRepositoryImpl implements SearchRepository {
     if (book == null) return;
     final bytes = await File(book.filePath).readAsBytes();
     final parsed = await parseEpubInIsolate(bytes, book.title);
-    await indexBook(
-      bookId,
-      [
-        for (final c in parsed.chapters)
-          (c.idx, c.href, c.title, c.bodyText),
-      ],
-    );
+    await indexBook(bookId, [
+      for (final c in parsed.chapters) (c.idx, c.href, c.title, c.bodyText),
+    ]);
   }
 }
